@@ -59,7 +59,11 @@ class DocIndex:
 
         for pdf_path in sorted(self.docs_dir.rglob("*.pdf")):
             rel_path = str(pdf_path.relative_to(self.docs_dir))
-            text, total_pages = _extract_text(str(pdf_path))
+            try:
+                text, total_pages = _extract_text(str(pdf_path))
+            except Exception:
+                logger.exception("Failed to read %s, skipping", rel_path)
+                continue
             if not text:
                 logger.warning("No text extracted from %s, skipping", rel_path)
                 continue
