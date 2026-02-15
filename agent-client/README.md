@@ -1,25 +1,27 @@
 # Agent Client — Access Governance Assistant
 
 LangGraph ReAct agent that answers user questions about the Access Governance
-application by consulting PDF documentation served via the
+application by consulting PDF documentation served via an
 [MCP docs server](../mcp-server/).
 
 ## Architecture
 
 ```
-User  ──▶  CLI (agent-client)  ──▶  LangGraph ReAct agent
-                                         │
-                                    AzureOpenAI LLM
-                                         │
-                                    MCP tools (stdio)
-                                         │
-                                  mcp-docs-server
-                                    (PDF index)
+                          agent-client                    mcp-server
+                     ┌─────────────────────┐        ┌──────────────────┐
+User  ──▶  CLI  ──▶  │  LangGraph ReAct    │──SSE──▶│  MCP docs server │
+                     │  agent              │  or    │  (PDF index)     │
+                     │      │              │ stdio  │                  │
+                     │  AzureOpenAI LLM    │        │  host:port       │
+                     └─────────────────────┘        └──────────────────┘
 ```
 
-The agent connects to `mcp-docs-server` over **stdio**, loads three tools
-(`list_topics`, `search_docs`, `read_page`), and uses them in a ReAct loop
-to answer questions with cited sources.
+The agent connects to an **already-running** MCP server over **SSE** (default)
+or **stdio**, loads three tools (`list_topics`, `search_docs`, `read_page`),
+and uses them in a ReAct loop to answer questions with cited sources.
+
+The client is completely decoupled from the server — it does **not** start or
+manage the server. The server may be running on a different host.
 
 ## Setup
 
@@ -31,21 +33,36 @@ uv pip install -e .
 
 ## Configuration
 
-Create a `.env` file in the `agent-client/` directory:
+Copy the example and fill in your values:
 
-```env
-AZURE_OPENAI_API_KEY=your-api-key
-AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-AZURE_OPENAI_DEPLOYMENT=gpt-4o
-AZURE_OPENAI_API_VERSION=2024-12-01-preview
-
-# Optional
-AGENT_LOG_LEVEL=INFO          # DEBUG, INFO, WARNING, ERROR
-MCP_SERVER_COMMAND=uv         # override MCP server command
-MCP_SERVER_ARGS=run --directory ../mcp-server mcp-docs-server
+```bash
+cp .env.example .env
 ```
 
+Key variables:
+
+| Variable | Description | Default |
+|---|---|---|
+| `AZURE_OPENAI_API_KEY` | Azure OpenAI API key | *(required)* |
+| `AZURE_OPENAI_ENDPOINT` | Azure OpenAI endpoint URL | *(required)* |
+| `AZURE_OPENAI_DEPLOYMENT` | Deployment name (e.g. `gpt-4o`) | *(required)* |
+| `AZURE_OPENAI_API_VERSION` | API version | `2024-12-01-preview` |
+| `AGENT_LOG_LEVEL` | Logging level | `INFO` |
+| `MCP_TRANSPORT` | `sse` or `stdio` | `sse` |
+| `MCP_SERVER_URL` | Server URL (SSE only) | `http://127.0.0.1:8000/sse` |
+| `MCP_SERVER_COMMAND` | Command to pipe (stdio only) | — |
+| `MCP_SERVER_ARGS` | Command args (stdio only) | — |
+
 ## Usage
+
+**1. Start the MCP server** (in a separate terminal):
+
+```bash
+cd ../mcp-server
+MCP_TRANSPORT=sse uv run mcp-docs-server
+```
+
+**2. Start the agent client**:
 
 ```bash
 uv run agent-client
@@ -71,7 +88,8 @@ Goodbye!
 ```
 agent-client/
 ├── pyproject.toml
-├── .env                          # your Azure credentials (git-ignored)
+├── .env.example                  # sample configuration
+├── .env                          # your credentials (git-ignored)
 ├── src/
 │   └── agent_client/
 │       ├── __init__.py

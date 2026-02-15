@@ -1,13 +1,15 @@
-"""LangGraph ReAct agent wired to the MCP docs server.
+"""LangGraph ReAct agent that connects to a remote MCP docs server.
 
-The agent connects to the MCP server over stdio, loads the three
-documentation tools (list_topics, search_docs, read_page), and wraps
-them in a ReAct loop powered by AzureOpenAI.
+The agent connects to an already-running MCP server (stdio or SSE),
+loads the documentation tools, and wraps them in a ReAct loop powered
+by AzureOpenAI.
+
+The MCP server must be started separately — this client does NOT
+manage the server lifecycle.
 """
 
 import logging
 import os
-from pathlib import Path
 
 from langchain_core.messages import HumanMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -16,12 +18,6 @@ from langgraph.prebuilt import create_react_agent
 from agent_client.llm import get_llm
 
 logger = logging.getLogger("agent_client.agent")
-
-# ---------------------------------------------------------------------------
-# MCP server command — resolve path relative to this repo
-# ---------------------------------------------------------------------------
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_MCP_SERVER_DIR = _REPO_ROOT / "mcp-server"
 
 SYSTEM_PROMPT = (
     "You are an Access Governance assistant. You help users understand and "
@@ -40,22 +36,48 @@ SYSTEM_PROMPT = (
 
 
 def _get_mcp_server_config() -> dict:
-    """Build the MCP server connection config."""
-    # Allow overriding the server command via env vars
-    command = os.environ.get("MCP_SERVER_COMMAND", "uv")
-    args_str = os.environ.get(
-        "MCP_SERVER_ARGS",
-        f"run --directory {_MCP_SERVER_DIR} mcp-docs-server",
-    )
-    args = args_str.split()
+    """Build the MCP server connection config from environment variables.
 
-    return {
-        "access-governance-docs": {
-            "command": command,
-            "args": args,
-            "transport": "stdio",
+    Supported transports:
+        sse   — connects to a running MCP server over HTTP/SSE
+                Requires MCP_SERVER_URL (e.g. http://host:8000/sse)
+        stdio — connects to a running MCP server via stdin/stdout pipe
+                Requires MCP_SERVER_COMMAND (e.g. "uv") and
+                MCP_SERVER_ARGS (e.g. "run --directory ../mcp-server mcp-docs-server")
+    """
+    transport = os.environ.get("MCP_TRANSPORT", "sse").lower()
+
+    if transport == "sse":
+        url = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8000/sse")
+        logger.info("MCP transport=sse  url=%s", url)
+        return {
+            "access-governance-docs": {
+                "url": url,
+                "transport": "sse",
+            }
         }
-    }
+
+    if transport == "stdio":
+        command = os.environ.get("MCP_SERVER_COMMAND")
+        args_str = os.environ.get("MCP_SERVER_ARGS", "")
+        if not command:
+            raise ValueError(
+                "MCP_TRANSPORT=stdio requires MCP_SERVER_COMMAND to be set "
+                "(e.g. MCP_SERVER_COMMAND=uv)"
+            )
+        args = args_str.split() if args_str else []
+        logger.info("MCP transport=stdio  command=%s args=%s", command, args)
+        return {
+            "access-governance-docs": {
+                "command": command,
+                "args": args,
+                "transport": "stdio",
+            }
+        }
+
+    raise ValueError(
+        f"Unsupported MCP_TRANSPORT={transport!r}. Use 'sse' or 'stdio'."
+    )
 
 
 async def run_agent_loop(on_response=None):
@@ -71,7 +93,7 @@ async def run_agent_loop(on_response=None):
     llm = get_llm()
     mcp_config = _get_mcp_server_config()
 
-    logger.info("Connecting to MCP server: %s", mcp_config)
+    logger.info("Connecting to MCP server …")
 
     async with MultiServerMCPClient(mcp_config) as client:
         tools = client.get_tools()
@@ -108,4 +130,7 @@ async def run_agent_loop(on_response=None):
                 on_response(f"\nAssistant: {answer}\n")
             except Exception:
                 logger.exception("Error processing query")
-                on_response("\nAssistant: Sorry, an error occurred while processing your question. Please try again.\n")
+                on_response(
+                    "\nAssistant: Sorry, an error occurred while "
+                    "processing your question. Please try again.\n"
+                )
