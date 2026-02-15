@@ -23,13 +23,36 @@ and uses them in a ReAct loop to answer questions with cited sources.
 The client is completely decoupled from the server — it does **not** start or
 manage the server. The server may be running on a different host.
 
+## Prerequisites
+
+- Python >= 3.10
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager
+
+Install uv if you don't have it:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
 ## Setup
 
 ```bash
+# 1. Clone the repository
+git clone <repo-url> agent-client
 cd agent-client
-uv venv && source .venv/bin/activate
-uv pip install -e .
+
+# 2. Create and activate a virtual environment
+uv venv
+source .venv/bin/activate        # Linux / macOS
+# .venv\Scripts\activate          # Windows
+
+# 3. Install dependencies
+uv sync
 ```
+
+`uv sync` reads `pyproject.toml`, installs all dependencies into the virtual
+environment, and downloads the pinned Python version (from `.python-version`)
+automatically if needed.
 
 ## Configuration
 

@@ -37,7 +37,7 @@ agents. Built with [FastMCP](https://github.com/modelcontextprotocol/python-sdk)
 2. **Agent queries** — An agent connects over MCP (stdio or SSE transport) and
    calls tools to browse, search, and read documentation.
 3. **Response flow** — The agent calls `list_topics` or `search_docs` to find
-   relevant documents, `read_page` to retrieve full content, then synthesizes
+   relevant documents, `read_page` to retrieve full content, then synthesises
    an answer for the user.
 
 ## Tools
@@ -50,7 +50,10 @@ agents. Built with [FastMCP](https://github.com/modelcontextprotocol/python-sdk)
 
 ## Prerequisites
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/):
+- Python >= 3.10
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager
+
+Install uv if you don't have it:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -59,13 +62,22 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ## Setup
 
 ```bash
+# 1. Clone the repository
+git clone <repo-url> mcp-server
 cd mcp-server
+
+# 2. Create and activate a virtual environment
+uv venv
+source .venv/bin/activate        # Linux / macOS
+# .venv\Scripts\activate          # Windows
+
+# 3. Install dependencies
 uv sync
 ```
 
-This reads `pyproject.toml`, creates a `.venv/` virtual environment, and
-installs all dependencies. The Python version is pinned by `.python-version`;
-uv will download it automatically if needed.
+`uv sync` reads `pyproject.toml`, installs all dependencies into the virtual
+environment, and downloads the pinned Python version (from `.python-version`)
+automatically if needed.
 
 ## Configuration
 
@@ -139,8 +151,6 @@ uv run python tester.py --interactive # interactive search loop
 | [pymupdf](https://pymupdf.readthedocs.io/) | >= 1.25.0 | PDF text extraction |
 | [rank-bm25](https://github.com/dorianbrown/rank_bm25) | >= 0.2.2 | BM25Okapi full-text search ranking |
 | [python-dotenv](https://github.com/theskumar/python-dotenv) | >= 1.0.0 | Load `.env` files into environment |
-
-Python >= 3.10 is required.
 
 ## Project Structure
 
