@@ -7,7 +7,11 @@ dependencies = [
     "mcp[cli]>=1.0.0",
     "pymupdf>=1.25.0",
     "rank-bm25>=0.2.2",
+    "python-dotenv>=1.0.0",
 ]
+
+[project.scripts]
+mcp-docs-server = "mcp_docs_server.server:main"
 
 [build-system]
 requires = ["hatchling"]

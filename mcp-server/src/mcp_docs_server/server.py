@@ -6,15 +6,25 @@ Exposes three tools to LangGraph agents:
   - read_page: retrieve the full text of a specific document
 
 Run with:
-    uv run server.py
+    uv run mcp-docs-server
 """
 
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-from indexer import DocIndex
+
+from mcp_docs_server.indexer import DocIndex
+
+# Load environment variables from .env file (project root = mcp-server/)
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 # Allow overriding the docs directory via environment variable
-DOCS_DIR = os.environ.get("MCP_DOCS_DIR", os.path.join(os.path.dirname(__file__), "docs"))
+DOCS_DIR = os.environ.get(
+    "MCP_DOCS_DIR",
+    str(Path(__file__).resolve().parents[2] / "docs"),
+)
 
 mcp = FastMCP(
     "access-governance-docs",
@@ -66,5 +76,10 @@ def read_page(page_path: str) -> dict:
     return index.read(page_path)
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the MCP server."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()
