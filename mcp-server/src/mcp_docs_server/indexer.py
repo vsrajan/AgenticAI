@@ -1,11 +1,14 @@
 """PDF document indexer with BM25 search support."""
 
+import logging
 import os
 import re
 from pathlib import Path
 
 import pymupdf
 from rank_bm25 import BM25Okapi
+
+logger = logging.getLogger("mcp_docs_server.indexer")
 
 
 def _tokenize(text: str) -> list[str]:
@@ -49,16 +52,21 @@ class DocIndex:
     def _build_index(self) -> None:
         """Scan the docs directory, extract text, and build the BM25 index."""
         if not self.docs_dir.exists():
+            logger.warning("Docs directory does not exist: %s", self.docs_dir)
             return
+
+        logger.info("Scanning for PDFs in %s", self.docs_dir)
 
         for pdf_path in sorted(self.docs_dir.rglob("*.pdf")):
             rel_path = str(pdf_path.relative_to(self.docs_dir))
             text, total_pages = _extract_text(str(pdf_path))
             if not text:
+                logger.warning("No text extracted from %s, skipping", rel_path)
                 continue
 
             self._documents[rel_path] = text
             self._page_counts[rel_path] = total_pages
+            logger.debug("Indexed %s (%d pages)", rel_path, total_pages)
 
             # Build topic tree from directory structure.
             # Files in subdirectories are grouped by directory name.
@@ -72,6 +80,13 @@ class DocIndex:
         if self._doc_keys:
             corpus = [_tokenize(self._documents[k]) for k in self._doc_keys]
             self._bm25 = BM25Okapi(corpus)
+            logger.info(
+                "BM25 index built: %d documents, %d topics",
+                len(self._doc_keys),
+                len(self._topic_tree),
+            )
+        else:
+            logger.warning("No documents found to index")
 
     def get_topic_tree(self) -> dict:
         """Return the topic tree: topics mapped to their page paths."""
