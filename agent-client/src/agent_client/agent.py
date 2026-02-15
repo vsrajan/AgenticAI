@@ -45,13 +45,14 @@ def _get_mcp_server_config() -> dict:
                 Requires MCP_SERVER_COMMAND (e.g. "uv") and
                 MCP_SERVER_ARGS (e.g. "run --directory ../mcp-server mcp-docs-server")
     """
+    server_name = os.environ.get("MCP_SERVER_NAME", "access-governance-docs")
     transport = os.environ.get("MCP_TRANSPORT", "sse").lower()
 
     if transport == "sse":
         url = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8000/sse")
-        logger.info("MCP transport=sse  url=%s", url)
+        logger.info("MCP server=%s transport=sse url=%s", server_name, url)
         return {
-            "access-governance-docs": {
+            server_name: {
                 "url": url,
                 "transport": "sse",
             }
@@ -66,9 +67,9 @@ def _get_mcp_server_config() -> dict:
                 "(e.g. MCP_SERVER_COMMAND=uv)"
             )
         args = args_str.split() if args_str else []
-        logger.info("MCP transport=stdio  command=%s args=%s", command, args)
+        logger.info("MCP server=%s transport=stdio command=%s args=%s", server_name, command, args)
         return {
-            "access-governance-docs": {
+            server_name: {
                 "command": command,
                 "args": args,
                 "transport": "stdio",
