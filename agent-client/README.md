@@ -48,6 +48,7 @@ Key variables:
 | `AZURE_OPENAI_DEPLOYMENT` | Deployment name (e.g. `gpt-4o`) | *(required)* |
 | `AZURE_OPENAI_API_VERSION` | API version | `2024-12-01-preview` |
 | `AGENT_LOG_LEVEL` | Logging level | `INFO` |
+| `MCP_SERVER_NAME` | Server name (must match the MCP server) | `access-governance-docs` |
 | `MCP_TRANSPORT` | `sse` or `stdio` | `sse` |
 | `MCP_SERVER_URL` | Server URL (SSE only) | `http://127.0.0.1:8000/sse` |
 | `MCP_SERVER_COMMAND` | Command to pipe (stdio only) | — |
