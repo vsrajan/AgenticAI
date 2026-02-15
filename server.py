@@ -6,9 +6,7 @@ Exposes three tools to LangGraph agents:
   - read_page: retrieve the full text of a specific document
 
 Run with:
-    python server.py
-    # or
-    mcp run server.py
+    uv run server.py
 """
 
 import os
