@@ -1,0 +1,14 @@
+[project]
+name = "mcp-docs-server"
+version = "0.1.0"
+description = "MCP server that serves PDF documentation to LangGraph agents"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.0.0",
+    "pymupdf>=1.25.0",
+    "rank-bm25>=0.2.2",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
