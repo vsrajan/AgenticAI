@@ -26,8 +26,15 @@ DOCS_DIR = os.environ.get(
     str(Path(__file__).resolve().parents[2] / "docs"),
 )
 
+# Transport configuration
+MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio")
+MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
+MCP_PORT = int(os.environ.get("MCP_PORT", "8000"))
+
 mcp = FastMCP(
     "access-governance-docs",
+    host=MCP_HOST,
+    port=MCP_PORT,
     instructions=(
         "This server provides documentation for an enterprise Access Governance "
         "application. Use list_topics to see what's available, search_docs to find "
@@ -78,7 +85,7 @@ def read_page(page_path: str) -> dict:
 
 def main():
     """Entry point for the MCP server."""
-    mcp.run()
+    mcp.run(transport=MCP_TRANSPORT)
 
 
 if __name__ == "__main__":
