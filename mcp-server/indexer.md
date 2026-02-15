@@ -58,15 +58,17 @@ After startup, everything lives in memory. There is no database, no disk-based i
 ## Step 1 — Extracting Text from PDFs
 
 ```python
-def _extract_text(pdf_path: str) -> str:
+def _extract_text(pdf_path: str) -> tuple[str, int]:
     doc = pymupdf.open(pdf_path)
-    pages = []
+    pages: list[str] = []
     for page in doc:
         text = page.get_text("text")
         if text.strip():
-            pages.append(text.strip())
+            # page.number is 0-based; display as 1-based
+            pages.append(f"[Page {page.number + 1}]\n{text.strip()}")
+    total_pages = len(doc)
     doc.close()
-    return "\n\n".join(pages)
+    return "\n\n".join(pages), total_pages
 ```
 
 PDFs are not plain text files — they are a complex binary format that describes where to draw shapes, images, and individual characters on a page. You cannot just "read" a PDF like a `.txt` file.
@@ -77,13 +79,20 @@ PDFs are not plain text files — they are a complex binary format that describe
 2. We loop over every page in the document.
 3. `page.get_text("text")` extracts the text content of that page as a plain string. The `"text"` argument means "give me just the text, no formatting or layout information."
 4. We skip empty pages (`if text.strip()`).
-5. We join all pages with double newlines to produce one big string per PDF.
+5. Each page's text is prefixed with a **`[Page N]` marker** (1-based) so that downstream LLM agents can cite the exact PDF page when answering questions.
+6. We join all pages with double newlines to produce one big string per PDF.
+7. We also return the **total page count** of the PDF (including any blank pages), which is included in search and read responses as metadata.
 
-**Example:** A 3-page PDF about entitlements produces a single string like:
+**Example:** A 3-page PDF about entitlements produces a tuple like:
 
+```python
+(
+    "[Page 1]\nPage 1 content here...\n\n[Page 2]\nPage 2 content here...\n\n[Page 3]\nPage 3 content here...",
+    3
+)
 ```
-"Page 1 content here...\n\nPage 2 content here...\n\nPage 3 content here..."
-```
+
+The `[Page N]` markers remain in the stored text and flow through to `search_docs` snippets and `read_page` content, enabling the agent to cite sources precisely (e.g. *"Source: ordering_faq.pdf, Page 3"*).
 
 ---
 
@@ -117,24 +126,35 @@ When `DocIndex.__init__` is called, it immediately calls `_build_index()`, which
 ### The Documents Dictionary
 
 ```python
-self._documents: dict[str, str] = {}  # path -> extracted text
+self._documents: dict[str, str] = {}    # path -> extracted text (with [Page N] markers)
+self._page_counts: dict[str, int] = {}  # path -> total PDF pages
 ```
 
-A simple dictionary mapping each PDF's **relative path** to its **full extracted text**.
+`_documents` is a dictionary mapping each PDF's **relative path** to its **full extracted text** (which includes `[Page N]` markers). `_page_counts` maps each path to the total number of pages in the PDF, used as metadata in tool responses.
 
 **Example contents:**
 
 ```python
+# _documents
 {
-    "entitlements/ordering_faq.pdf": "How to order entitlements...(full text)...",
-    "entitlements/bulk_requests.pdf": "Bulk entitlement requests...(full text)...",
-    "delegations/setup_guide.pdf":   "Setting up delegations...(full text)...",
-    "jml/leaver_process.pdf":        "When an employee leaves...(full text)...",
-    "general_overview.pdf":          "This application provides...(full text)...",
+    "entitlements/ordering_faq.pdf": "[Page 1]\nHow to order entitlements...\n\n[Page 2]\n...",
+    "entitlements/bulk_requests.pdf": "[Page 1]\nBulk entitlement requests...",
+    "delegations/setup_guide.pdf":   "[Page 1]\nSetting up delegations...\n\n[Page 2]\n...",
+    "jml/leaver_process.pdf":        "[Page 1]\nWhen an employee leaves...",
+    "general_overview.pdf":          "[Page 1]\nThis application provides...",
+}
+
+# _page_counts
+{
+    "entitlements/ordering_faq.pdf": 5,
+    "entitlements/bulk_requests.pdf": 2,
+    "delegations/setup_guide.pdf": 8,
+    "jml/leaver_process.pdf": 3,
+    "general_overview.pdf": 1,
 }
 ```
 
-This is the **primary store** of all document content. Every other data structure references back to the keys in this dictionary.
+`_documents` is the **primary store** of all document content (with embedded page markers). Every other data structure references back to the keys in this dictionary. `_page_counts` provides the total page count for each PDF, included in API responses so agents know how large each document is.
 
 ### The Topic Tree
 
@@ -327,26 +347,34 @@ Step by step:
 [
     {
         "page_path": "delegations/setup_guide.pdf",
+        "total_pages": 8,
         "score": 8.42,
-        "snippet": "...To set up delegations, navigate to the admin panel and select..."
+        "snippet": "...[Page 2]\nTo set up delegations, navigate to the admin panel and select..."
     },
     {
         "page_path": "general_overview.pdf",
+        "total_pages": 1,
         "score": 0.31,
-        "snippet": "...the application supports entitlements, delegations, and JML..."
+        "snippet": "...[Page 1]\nthe application supports entitlements, delegations, and JML..."
     }
 ]
 ```
+
+Each result includes `total_pages` (the total number of pages in the source PDF) and snippets may contain `[Page N]` markers so the agent knows exactly which page the matching text came from.
 
 ### `read_page(page_path)` — Full-Text Retrieval
 
 ```python
 def read(self, page_path: str) -> dict:
     if page_path in self._documents:
-        return {"page_path": page_path, "content": self._documents[page_path]}
+        return {
+            "page_path": page_path,
+            "total_pages": self._page_counts[page_path],
+            "content": self._documents[page_path],
+        }
 ```
 
-This is a simple dictionary lookup — given a path like `"delegations/setup_guide.pdf"`, it returns the complete extracted text of that document.
+This is a simple dictionary lookup — given a path like `"delegations/setup_guide.pdf"`, it returns the complete extracted text of that document (with `[Page N]` markers throughout) and the total page count.
 
 It also includes a **fuzzy match fallback**: if the exact path isn't found, it checks whether any stored key ends with the given path or has the same filename stem. This is forgiving if the agent passes just `"setup_guide"` instead of `"delegations/setup_guide.pdf"`.
 
@@ -405,13 +433,20 @@ docs/
 **2. `DocIndex("docs/")` is created.** `_build_index()` runs:
 
 - Finds 3 PDF files via `rglob("*.pdf")`.
-- Calls `_extract_text()` on each, producing 3 text strings.
-- Stores them in `_documents`:
+- Calls `_extract_text()` on each, producing 3 `(text, total_pages)` tuples. The text includes `[Page N]` markers.
+- Stores the text in `_documents` and the page counts in `_page_counts`:
   ```python
+  # _documents
   {
-      "delegations/setup_guide.pdf": "Setting up delegations...",
-      "entitlements/ordering_faq.pdf": "How to order entitlements...",
-      "overview.pdf": "This application provides...",
+      "delegations/setup_guide.pdf": "[Page 1]\nSetting up delegations...",
+      "entitlements/ordering_faq.pdf": "[Page 1]\nHow to order entitlements...",
+      "overview.pdf": "[Page 1]\nThis application provides...",
+  }
+  # _page_counts
+  {
+      "delegations/setup_guide.pdf": 4,
+      "entitlements/ordering_faq.pdf": 3,
+      "overview.pdf": 1,
   }
   ```
 - Builds `_topic_tree`:
@@ -440,7 +475,8 @@ docs/
 
 | Attribute | Type | What It Holds | Used By |
 |---|---|---|---|
-| `_documents` | `dict[str, str]` | `"relative/path.pdf"` → full extracted text | `read_page`, `search_docs` (for snippets) |
+| `_documents` | `dict[str, str]` | `"relative/path.pdf"` → full extracted text with `[Page N]` markers | `read_page`, `search_docs` (for snippets) |
+| `_page_counts` | `dict[str, int]` | `"relative/path.pdf"` → total number of PDF pages | `read_page`, `search_docs` (returned as metadata) |
 | `_topic_tree` | `dict[str, list[str]]` | `"topic_name"` → list of document paths | `list_topics` |
 | `_bm25` | `BM25Okapi` | Internal term-frequency index over all documents | `search_docs` |
 | `_doc_keys` | `list[str]` | Ordered list of document paths (matches BM25 corpus order) | `search_docs` (to map BM25 scores back to document paths) |
