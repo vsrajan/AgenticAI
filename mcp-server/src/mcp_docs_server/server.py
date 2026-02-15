@@ -48,12 +48,14 @@ DOCS_DIR = os.environ.get(
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio")
 MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.environ.get("MCP_PORT", "8000"))
+MCP_SERVER_NAME = os.environ.get("MCP_SERVER_NAME", "access-governance-docs")
 
 logger.info("Docs directory: %s", DOCS_DIR)
+logger.info("Server name: %s", MCP_SERVER_NAME)
 logger.info("Transport: %s (host=%s, port=%d)", MCP_TRANSPORT, MCP_HOST, MCP_PORT)
 
 mcp = FastMCP(
-    "access-governance-docs",
+    MCP_SERVER_NAME,
     host=MCP_HOST,
     port=MCP_PORT,
     log_level=LOG_LEVEL,
