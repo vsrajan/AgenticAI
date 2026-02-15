@@ -13,16 +13,25 @@ def _tokenize(text: str) -> list[str]:
     return re.findall(r"\w+", text.lower())
 
 
-def _extract_text(pdf_path: str) -> str:
-    """Extract all text from a PDF file using PyMuPDF."""
+def _extract_text(pdf_path: str) -> tuple[str, int]:
+    """Extract all text from a PDF file using PyMuPDF.
+
+    Each page is prefixed with a ``[Page N]`` marker so that downstream
+    consumers (e.g. LLM agents) can cite the specific PDF page.
+
+    Returns:
+        A tuple of (full_text, total_page_count).
+    """
     doc = pymupdf.open(pdf_path)
-    pages = []
+    pages: list[str] = []
     for page in doc:
         text = page.get_text("text")
         if text.strip():
-            pages.append(text.strip())
+            # page.number is 0-based; display as 1-based
+            pages.append(f"[Page {page.number + 1}]\n{text.strip()}")
+    total_pages = len(doc)
     doc.close()
-    return "\n\n".join(pages)
+    return "\n\n".join(pages), total_pages
 
 
 class DocIndex:
@@ -31,6 +40,7 @@ class DocIndex:
     def __init__(self, docs_dir: str) -> None:
         self.docs_dir = Path(docs_dir)
         self._documents: dict[str, str] = {}  # path -> extracted text
+        self._page_counts: dict[str, int] = {}  # path -> total PDF pages
         self._topic_tree: dict[str, list[str]] = {}  # topic -> [filenames]
         self._bm25: BM25Okapi | None = None
         self._doc_keys: list[str] = []  # ordered keys matching BM25 corpus
@@ -43,11 +53,12 @@ class DocIndex:
 
         for pdf_path in sorted(self.docs_dir.rglob("*.pdf")):
             rel_path = str(pdf_path.relative_to(self.docs_dir))
-            text = _extract_text(str(pdf_path))
+            text, total_pages = _extract_text(str(pdf_path))
             if not text:
                 continue
 
             self._documents[rel_path] = text
+            self._page_counts[rel_path] = total_pages
 
             # Build topic tree from directory structure.
             # Files in subdirectories are grouped by directory name.
@@ -95,6 +106,7 @@ class DocIndex:
             snippet = _make_snippet(text, tokens)
             results.append({
                 "page_path": key,
+                "total_pages": self._page_counts[key],
                 "score": round(float(score), 3),
                 "snippet": snippet,
             })
@@ -108,6 +120,7 @@ class DocIndex:
         if page_path in self._documents:
             return {
                 "page_path": page_path,
+                "total_pages": self._page_counts[page_path],
                 "content": self._documents[page_path],
             }
 
@@ -116,6 +129,7 @@ class DocIndex:
             if key.endswith(page_path) or Path(key).stem == Path(page_path).stem:
                 return {
                     "page_path": key,
+                    "total_pages": self._page_counts[key],
                     "content": self._documents[key],
                 }
 

@@ -39,7 +39,9 @@ mcp = FastMCP(
         "This server provides documentation for an enterprise Access Governance "
         "application. Use list_topics to see what's available, search_docs to find "
         "relevant pages, and read_page to get the full content of a specific page. "
-        "Always search before reading to find the most relevant document."
+        "Always search before reading to find the most relevant document. "
+        "Document text includes [Page N] markers — always cite the source document "
+        "and page number when answering (e.g. 'Source: ordering_faq.pdf, Page 3')."
     ),
 )
 
@@ -62,6 +64,8 @@ def search_docs(query: str, max_results: int = 5) -> list[dict]:
 
     Uses full-text search to find the most relevant documents.
     Returns matching snippets with page paths that can be passed to read_page.
+    Each result includes the source PDF page_path and total_pages count.
+    Snippets contain [Page N] markers indicating the PDF page of the content.
 
     Args:
         query: The search query (e.g., "how to order entitlements",
@@ -76,6 +80,8 @@ def read_page(page_path: str) -> dict:
     """Read the full text content of a documentation page.
 
     Use a page_path from list_topics or search_docs results.
+    Content includes [Page N] markers for each PDF page so you can cite
+    the exact page number (e.g. "Source: ordering_faq.pdf, Page 3").
 
     Args:
         page_path: Path to the document (e.g., "entitlements/ordering_faq.pdf").
