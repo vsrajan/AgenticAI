@@ -117,7 +117,7 @@ async def run_agent_loop(on_response=None):
 
     while True:
         try:
-            user_input = input("You: ").strip()
+            user_input = input("🧑 You: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye!")
             break
@@ -138,7 +138,7 @@ async def run_agent_loop(on_response=None):
             # The last message is the assistant's final answer
             answer = response["messages"][-1].content
             logger.debug("Agent response: %s", answer)
-            on_response(f"\nAssistant: {answer}\n")
+            on_response(f"\n🤖 Assistant: {answer}\n")
         except Exception:
             logger.exception("Error processing query")
             on_response(
