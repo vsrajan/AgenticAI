@@ -1,27 +1,41 @@
 # Agent Client — Access Governance Assistant
 
-LangGraph ReAct agent that answers user questions about the Access Governance
-application by consulting PDF documentation served via an
-[MCP docs server](../mcp-server/).
+LangGraph ReAct agent that helps users find access rights, discover peer
+entitlements, and understand the Access Governance application by consulting
+PDF documentation and CSV data served via an
+[MCP server](../mcp-server/).
 
 ## Architecture
 
 ```
                           agent-client                    mcp-server
                      ┌─────────────────────┐        ┌──────────────────┐
-User  ──▶  CLI  ──▶  │  LangGraph ReAct    │──SSE──▶│  MCP docs server │
-                     │  agent              │  or    │  (PDF index)     │
+User  ──▶  CLI  ──▶  │  LangGraph ReAct    │──SSE──▶│  MCP server      │
+                     │  agent              │  or    │  (PDFs + CSVs)   │
                      │      │              │ stdio  │                  │
                      │  AzureOpenAI LLM    │        │  host:port       │
                      └─────────────────────┘        └──────────────────┘
 ```
 
 The agent connects to an **already-running** MCP server over **SSE** (default)
-or **stdio**, loads three tools (`list_topics`, `search_docs`, `read_page`),
-and uses them in a ReAct loop to answer questions with cited sources.
+or **stdio**, loads all available tools, and uses them in a ReAct loop to answer
+questions with cited sources and structured data.
 
 The client is completely decoupled from the server — it does **not** start or
 manage the server. The server may be running on a different host.
+
+## Features
+
+- **Documentation search** — Search and read PDF documentation with page-level
+  citations.
+- **Access rights lookup** — Search for access rights by name, description, or
+  category.
+- **Peer-based recommendations** — Find what access rights peers in the same OU
+  and/or location already have, with counts (e.g. "8 of 12 people in Finance /
+  London have this").
+- **Data exploration** — Discover available datasets, columns, and distinct
+  values to help users narrow their search.
+- **Conversation history** — Full multi-turn context via in-memory checkpointing.
 
 ## Prerequisites
 
@@ -77,6 +91,8 @@ Key variables:
 | `MCP_SERVER_COMMAND` | Command to pipe (stdio only) | — |
 | `MCP_SERVER_ARGS` | Command args (stdio only) | — |
 
+Set `AGENT_LOG_LEVEL=WARNING` to suppress verbose INFO logs on the client.
+
 ## Usage
 
 **1. Start the MCP server** (in a separate terminal):
@@ -99,11 +115,25 @@ Access Governance Assistant
 ========================================
 Type your question below. Type "exit" to quit.
 
-You: How do I order a new entitlement?
-Assistant: To order a new entitlement, navigate to the Access Governance portal...
+🧑 You: How do I order a new entitlement?
+
+🤖 Assistant: To order a new entitlement, navigate to the Access Governance portal...
 (Source: entitlements/ordering_faq.pdf, Page 1)
 
-You: exit
+🧑 You: What access rights do people in Finance / London have?
+
+🤖 Assistant: Based on the entitlements data, 12 people in Finance / London have
+the following access rights:
+- SAP Financial Reporting (12/12)
+- Budget Approval Portal (9/12)
+- Expense Management System (8/12)
+...
+
+🧑 You: Tell me more about SAP Financial Reporting
+
+🤖 Assistant: SAP Financial Reporting provides read-only access to...
+
+🧑 You: exit
 Goodbye!
 ```
 

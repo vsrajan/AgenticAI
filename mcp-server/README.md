@@ -1,7 +1,8 @@
-# MCP Docs Server — Access Governance Documentation
+# MCP Server — Access Governance Documentation & Data
 
-An MCP server that makes PDF documentation searchable and retrievable for AI
-agents. Built with [FastMCP](https://github.com/modelcontextprotocol/python-sdk).
+An MCP server that makes PDF documentation and CSV data searchable and
+retrievable for AI agents. Built with
+[FastMCP](https://github.com/modelcontextprotocol/python-sdk).
 
 ## Architecture
 
@@ -12,41 +13,54 @@ agents. Built with [FastMCP](https://github.com/modelcontextprotocol/python-sdk)
 │  ┌────────────────┐                  │
 │  │   server.py    │  MCP tools       │
 │  │  (FastMCP app) │  exposed over    │
-│  └───────┬────────┘  stdio / SSE     │
-│          │                           │
-│  ┌───────▼────────┐                  │
-│  │  indexer.py    │                  │
-│  │  (DocIndex)   │                  │
-│  │               │                  │
-│  │  - PDF parsing│                  │
-│  │  - BM25 index │                  │
-│  │  - Retrieval  │                  │
-│  └───────┬────────┘                  │
-│          │                           │
-│  ┌───────▼────────┐                  │
+│  └──┬─────────┬───┘  stdio / SSE    │
+│     │         │                      │
+│  ┌──▼──────┐ ┌▼───────────┐         │
+│  │pdf_     │ │csv_store.py│         │
+│  │indexer  │ │(CsvStore)  │         │
+│  │.py      │ │            │         │
+│  │- PDF    │ │- CSV parse │         │
+│  │  parse  │ │- BM25 index│         │
+│  │- BM25   │ │- Column    │         │
+│  │  index  │ │  filter    │         │
+│  └──┬──────┘ └┬───────────┘         │
+│     │         │                      │
+│  ┌──▼─────────▼──┐                  │
 │  │    docs/       │                  │
-│  │  (PDF files)   │                  │
+│  │ (PDFs & CSVs)  │                  │
 │  └────────────────┘                  │
 └──────────────────────────────────────┘
 ```
 
 ### How it works
 
-1. **Startup** — The server scans `docs/` for PDF files, extracts text using
-   PyMuPDF, and builds an in-memory BM25 search index.
+1. **Startup** — The server scans `docs/` for PDF files and CSV files. PDFs are
+   text-extracted using PyMuPDF and indexed with BM25. CSVs are loaded with
+   dynamic column discovery and each gets its own BM25 index.
 2. **Agent queries** — An agent connects over MCP (stdio or SSE transport) and
-   calls tools to browse, search, and read documentation.
-3. **Response flow** — The agent calls `list_topics` or `search_docs` to find
-   relevant documents, `read_page` to retrieve full content, then synthesises
-   an answer for the user.
+   calls tools to browse, search, and read documentation or query structured data.
+3. **Response flow** — The agent uses PDF tools to find and read documentation,
+   and CSV tools to search, filter, and explore structured datasets like access
+   rights metadata and user entitlements.
 
 ## Tools
+
+### PDF documentation tools
 
 | Tool | Description |
 |---|---|
 | `list_topics()` | Returns a tree of all available topics and their document paths. |
 | `search_docs(query, max_results=5)` | Full-text BM25 search across all indexed documents. Returns ranked results with snippets. |
 | `read_page(page_path)` | Retrieves the full extracted text of a specific PDF document. |
+
+### CSV data tools
+
+| Tool | Description |
+|---|---|
+| `list_datasets()` | Lists all loaded CSV datasets with their column names and row counts. |
+| `search_dataset(dataset, query, max_results=10)` | Full-text BM25 search across all columns of a named dataset. Returns matching rows ranked by relevance. |
+| `filter_dataset(dataset, filters)` | Filters rows by exact column values (case-insensitive). Accepts a dict of column-value pairs. |
+| `get_column_values(dataset, column)` | Lists all distinct values in a column. Useful for discovering available OUs, locations, categories, etc. |
 
 ## Prerequisites
 
@@ -90,13 +104,15 @@ cp .env.example .env
 | Variable | Description | Default |
 |---|---|---|
 | `MCP_SERVER_NAME` | Server name (identifier for clients) | `access-governance-docs` |
-| `MCP_DOCS_DIR` | Path to PDF files directory | `docs/` (relative to project) |
+| `MCP_DOCS_DIR` | Path to docs directory (PDFs and CSVs) | `docs/` (relative to project) |
 | `MCP_TRANSPORT` | `stdio`, `sse`, or `streamable-http` | `stdio` |
 | `MCP_HOST` | Bind address (SSE/HTTP only) | `127.0.0.1` |
 | `MCP_PORT` | Bind port (SSE/HTTP only) | `8000` |
 | `MCP_LOG_LEVEL` | Logging level | `INFO` |
 
-## Adding Documentation
+## Adding Data
+
+### PDF documentation
 
 Place PDF files in the `docs/` directory, optionally organized by topic:
 
@@ -108,6 +124,23 @@ cp /path/to/delegations_faq.pdf docs/delegations/
 
 Subdirectory names become topic labels in `list_topics()`. Root-level files go
 under `"general"`.
+
+### CSV data files
+
+Place CSV files in the `docs/` directory (any level — they are found
+recursively). Each CSV becomes a named dataset using its filename (without
+extension) as the name.
+
+```bash
+cp /path/to/access_rights.csv docs/
+cp /path/to/entitlements.csv docs/
+```
+
+Column names are discovered automatically from the CSV header row. No schema
+configuration is needed — just drop the file in and restart the server.
+
+**Example:** `access_rights.csv` becomes the `"access_rights"` dataset.
+`entitlements.csv` becomes the `"entitlements"` dataset.
 
 ## Running
 
@@ -137,11 +170,15 @@ uv run python tester.py --interactive # interactive search loop
 
 ## Key Modules
 
-- **`server.py`** — FastMCP application that registers the three tools and
-  delegates to `DocIndex`. Loads environment variables from `.env` at startup.
-- **`indexer.py`** — `DocIndex` class that extracts text from PDFs (PyMuPDF),
+- **`server.py`** — FastMCP application that registers all tools (PDF and CSV)
+  and delegates to `DocIndex` and `CsvStore`. Loads environment variables from
+  `.env` at startup.
+- **`pdf_indexer.py`** — `DocIndex` class that extracts text from PDFs (PyMuPDF),
   builds a BM25Okapi index, and provides topic browsing, search, and page
   retrieval. Includes a sliding-window snippet extractor for search results.
+- **`csv_store.py`** — `CsvStore` class that reads CSV files, discovers columns
+  dynamically, builds per-dataset BM25 indexes, and supports full-text search,
+  column-based filtering, and distinct value listing.
 
 ## Dependencies
 
@@ -161,14 +198,17 @@ mcp-server/
 ├── .env.example                     # template for .env
 ├── .env                             # local env vars (git-ignored)
 ├── tester.py                        # automated test suite
-├── docs/                            # PDF files, organized by topic
-│   ├── entitlements/
+├── docs/                            # PDF and CSV files
+│   ├── access_rights.csv            # access rights metadata
+│   ├── entitlements.csv             # user entitlements data
+│   ├── entitlements/                # PDF docs by topic
 │   ├── delegations/
 │   ├── jml/
 │   └── ...
 └── src/
     └── mcp_docs_server/
         ├── __init__.py
-        ├── server.py                # MCP server — defines the three tools
-        └── indexer.py               # PDF extraction, BM25 indexing, retrieval
+        ├── server.py                # MCP server — registers all tools
+        ├── pdf_indexer.py           # PDF extraction, BM25 indexing, retrieval
+        └── csv_store.py             # CSV loading, BM25 search, column filtering
 ```
