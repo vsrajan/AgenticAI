@@ -17,7 +17,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
-from mcp_docs_server.indexer import DocIndex
+from mcp_docs_server.pdf_indexer import DocIndex
 
 # Load environment variables from .env file (project root = mcp-server/)
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")

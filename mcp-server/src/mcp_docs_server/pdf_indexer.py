@@ -8,7 +8,7 @@ from pathlib import Path
 import pymupdf
 from rank_bm25 import BM25Okapi
 
-logger = logging.getLogger("mcp_docs_server.indexer")
+logger = logging.getLogger("mcp_docs_server.pdf_indexer")
 
 
 def _tokenize(text: str) -> list[str]:

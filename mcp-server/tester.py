@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pymupdf
 
-from mcp_docs_server.indexer import DocIndex
+from mcp_docs_server.pdf_indexer import DocIndex
 
 # ---------------------------------------------------------------------------
 # Logging setup
