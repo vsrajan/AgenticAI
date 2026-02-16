@@ -10,10 +10,12 @@ manage the server lifecycle.
 
 import logging
 import os
+import uuid
 
 from langchain_core.messages import HumanMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain.agents import create_agent
+from langgraph.checkpoint.memory import MemorySaver
 
 from dotenv import load_dotenv, find_dotenv
 from ease_clients.utils.llm import get_llm
@@ -101,7 +103,13 @@ async def run_agent_loop(on_response=None):
     tools = await client.get_tools()
     logger.info("Loaded %d MCP tools", len(tools))
 
-    agent = create_agent(llm, tools, system_prompt=SYSTEM_PROMPT)
+    checkpointer = MemorySaver()
+    agent = create_agent(llm, tools, system_prompt=SYSTEM_PROMPT, checkpointer=checkpointer)
+
+    # Each CLI session gets a unique thread so the checkpointer can
+    # track the conversation history across turns.
+    thread_id = uuid.uuid4().hex
+    config = {"configurable": {"thread_id": thread_id}}
 
     print("\nAccess Governance Assistant")
     print("=" * 40)
@@ -124,7 +132,8 @@ async def run_agent_loop(on_response=None):
 
         try:
             response = await agent.ainvoke(
-                {"messages": [HumanMessage(content=user_input)]}
+                {"messages": [HumanMessage(content=user_input)]},
+                config,
             )
             # The last message is the assistant's final answer
             answer = response["messages"][-1].content
