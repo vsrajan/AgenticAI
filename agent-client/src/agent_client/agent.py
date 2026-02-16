@@ -8,8 +8,11 @@ The MCP server must be started separately — this client does NOT
 manage the server lifecycle.
 """
 
+import asyncio
+import itertools
 import logging
 import os
+import sys
 import uuid
 
 from langchain_core.messages import HumanMessage
@@ -21,6 +24,42 @@ from dotenv import load_dotenv, find_dotenv
 from ease_clients.utils.llm import get_llm
 
 logger = logging.getLogger("agent_client.agent")
+
+
+class Spinner:
+    """Animated terminal spinner shown while the agent is thinking."""
+
+    _FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    def __init__(self, message: str = "Thinking") -> None:
+        self._message = message
+        self._task: asyncio.Task | None = None
+
+    async def _spin(self) -> None:
+        write = sys.stderr.write
+        flush = sys.stderr.flush
+        try:
+            for frame in itertools.cycle(self._FRAMES):
+                write(f"\r{frame} {self._message}…")
+                flush()
+                await asyncio.sleep(0.08)
+        except asyncio.CancelledError:
+            # Clear the spinner line
+            write("\r" + " " * (len(self._message) + 4) + "\r")
+            flush()
+
+    async def __aenter__(self) -> "Spinner":
+        self._task = asyncio.create_task(self._spin())
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
 
 SYSTEM_PROMPT = (
     "You are an Access Governance assistant. You help users understand the "
@@ -216,10 +255,11 @@ async def run_agent_loop(on_response=None):
         logger.info("User query: %s", user_input)
 
         try:
-            response = await agent.ainvoke(
-                {"messages": [HumanMessage(content=user_input)]},
-                config,
-            )
+            async with Spinner("Thinking"):
+                response = await agent.ainvoke(
+                    {"messages": [HumanMessage(content=user_input)]},
+                    config,
+                )
             # The last message is the assistant's final answer
             answer = response["messages"][-1].content
             logger.debug("Agent response: %s", answer)
