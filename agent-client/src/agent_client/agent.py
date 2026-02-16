@@ -101,7 +101,7 @@ async def run_agent_loop(on_response=None):
     tools = await client.get_tools()
     logger.info("Loaded %d MCP tools", len(tools))
 
-    agent = create_agent(llm, tools, prompt=SYSTEM_PROMPT)
+    agent = create_agent(llm, tools, system_prompt=SYSTEM_PROMPT)
 
     print("\nAccess Governance Assistant")
     print("=" * 40)
