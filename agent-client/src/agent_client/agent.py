@@ -9,6 +9,7 @@ manage the server lifecycle.
 """
 
 import asyncio
+import datetime
 import itertools
 import logging
 import os
@@ -228,6 +229,29 @@ def _get_mcp_server_config() -> dict:
     )
 
 
+LOG_FILE = "agent_log.txt"
+
+
+async def _dump_history(agent, config) -> None:
+    """Write the full conversation history from the checkpointer to *LOG_FILE*."""
+    try:
+        state = await agent.aget_state(config)
+        messages = state.values.get("messages", [])
+        if not messages:
+            return
+        with open(LOG_FILE, "w", encoding="utf-8") as fh:
+            fh.write(f"Agent session log — {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
+            fh.write(f"Total messages: {len(messages)}\n")
+            fh.write("=" * 60 + "\n\n")
+            for msg in messages:
+                role = msg.__class__.__name__
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                fh.write(f"[{role}]\n{content}\n\n")
+        logger.info("Session history written to %s (%d messages)", LOG_FILE, len(messages))
+    except Exception:
+        logger.exception("Failed to write session history to %s", LOG_FILE)
+
+
 async def run_agent_loop(on_response=None):
     """Run the interactive agent loop.
 
@@ -290,3 +314,6 @@ async def run_agent_loop(on_response=None):
                 "\nAssistant: Sorry, an error occurred while "
                 "processing your question. Please try again.\n"
             )
+
+    # Dump full (untrimmed) conversation history on exit.
+    await _dump_history(agent, config)
