@@ -157,9 +157,8 @@ SYSTEM_PROMPT = (
     "  d. For the top ResourceIDs, call search_dataset on Resources "
     "to retrieve names and descriptions.\n"
     "  e. Present results as a table with columns: Resource Name, "
-    "Description, and Peer Count (the count from count_by_column, "
-    "i.e. how many peers with the same filters hold that entitlement). "
-    "Sort the table by Peer Count descending.\n\n"
+    "Description, Requesting System (from Resources), and Peer Count "
+    "(the count from count_by_column). Sort by Peer Count descending.\n\n"
 
     "Strategy 2 — Search by description:\n"
     "When a user describes what they need (e.g. \"SAP finance reporting\"):\n"
