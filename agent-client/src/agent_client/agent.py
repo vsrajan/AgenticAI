@@ -18,7 +18,7 @@ import uuid
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain.agents import create_agent
+from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 
 from dotenv import load_dotenv, find_dotenv
@@ -170,7 +170,7 @@ SYSTEM_PROMPT = (
 )
 
 
-def _state_modifier(messages: list) -> list:
+def _prompt(state: dict) -> list:
     """Prepend system prompt and trim conversation history.
 
     The checkpointer stores the full history, but the LLM only sees the
@@ -178,6 +178,7 @@ def _state_modifier(messages: list) -> list:
     prevents context-window overflow and attention dilution in long
     sessions while preserving the complete history for debugging.
     """
+    messages = state.get("messages", [])
     if KEEP_LAST_N > 0 and len(messages) > KEEP_LAST_N:
         messages = messages[-KEEP_LAST_N:]
     return [SystemMessage(content=SYSTEM_PROMPT)] + messages
@@ -272,7 +273,7 @@ async def run_agent_loop(on_response=None):
     logger.info("Loaded %d MCP tools", len(tools))
 
     checkpointer = MemorySaver()
-    agent = create_agent(llm, tools, state_modifier=_state_modifier, checkpointer=checkpointer)
+    agent = create_react_agent(llm, tools, prompt=_prompt, checkpointer=checkpointer)
 
     # Each CLI session gets a unique thread so the checkpointer can
     # track the conversation history across turns.
