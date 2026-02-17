@@ -131,6 +131,11 @@ class CsvStore:
                 logger.warning("No rows in %s, skipping", rel_path)
                 continue
 
+            if "RequestingSystem" in columns:
+                for row in rows:
+                    if not row.get("RequestingSystem", "").strip():
+                        row["RequestingSystem"] = "Agnes"
+
             self._datasets[name] = CsvDataset(name, csv_path, rows, columns)
             logger.info("Loaded CSV %s: %d rows, columns=%s", name, len(rows), columns)
 
