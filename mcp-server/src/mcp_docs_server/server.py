@@ -190,6 +190,31 @@ def filter_dataset(dataset: str, filters: dict[str, str]) -> list[dict]:
 
 
 @mcp.tool()
+def count_by_column(
+    dataset: str, column: str, filters: dict[str, str] | None = None
+) -> list[dict] | dict:
+    """Filter rows then count occurrences of each value in a column.
+
+    Returns a list of {value, count} objects sorted descending by count.
+    Useful for finding the most common access rights held by a peer group.
+
+    Args:
+        dataset: Name of the dataset (from list_datasets).
+        column: Column to group by (e.g. "ResourceID").
+        filters: Optional column-value pairs to filter before counting,
+                 e.g. {"JOBTITLE": "Software Engineer", "OU": "Finance"}.
+    """
+    logger.info(
+        "count_by_column dataset=%r column=%r filters=%r",
+        dataset, column, filters,
+    )
+    criteria = filters or {}
+    results = csv_store.count_by_column(dataset, column, **criteria)
+    logger.info("count_by_column returned %d groups", len(results) if isinstance(results, list) else 0)
+    return results
+
+
+@mcp.tool()
 def get_column_values(dataset: str, column: str) -> list[str] | dict:
     """List all distinct values in a column of a CSV dataset.
 

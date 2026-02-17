@@ -83,6 +83,24 @@ class CsvDataset:
         values = {str(row[column]) for row in self.rows if row.get(column)}
         return sorted(values)
 
+    def count_by(self, column: str, **criteria: str) -> list[dict]:
+        """Filter rows by *criteria*, then count occurrences of each
+        distinct value in *column*. Returns [{value, count}] sorted
+        descending by count."""
+        rows = self.filter(**criteria) if criteria else self.rows
+        if column not in self.columns:
+            return []
+        counts: dict[str, int] = {}
+        for row in rows:
+            val = str(row.get(column, "")).strip()
+            if val:
+                counts[val] = counts.get(val, 0) + 1
+        return sorted(
+            [{"value": v, "count": c} for v, c in counts.items()],
+            key=lambda x: x["count"],
+            reverse=True,
+        )
+
 
 class CsvStore:
     """Manages all CSV files in a directory, each as a named dataset."""
@@ -165,6 +183,19 @@ class CsvStore:
             return [{"error": f"Dataset not found: {dataset_name}",
                      "available": self.dataset_names}]
         return ds.filter(**criteria)
+
+    def count_by_column(
+        self, dataset_name: str, column: str, **criteria: str
+    ) -> list[dict] | dict:
+        """Group-count a column after applying optional filters."""
+        ds = self._datasets.get(dataset_name)
+        if ds is None:
+            return {"error": f"Dataset not found: {dataset_name}",
+                    "available": self.dataset_names}
+        if column not in ds.columns:
+            return {"error": f"Column not found: {column}",
+                    "available_columns": ds.columns}
+        return ds.count_by(column, **criteria)
 
     def get_distinct_values(self, dataset_name: str, column: str) -> list[str] | dict:
         """Get distinct values for a column in a dataset."""
