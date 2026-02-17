@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "LangGraph ReAct agent for Access Governance, powered by AzureOpenAI and MCP"
 requires-python = ">=3.10"
 dependencies = [
+    "langchain>=1.2.0",
     "langchain-mcp-adapters>=0.2.0",
     "langchain-openai>=0.3.0",
     "langgraph>=0.4.0",

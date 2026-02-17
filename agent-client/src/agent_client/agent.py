@@ -16,9 +16,9 @@ import os
 import sys
 import uuid
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 from langgraph.checkpoint.memory import MemorySaver
 
 from dotenv import load_dotenv, find_dotenv
@@ -60,13 +60,6 @@ class Spinner:
                 await self._task
             except asyncio.CancelledError:
                 pass
-
-
-# Maximum number of messages to keep in conversation history.
-# Each ReAct turn can produce 4-6 messages (human, tool calls, tool
-# results, assistant answer), so 20 ≈ 3-4 full turns of context.
-# Set to 0 to disable trimming (unlimited history).
-KEEP_LAST_N = int(os.environ.get("KEEP_LAST_N_MSGS", "20"))
 
 
 SYSTEM_PROMPT = (
@@ -170,20 +163,6 @@ SYSTEM_PROMPT = (
 )
 
 
-def _prompt(state: dict) -> list:
-    """Prepend system prompt and trim conversation history.
-
-    The checkpointer stores the full history, but the LLM only sees the
-    system prompt plus the most recent ``KEEP_LAST_N`` messages.  This
-    prevents context-window overflow and attention dilution in long
-    sessions while preserving the complete history for debugging.
-    """
-    messages = state.get("messages", [])
-    if KEEP_LAST_N > 0 and len(messages) > KEEP_LAST_N:
-        messages = messages[-KEEP_LAST_N:]
-    return [SystemMessage(content=SYSTEM_PROMPT)] + messages
-
-
 def _get_mcp_server_config() -> dict:
     """Build the MCP server connection config from environment variables.
 
@@ -273,7 +252,7 @@ async def run_agent_loop(on_response=None):
     logger.info("Loaded %d MCP tools", len(tools))
 
     checkpointer = MemorySaver()
-    agent = create_react_agent(llm, tools, prompt=_prompt, checkpointer=checkpointer)
+    agent = create_agent(llm, tools, system_prompt=SYSTEM_PROMPT, checkpointer=checkpointer)
 
     # Each CLI session gets a unique thread so the checkpointer can
     # track the conversation history across turns.
