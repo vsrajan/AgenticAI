@@ -16,7 +16,7 @@ import os
 import sys
 import uuid
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
@@ -181,6 +181,11 @@ def _prompt(state: dict) -> list:
     messages = state.get("messages", [])
     if KEEP_LAST_N > 0 and len(messages) > KEEP_LAST_N:
         messages = messages[-KEEP_LAST_N:]
+        # Drop orphaned ToolMessages at the start of the window — their
+        # preceding AIMessage (with tool_calls) was trimmed away, and the
+        # OpenAI API rejects tool-role messages without a prior tool_calls.
+        while messages and isinstance(messages[0], ToolMessage):
+            messages = messages[1:]
     return [SystemMessage(content=SYSTEM_PROMPT)] + messages
 
 
