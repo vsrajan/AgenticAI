@@ -15,13 +15,11 @@ import logging
 import os
 import sys
 import uuid
-from typing import Annotated
 
-from langchain_core.messages import AnyMessage, HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain.agents import AgentState, create_agent
+from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph.message import add_messages
 
 from dotenv import load_dotenv, find_dotenv
 from ease_clients.utils.llm import get_llm
@@ -64,25 +62,11 @@ class Spinner:
                 pass
 
 
-# Maximum number of messages to keep in the agent's working state.
+# Maximum number of messages to keep in conversation history.
 # Each ReAct turn can produce 4-6 messages (human, tool calls, tool
 # results, assistant answer), so 20 ≈ 3-4 full turns of context.
 # Set to 0 to disable trimming (unlimited history).
 KEEP_LAST_N = int(os.environ.get("KEEP_LAST_N_MSGS", "20"))
-
-
-def _add_and_trim_messages(left: list, right: list) -> list:
-    """Standard add_messages reducer followed by a trim to KEEP_LAST_N."""
-    result = add_messages(left, right)
-    if KEEP_LAST_N > 0 and len(result) > KEEP_LAST_N:
-        result = result[-KEEP_LAST_N:]
-    return result
-
-
-class TrimmedAgentState(AgentState):
-    """AgentState whose messages reducer caps history at KEEP_LAST_N."""
-
-    messages: Annotated[list[AnyMessage], _add_and_trim_messages]  # type: ignore[assignment]
 
 
 SYSTEM_PROMPT = (
@@ -186,6 +170,20 @@ SYSTEM_PROMPT = (
 )
 
 
+def _prompt(state: dict) -> list:
+    """Prepend system prompt and trim conversation history.
+
+    The checkpointer stores the full history, but the LLM only sees the
+    system prompt plus the most recent ``KEEP_LAST_N`` messages.  This
+    prevents context-window overflow and attention dilution in long
+    sessions while preserving the complete history for debugging.
+    """
+    messages = state.get("messages", [])
+    if KEEP_LAST_N > 0 and len(messages) > KEEP_LAST_N:
+        messages = messages[-KEEP_LAST_N:]
+    return [SystemMessage(content=SYSTEM_PROMPT)] + messages
+
+
 def _get_mcp_server_config() -> dict:
     """Build the MCP server connection config from environment variables.
 
@@ -235,20 +233,22 @@ def _get_mcp_server_config() -> dict:
 LOG_FILE = "agent_log.txt"
 
 
-def _dump_history(all_messages: list) -> None:
-    """Write the full conversation history to *LOG_FILE*."""
+async def _dump_history(agent, config) -> None:
+    """Write the full conversation history from the checkpointer to *LOG_FILE*."""
     try:
-        if not all_messages:
+        state = await agent.aget_state(config)
+        messages = state.values.get("messages", [])
+        if not messages:
             return
         with open(LOG_FILE, "w", encoding="utf-8") as fh:
             fh.write(f"Agent session log — {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
-            fh.write(f"Total messages: {len(all_messages)}\n")
+            fh.write(f"Total messages: {len(messages)}\n")
             fh.write("=" * 60 + "\n\n")
-            for msg in all_messages:
+            for msg in messages:
                 role = msg.__class__.__name__
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 fh.write(f"[{role}]\n{content}\n\n")
-        logger.info("Session history written to %s (%d messages)", LOG_FILE, len(all_messages))
+        logger.info("Session history written to %s (%d messages)", LOG_FILE, len(messages))
     except Exception:
         logger.exception("Failed to write session history to %s", LOG_FILE)
 
@@ -273,21 +273,12 @@ async def run_agent_loop(on_response=None):
     logger.info("Loaded %d MCP tools", len(tools))
 
     checkpointer = MemorySaver()
-    agent = create_agent(
-        llm, tools,
-        system_prompt=SYSTEM_PROMPT,
-        state_schema=TrimmedAgentState,
-        checkpointer=checkpointer,
-    )
+    agent = create_react_agent(llm, tools, prompt=_prompt, checkpointer=checkpointer)
 
     # Each CLI session gets a unique thread so the checkpointer can
     # track the conversation history across turns.
     thread_id = uuid.uuid4().hex
     config = {"configurable": {"thread_id": thread_id}}
-
-    # Full (untrimmed) message history for the session log.
-    # The agent state is trimmed to KEEP_LAST_N, so we track separately.
-    all_messages: list = []
 
     print("\nAccess Governance Assistant")
     print("=" * 40)
@@ -309,20 +300,12 @@ async def run_agent_loop(on_response=None):
         logger.info("User query: %s", user_input)
 
         try:
-            human_msg = HumanMessage(content=user_input)
-            all_messages.append(human_msg)
             async with Spinner("Thinking"):
                 response = await agent.ainvoke(
-                    {"messages": [human_msg]},
+                    {"messages": [HumanMessage(content=user_input)]},
                     config,
                 )
-            # The agent state is trimmed, but new messages from this
-            # turn are always present.  Collect any we haven't seen.
-            seen_ids = {m.id for m in all_messages}
-            for msg in response["messages"]:
-                if msg.id not in seen_ids:
-                    all_messages.append(msg)
-            # The last message is the assistant's final answer.
+            # The last message is the assistant's final answer
             answer = response["messages"][-1].content
             logger.debug("Agent response: %s", answer)
             on_response(f"\n🤖 Assistant: {answer}\n")
@@ -334,4 +317,4 @@ async def run_agent_loop(on_response=None):
             )
 
     # Dump full (untrimmed) conversation history on exit.
-    _dump_history(all_messages)
+    await _dump_history(agent, config)
