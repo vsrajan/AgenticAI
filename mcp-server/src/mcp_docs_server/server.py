@@ -10,7 +10,8 @@ PDF tools:
 CSV tools:
   - list_datasets: list all loaded CSV datasets and their columns
   - search_dataset: full-text search across a CSV dataset
-  - filter_dataset: filter rows by column values
+  - filter_dataset: filter rows by exact column values
+  - filter_dataset_fuzzy: filter rows by column regex patterns
   - get_column_values: list distinct values for a column
 
 Run with:
@@ -78,9 +79,11 @@ mcp = FastMCP(
         "the source document and page number.\n\n"
         "CSV data tools:\n"
         "  Use list_datasets to discover available datasets and their columns. "
-        "Use search_dataset for free-text search, filter_dataset for exact "
-        "column matching, and get_column_values to discover what values exist "
-        "in a column (useful for filtering)."
+        "Use search_dataset for free-text search across all columns, "
+        "filter_dataset for exact column matching, filter_dataset_fuzzy for "
+        "regex pattern matching on specific columns (e.g. partial names, "
+        "broad category searches), and get_column_values to discover what "
+        "values exist in a column."
     ),
 )
 
@@ -186,6 +189,27 @@ def filter_dataset(dataset: str, filters: dict[str, str]) -> list[dict]:
     logger.info("filter_dataset dataset=%r filters=%r", dataset, filters)
     results = csv_store.filter_rows(dataset, **filters)
     logger.info("filter_dataset returned %d rows", len(results))
+    return results
+
+
+@mcp.tool()
+def filter_dataset_fuzzy(dataset: str, filters: dict[str, str]) -> list[dict]:
+    """Filter rows in a CSV dataset using regex pattern matching (case-insensitive).
+
+    Unlike filter_dataset (exact match), this performs regex matching so partial
+    terms and patterns work. For example, {"JOBTITLE": "finance"} matches
+    "Finance Manager", "Senior Finance Analyst", "VP of Financial Planning", etc.
+
+    Supports regex syntax: "finance|accounting" matches either term,
+    "senior.*engineer" matches "Senior Software Engineer", etc.
+
+    Args:
+        dataset: Name of the dataset (from list_datasets).
+        filters: Column-regex pairs to match, e.g. {"JOBTITLE": "finance", "OU": "london"}.
+    """
+    logger.info("filter_dataset_fuzzy dataset=%r filters=%r", dataset, filters)
+    results = csv_store.filter_rows_fuzzy(dataset, **filters)
+    logger.info("filter_dataset_fuzzy returned %d rows", len(results))
     return results
 
 

@@ -76,6 +76,22 @@ class CsvDataset:
             ]
         return matching
 
+    def filter_fuzzy(self, **criteria: str) -> list[dict]:
+        """Filter rows where columns match the given regex patterns (case-insensitive)."""
+        matching = self.rows
+        for col, value in criteria.items():
+            if col not in self.columns:
+                continue
+            try:
+                pattern = re.compile(value, re.IGNORECASE)
+            except re.error:
+                pattern = re.compile(re.escape(value), re.IGNORECASE)
+            matching = [
+                row for row in matching
+                if pattern.search(str(row.get(col, "")))
+            ]
+        return matching
+
     def distinct(self, column: str) -> list[str]:
         """Return sorted distinct values for a column."""
         if column not in self.columns:
@@ -183,6 +199,14 @@ class CsvStore:
             return [{"error": f"Dataset not found: {dataset_name}",
                      "available": self.dataset_names}]
         return ds.filter(**criteria)
+
+    def filter_rows_fuzzy(self, dataset_name: str, **criteria: str) -> list[dict]:
+        """Filter rows in a dataset by column values using regex matching."""
+        ds = self._datasets.get(dataset_name)
+        if ds is None:
+            return [{"error": f"Dataset not found: {dataset_name}",
+                     "available": self.dataset_names}]
+        return ds.filter_fuzzy(**criteria)
 
     def count_by_column(
         self, dataset_name: str, column: str, **criteria: str
