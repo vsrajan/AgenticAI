@@ -1,8 +1,14 @@
-"""LangGraph ReAct agent that connects to a remote MCP docs server.
+"""LangGraph custom StateGraph agent with Router, PDF, and CSV nodes.
 
 The agent connects to an already-running MCP server (stdio or SSE),
-loads the documentation tools, and wraps them in a ReAct loop powered
-by AzureOpenAI.
+loads the documentation and data tools, and routes user queries through
+specialised nodes:
+
+    Router  ──▶  PDF agent  ──▶  Router
+       │                            ▲
+       └───▶  CSV agent  ───────────┘
+       │
+       └───▶  END  (final answer)
 
 The MCP server must be started separately — this client does NOT
 manage the server lifecycle.
@@ -16,9 +22,15 @@ import os
 import sys
 import uuid
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.prebuilt import create_react_agent
+from langgraph.graph import StateGraph, MessagesState, START, END
+from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 
 from dotenv import load_dotenv, find_dotenv
@@ -26,6 +38,8 @@ from ease_clients.utils.llm import get_llm
 
 logger = logging.getLogger("agent_client.agent")
 
+
+# ── Spinner ──────────────────────────────────────────────────────────
 
 class Spinner:
     """Animated terminal spinner shown while the agent is thinking."""
@@ -62,58 +76,156 @@ class Spinner:
                 pass
 
 
+# ── Configuration ────────────────────────────────────────────────────
+
 # Maximum number of messages to keep in conversation history.
-# Each ReAct turn can produce 4-6 messages (human, tool calls, tool
+# Each turn can produce several messages (human, tool calls, tool
 # results, assistant answer), so 20 ≈ 3-4 full turns of context.
 # Set to 0 to disable trimming (unlimited history).
 KEEP_LAST_N = int(os.environ.get("KEEP_LAST_N_MSGS", "20"))
 
+# Tool name sets used for splitting MCP tools into groups.
+PDF_TOOL_NAMES = {"list_topics", "search_docs", "read_page"}
+CSV_TOOL_NAMES = {
+    "list_datasets",
+    "search_dataset",
+    "filter_dataset",
+    "filter_dataset_fuzzy",
+    "count_by_column",
+    "get_column_values",
+}
 
-SYSTEM_PROMPT = (
-    "You are an Access Governance assistant. You help users understand the "
-    "Access Governance application, find the right access rights, and discover "
-    "what their peers already have.\n\n"
 
-    "Your PRIMARY knowledge source is the PDF documentation. CSV datasets "
-    "supplement the documentation with structured data (access rights "
-    "catalogues, entitlement records, etc.).\n\n"
+# ── Prompts ──────────────────────────────────────────────────────────
 
-    "=== PDF DOCUMENTATION TOOLS ===\n\n"
+ROUTER_PROMPT = (
+    "You are the routing agent for an Access Governance assistant. "
+    "Analyse the user's query and the conversation history, then "
+    "decide the next step.\n\n"
 
-    "These are your main tools for answering questions about how Access "
-    "Governance works — processes, procedures, FAQs, how-to guides, and "
-    "policies.\n\n"
+    "You have two specialist agents:\n"
+    "1. PDF Documentation Agent — answers questions about how Access "
+    "Governance works: processes, procedures, FAQs, how-to guides, "
+    "and policies.\n"
+    "2. CSV Data Agent — handles structured data lookups: access "
+    "rights catalogues, entitlement records, peer-based "
+    "recommendations, and organisational data.\n\n"
 
-    "- list_topics  — call this first to see every available documentation "
-    "topic and its document paths.\n"
-    "- search_docs(query) — full-text search across all documents. Returns "
-    "ranked results with snippets and page_path values.\n"
-    "- read_page(page_path) — retrieves the complete text of a document. "
-    "The text contains [Page N] markers so you can identify exactly which "
-    "PDF page each piece of information comes from.\n\n"
+    "=== DECISION RULES ===\n\n"
+    "- Questions about how something works, processes, policies, "
+    "procedures, FAQs → route to PDF.\n"
+    "- Questions about specific access rights, peer recommendations, "
+    "data lookups, entitlements, organisational data → route to CSV.\n"
+    "- If the question requires BOTH documentation AND data (e.g. "
+    "understanding a process then finding specific access rights), "
+    "route to PDF first for context, then CSV for data on the next "
+    "turn.\n"
+    "- If the specialist agents have already provided enough "
+    "information to fully answer the user's question → produce the "
+    "final answer.\n"
+    "- If the user's question is a greeting or general chat that "
+    "does not require tool lookups → answer directly.\n\n"
 
-    "PDF search strategy:\n"
-    "1. Call search_docs with the user's question (try different phrasings "
-    "if the first search returns few results).\n"
-    "2. For every relevant result, call read_page to get the full content — "
-    "snippets from search_docs are too short for a thorough answer.\n"
-    "3. Read the [Page N] markers in the returned text to identify the exact "
-    "pages that contain the answer.\n"
-    "4. Synthesise a clear answer and cite every fact with its document and "
-    "page number (see CITATIONS below).\n"
-    "5. If the answer spans multiple documents, read each one and combine "
-    "the information.\n\n"
+    "=== MANDATORY CRITERIA CHECK (before routing to CSV) ===\n\n"
+    "When the user asks about access rights, recommendations, or "
+    "what they should request, ensure the conversation contains:\n"
+    "  1. Job Title (REQUIRED)\n"
+    "  2. At least ONE of: OU, ParentOU, or a business hierarchy "
+    "value (AREANAME, SECTORNAME, SEGMENTNAME, FUNCTIONNAME)\n"
+    "If these are missing, ask the user for them BEFORE routing to "
+    "CSV.  Do NOT route to CSV without these criteria.\n\n"
 
-    "=== CSV DATA TOOLS ===\n\n"
+    "=== RESPONSE FORMAT ===\n\n"
+    "You MUST respond in EXACTLY one of these formats:\n\n"
+    "To route to a specialist — first line must be the tag, second "
+    "line a brief reason:\n"
+    "  [ROUTE: PDF]\n"
+    "  <reason>\n\n"
+    "  [ROUTE: CSV]\n"
+    "  <reason>\n\n"
+    "To provide the final answer — first line must be the tag, "
+    "remaining lines are the complete answer:\n"
+    "  [DONE]\n"
+    "  <full answer>\n\n"
 
-    "Two CSV datasets provide structured data for access-rights discovery:\n\n"
+    "=== FINAL ANSWER GUIDELINES ===\n\n"
+    "When producing a final answer ([DONE]):\n"
+    "1. Synthesise information from the specialist agents' findings "
+    "in the conversation history.\n"
+    "2. Cite every fact sourced from PDF documentation with: "
+    "(Source: <page_path>, Page <N>).\n"
+    "3. Format data results as tables or lists.\n"
+    "4. Be concise but thorough.\n"
+    "5. If the data or documentation does not cover the user's "
+    "question, say so clearly.\n"
+)
+
+PDF_PROMPT = (
+    "You are the PDF Documentation specialist for an Access "
+    "Governance assistant. Use your PDF documentation tools to find "
+    "information that answers the user's query.\n\n"
+
+    "=== AVAILABLE TOOLS ===\n\n"
+    "- list_topics — lists every available documentation topic and "
+    "its document paths. Call this first if you have not seen the "
+    "topic structure yet in this conversation.\n"
+    "- search_docs(query) — full-text search across all documents. "
+    "Returns ranked results with snippets and page_path values.\n"
+    "- read_page(page_path) — retrieves the complete text of a "
+    "document. The text contains [Page N] markers so you can "
+    "identify exactly which PDF page each piece of information "
+    "comes from.\n\n"
+
+    "=== SEARCH STRATEGY ===\n\n"
+    "1. Call search_docs with the user's question (try different "
+    "phrasings if the first search returns few results).\n"
+    "2. For every relevant result, call read_page to get the full "
+    "content — snippets from search_docs are too short for a "
+    "thorough answer.\n"
+    "3. Read the [Page N] markers in the returned text to identify "
+    "the exact pages that contain the answer.\n"
+    "4. Synthesise a clear answer and cite every fact with its "
+    "document and page number.\n"
+    "5. If the answer spans multiple documents, read each one and "
+    "combine the information.\n\n"
+
+    "=== CITATIONS (MANDATORY) ===\n\n"
+    "Every claim sourced from documentation MUST include an inline "
+    "citation: (Source: <page_path>, Page <N>)\n\n"
+    "Examples:\n"
+    "- (Source: entitlements/ordering_faq.pdf, Page 2)\n"
+    "- (Source: delegations/setup_guide.pdf, Pages 3-4)\n\n"
+    "Rules:\n"
+    "- Cite immediately after each fact or paragraph.\n"
+    "- If information spans multiple pages, cite the range.\n"
+    "- If multiple documents are used, cite each one where "
+    "referenced.\n"
+    "- ALWAYS call read_page to get full content — search snippets "
+    "alone are not sufficient for accurate page-level citations.\n"
+    "- Never omit citations for documentation-sourced information.\n\n"
+
+    "=== OUTPUT ===\n\n"
+    "After completing your research, provide a thorough summary of "
+    "your findings with full citations. The routing agent will use "
+    "this to compose the final answer for the user.\n"
+)
+
+CSV_PROMPT = (
+    "You are the CSV Data specialist for an Access Governance "
+    "assistant. Use your CSV dataset tools to find structured data "
+    "that answers the user's query.\n\n"
+
+    "=== AVAILABLE DATASETS ===\n\n"
+    "Two CSV datasets provide structured data for access-rights "
+    "discovery:\n\n"
 
     "1. Entitlements — each row is a person-to-resource assignment.\n"
     "   Key columns:\n"
-    "   - ResourceID: the access right identifier (join key to Resources)\n"
-    "   - JOBTITLE: the person's job title (e.g. Software Engineer, "
-    "Product Manager, Analyst). This is a PRIMARY search criterion — "
-    "people with the same job title typically need the same access rights.\n"
+    "   - ResourceID: the access right identifier (join key to "
+    "Resources)\n"
+    "   - JOBTITLE: the person's job title (PRIMARY search "
+    "criterion — people with the same job title typically need the "
+    "same access rights)\n"
     "   - OU: the user's organisational unit\n"
     "   - ParentOU: the parent of the user's OU\n"
     "   - CITY / COUNTRY_VALUE: location\n"
@@ -126,179 +238,234 @@ SYSTEM_PROMPT = (
     "   - ResourceID: unique identifier (join key to Entitlements)\n"
     "   - name: human-readable name of the access right\n"
     "   - DESCRIPTION: what the access right grants\n"
-    "   - ResourceType / RequestingSystem: classification and owning system\n\n"
+    "   - ResourceType / RequestingSystem: classification and "
+    "owning system\n\n"
 
-    "Available CSV tools:\n"
-    "- list_datasets — shows datasets, their column names, and row counts.\n"
-    "- search_dataset(dataset, query) — free-text BM25 search across all "
-    "columns of a dataset. Best for Resources (descriptions).\n"
-    "- filter_dataset_fuzzy(dataset, filters) — regex pattern matching on "
-    "specific columns (case-insensitive). Use this for broad discovery "
-    "when the user gives partial or approximate terms. Example: "
-    "{\"JOBTITLE\": \"finance\"} matches \"Finance Manager\", \"Senior "
-    "Finance Analyst\", \"VP of Financial Planning\", etc. Supports "
+    "=== AVAILABLE TOOLS ===\n\n"
+    "- list_datasets — shows datasets, column names, and row "
+    "counts. Call this first if you have not seen the dataset "
+    "structure yet in this conversation.\n"
+    "- search_dataset(dataset, query) — free-text BM25 search "
+    "across all columns. Best for Resources (descriptions).\n"
+    "- filter_dataset_fuzzy(dataset, filters) — regex pattern "
+    "matching on specific columns (case-insensitive). Use for "
+    "broad discovery with partial or approximate terms. Supports "
     "regex: \"finance|accounting\" matches either term.\n"
-    "- filter_dataset(dataset, filters) — filter rows by exact column values "
-    "(case-insensitive). Use this when you know the precise value.\n"
-    "- count_by_column(dataset, column, filters) — filter rows by exact "
-    "values, then count occurrences of each distinct value in column. "
-    "Returns [{value, count}] sorted by count descending. Use this for "
-    "peer recommendations after identifying exact filter values.\n"
-    "- get_column_values(dataset, column) — list all distinct values in a "
-    "column. Useful for small-cardinality columns (e.g. OU, AREANAME).\n\n"
+    "- filter_dataset(dataset, filters) — filter by exact column "
+    "values (case-insensitive). Use when you know the precise "
+    "value.\n"
+    "- count_by_column(dataset, column, filters) — filter rows by "
+    "exact values, then count occurrences of each distinct value "
+    "in column. Returns [{value, count}] sorted descending. Use "
+    "for peer recommendations after identifying exact filter "
+    "values.\n"
+    "- get_column_values(dataset, column) — list all distinct "
+    "values in a column. Useful for small-cardinality columns.\n\n"
 
-    "=== CSV SEARCH STRATEGIES ===\n\n"
-
-    "*** MANDATORY MINIMUM CRITERIA FOR ENTITLEMENT SEARCHES ***\n"
-    "Before searching the Entitlements dataset (filter_dataset_fuzzy, "
-    "filter_dataset, count_by_column, or search_dataset), you MUST have "
-    "ALL of the following:\n"
+    "=== MANDATORY MINIMUM CRITERIA FOR ENTITLEMENT SEARCHES ===\n\n"
+    "Before searching the Entitlements dataset, you MUST have ALL "
+    "of the following:\n"
     "  1. JOBTITLE — always required, no exceptions.\n"
-    "  2. At least ONE of the following:\n"
+    "  2. At least ONE of:\n"
     "     - OU (organisational unit)\n"
     "     - ParentOU (parent organisational unit)\n"
     "     - One business hierarchy value: AREANAME, SECTORNAME, "
     "SEGMENTNAME, or FUNCTIONNAME\n\n"
-    "If the user has not provided both a job title AND at least one "
-    "organisational identifier, you MUST ask for them before running "
-    "any entitlement query. Do NOT search with job title alone or with "
-    "only an organisational identifier — both are required.\n\n"
+    "If both criteria are not available in the conversation, state "
+    "what is missing so the routing agent can ask the user.\n\n"
+
+    "=== SEARCH STRATEGIES ===\n\n"
 
     "Strategy 1 — Peer-based recommendations (most common):\n"
-    "When a user wants to know which access rights they should have, find "
-    "what their peers already hold:\n"
-    "  a. Collect the mandatory minimum criteria from the user:\n"
-    "     - JOBTITLE (required)\n"
-    "     - AND at least one of: OU, ParentOU, AREANAME, SECTORNAME, "
-    "SEGMENTNAME, or FUNCTIONNAME (required)\n"
-    "     Do NOT proceed to step (b) until you have both.\n"
-    "  b. Discovery — use filter_dataset_fuzzy on Entitlements to find "
-    "matching rows when the user gives broad or approximate terms. "
-    "For example, if the user says their job title is \"finance\", call:\n"
-    "     filter_dataset_fuzzy(\"Entitlements\", "
-    "{\"JOBTITLE\": \"finance\", \"OU\": \"...\"})\n"
-    "     Review the distinct JOBTITLE values in the results to identify "
-    "the exact peer group (e.g. \"Finance Manager\", \"Finance Analyst\"). "
-    "Confirm with the user if multiple titles match.\n"
-    "  c. Counting — once you have the exact JOBTITLE (and other filter "
-    "values), use count_by_column on Entitlements, grouping by ResourceID, "
-    "with exact filters. This returns ResourceIDs ranked by how many "
-    "peers hold each one:\n"
-    "     count_by_column(\"Entitlements\", \"ResourceID\", "
-    "{\"JOBTITLE\": \"Finance Manager\", \"OU\": \"...\"})\n"
-    "  d. If too few results, broaden progressively:\n"
-    "     - Try ParentOU instead of OU\n"
-    "     - Drop OU, keep JOBTITLE + business hierarchy column\n"
-    "     - Only as a last resort, try JOBTITLE + a broader hierarchy "
-    "level (e.g. AREANAME instead of SEGMENTNAME)\n"
-    "     Never drop JOBTITLE — it is always required.\n"
-    "  e. For the top ResourceIDs, call search_dataset on Resources "
-    "to retrieve names and descriptions.\n"
-    "  f. Present results as a table with columns: Resource Name, "
-    "Description, Requesting System (from Resources), and Peer Count "
-    "(the count from count_by_column). Sort by Peer Count descending.\n\n"
+    "  a. Ensure mandatory criteria are present (JOBTITLE + at "
+    "least one of OU/ParentOU/hierarchy).\n"
+    "  b. Discovery — use filter_dataset_fuzzy on Entitlements for "
+    "broad terms. Review distinct JOBTITLE values to identify the "
+    "exact peer group. Confirm with user if multiple titles match.\n"
+    "  c. Counting — use count_by_column on Entitlements, grouping "
+    "by ResourceID with exact filters. Returns ResourceIDs ranked "
+    "by peer count.\n"
+    "  d. If too few results, broaden progressively: ParentOU "
+    "instead of OU, drop OU and keep hierarchy, try broader "
+    "hierarchy level. Never drop JOBTITLE.\n"
+    "  e. For top ResourceIDs, call search_dataset on Resources "
+    "for names and descriptions.\n"
+    "  f. Present as table: Resource Name, Description, Requesting "
+    "System, Peer Count. Sort by Peer Count descending.\n\n"
 
     "Strategy 2 — Search by description:\n"
-    "When a user describes what they need (e.g. \"SAP finance reporting\"):\n"
     "  a. search_dataset on Resources with the description.\n"
-    "  b. Present matches with name, description, and RequestingSystem.\n\n"
+    "  b. Present matches with name, description, "
+    "RequestingSystem.\n\n"
 
     "Strategy 3 — Explore the organisation:\n"
-    "When a user is unsure of exact values:\n"
-    "  - For low-cardinality columns (OU, AREANAME, SECTORNAME, etc.), "
-    "use get_column_values to list all options and let the user pick.\n"
-    "  - For high-cardinality columns (JOBTITLE, CITY, etc.), use "
-    "filter_dataset_fuzzy with a partial term to discover matching "
-    "values instead of listing hundreds of options.\n"
-    "Then proceed with Strategy 1 or 2.\n\n"
+    "  - Low-cardinality columns (OU, AREANAME, etc.): use "
+    "get_column_values to list options.\n"
+    "  - High-cardinality columns (JOBTITLE, CITY, etc.): use "
+    "filter_dataset_fuzzy with a partial term.\n"
+    "  Then proceed with Strategy 1 or 2.\n\n"
 
-    "CSV rules:\n"
-    "- Use filter_dataset_fuzzy for broad discovery (partial terms, unsure "
-    "spelling). Use filter_dataset and count_by_column for precise queries "
-    "once you know the exact values.\n"
-    "- If a fuzzy filter returns too many results, add more filter columns "
-    "or use a more specific pattern.\n"
-    "- If a fuzzy filter returns nothing, try a broader pattern or fewer "
-    "filter columns.\n"
-    "- ResourceID joins the two datasets. Always look up Resources for "
-    "names/descriptions — never show raw ResourceIDs.\n\n"
+    "=== RULES ===\n\n"
+    "- Use filter_dataset_fuzzy for broad discovery; filter_dataset "
+    "and count_by_column for precise queries.\n"
+    "- ResourceID joins the two datasets. Always look up Resources "
+    "for names/descriptions — never show raw ResourceIDs.\n"
+    "- If a fuzzy filter returns too many results, add more filter "
+    "columns or use a more specific pattern.\n"
+    "- If a fuzzy filter returns nothing, try a broader pattern or "
+    "fewer filter columns.\n\n"
 
-    "=== STARTUP ===\n\n"
-
-    "At the start of a conversation:\n"
-    "1. Call list_datasets to confirm the available datasets and their "
-    "column names.\n"
-    "2. If no datasets are loaded, that is normal — the server may only "
-    "have PDF documentation. Rely on the PDF tools.\n"
-    "3. When a user asks about access rights, recommendations, or what "
-    "they should request, collect the MANDATORY criteria before searching:\n"
-    "   - Job Title (REQUIRED — e.g. Software Engineer, Product Manager)\n"
-    "   - At least ONE of the following (REQUIRED):\n"
-    "     - OU or ParentOU (organisational unit)\n"
-    "     - A business hierarchy value — tell the user the organisation "
-    "is split into Areas, Sectors, Segments, and Functions, and ask "
-    "which one they belong to and its name (e.g. SEGMENTNAME = "
-    "\"Cloud Platform\")\n"
-    "   - Location (city / country) — optional but helpful\n"
-    "   Do NOT search entitlements until you have both the job title and "
-    "at least one organisational identifier. If unsure of exact values, "
-    "offer to look them up with get_column_values (for small lists) or "
-    "filter_dataset_fuzzy (for partial/approximate terms).\n\n"
-
-    "=== CITATIONS (MANDATORY) ===\n\n"
-
-    "Every claim sourced from PDF documentation MUST include an inline "
-    "citation with the document path and the specific page number. The "
-    "content returned by search_docs and read_page contains [Page N] "
-    "markers — use these to identify the exact page.\n\n"
-
-    "Format: (Source: <page_path>, Page <N>)\n"
-    "Examples:\n"
-    "- (Source: entitlements/ordering_faq.pdf, Page 2)\n"
-    "- (Source: delegations/setup_guide.pdf, Pages 3-4)\n\n"
-
-    "Rules:\n"
-    "- Cite immediately after each fact or paragraph, not just once at the "
-    "end of your answer.\n"
-    "- If information spans multiple pages, cite the range.\n"
-    "- If multiple documents are used, cite each one where it is referenced.\n"
-    "- After calling search_docs, ALWAYS call read_page to get the full "
-    "content — search snippets alone are not sufficient for accurate "
-    "page-level citations.\n"
-    "- Never omit citations for documentation-sourced information.\n\n"
-
-    "=== GUIDELINES ===\n\n"
-
-    "1. Always use the tools before answering — do not guess.\n"
-    "2. Default to PDF documentation for how-to, process, and policy "
-    "questions. Use CSV data for lookups, recommendations, and "
-    "data-driven queries.\n"
-    "3. When presenting data results, format them clearly (tables or "
-    "lists).\n"
-    "4. If the data or documentation does not cover the user's question, "
-    "say so clearly.\n"
-    "5. Be concise but thorough.\n"
+    "=== OUTPUT ===\n\n"
+    "After completing your research, provide a thorough summary of "
+    "your findings with formatted tables or lists. The routing "
+    "agent will use this to compose the final answer for the user.\n"
 )
 
 
-def _prompt(state: dict) -> list:
-    """Prepend system prompt and trim conversation history.
+# ── Helpers ──────────────────────────────────────────────────────────
 
-    The checkpointer stores the full history, but the LLM only sees the
-    system prompt plus the most recent ``KEEP_LAST_N`` messages.  This
-    prevents context-window overflow and attention dilution in long
-    sessions while preserving the complete history for debugging.
+def _trim_messages(messages: list) -> list:
+    """Trim conversation history to the most recent messages.
+
+    The checkpointer stores the full history, but the LLM only sees
+    the most recent ``KEEP_LAST_N`` messages.  This prevents
+    context-window overflow and attention dilution in long sessions.
     """
-    messages = state.get("messages", [])
     if KEEP_LAST_N > 0 and len(messages) > KEEP_LAST_N:
         messages = messages[-KEEP_LAST_N:]
-        # Drop orphaned ToolMessages at the start of the window — their
-        # preceding AIMessage (with tool_calls) was trimmed away, and the
-        # OpenAI API rejects tool-role messages without a prior tool_calls.
+        # Drop orphaned ToolMessages at the start of the window —
+        # their preceding AIMessage (with tool_calls) was trimmed
+        # away, and the OpenAI API rejects tool-role messages without
+        # a prior tool_calls.
         while messages and isinstance(messages[0], ToolMessage):
             messages = messages[1:]
-    return [SystemMessage(content=SYSTEM_PROMPT)] + messages
+    return messages
 
+
+# ── Node factories ───────────────────────────────────────────────────
+
+def _make_router_node(llm):
+    """Create the router node — decides PDF, CSV, or final answer."""
+
+    def router_node(state: MessagesState) -> dict:
+        messages = _trim_messages(state["messages"])
+        response = llm.invoke(
+            [SystemMessage(content=ROUTER_PROMPT)] + messages
+        )
+        return {"messages": [response]}
+
+    return router_node
+
+
+def _make_agent_node(llm, tools, prompt):
+    """Create a specialist agent node (PDF or CSV).
+
+    The returned node binds *tools* to the LLM so it can produce
+    ``tool_calls``.  Actual tool execution happens in a separate
+    ``ToolNode`` — this node only calls the LLM.
+    """
+    llm_with_tools = llm.bind_tools(tools)
+
+    def agent_node(state: MessagesState) -> dict:
+        messages = _trim_messages(state["messages"])
+        response = llm_with_tools.invoke(
+            [SystemMessage(content=prompt)] + messages
+        )
+        return {"messages": [response]}
+
+    return agent_node
+
+
+# ── Routing / edge functions ─────────────────────────────────────────
+
+def route_from_router(state: MessagesState) -> str:
+    """Determine where to go after the router node."""
+    last_msg = state["messages"][-1]
+    content = last_msg.content if isinstance(last_msg.content, str) else ""
+    if "[ROUTE: PDF]" in content:
+        return "pdf_agent"
+    if "[ROUTE: CSV]" in content:
+        return "csv_agent"
+    # No routing tag (or [DONE]) → end the graph turn.
+    return END
+
+
+def _make_tool_or_router_check(tool_node_name: str):
+    """Return an edge function: route to *tool_node_name* if there are
+    pending tool calls, otherwise back to the router."""
+
+    def check(state: MessagesState) -> str:
+        last_msg = state["messages"][-1]
+        if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+            return tool_node_name
+        return "router"
+
+    return check
+
+
+# ── Graph builder ────────────────────────────────────────────────────
+
+def build_graph(llm, all_tools):
+    """Build the StateGraph with Router → PDF / CSV → Router loop.
+
+    Graph structure::
+
+        START ──▶ router ──(conditional)──▶ pdf_agent ──▶ pdf_tools ─┐
+                    │  ▲                       │                      │
+                    │  └───────────────────────┘◀─────────────────────┘
+                    │  ▲
+                    │  └───────────────────────┐◀─────────────────────┐
+                    └──(conditional)──▶ csv_agent ──▶ csv_tools ──────┘
+                    │
+                    └──▶ END
+    """
+    # Split MCP tools into PDF and CSV groups.
+    pdf_tools = [t for t in all_tools if t.name in PDF_TOOL_NAMES]
+    csv_tools = [t for t in all_tools if t.name in CSV_TOOL_NAMES]
+
+    graph = StateGraph(MessagesState)
+
+    # ── Nodes ──
+    graph.add_node("router", _make_router_node(llm))
+
+    graph.add_node("pdf_agent", _make_agent_node(llm, pdf_tools, PDF_PROMPT))
+    graph.add_node("pdf_tools", ToolNode(pdf_tools))
+
+    graph.add_node("csv_agent", _make_agent_node(llm, csv_tools, CSV_PROMPT))
+    graph.add_node("csv_tools", ToolNode(csv_tools))
+
+    # ── Edges ──
+
+    # Entry point.
+    graph.add_edge(START, "router")
+
+    # Router decides next step.
+    graph.add_conditional_edges(
+        "router",
+        route_from_router,
+        {"pdf_agent": "pdf_agent", "csv_agent": "csv_agent", END: END},
+    )
+
+    # PDF sub-loop: agent → tools → agent → … → router.
+    graph.add_conditional_edges(
+        "pdf_agent",
+        _make_tool_or_router_check("pdf_tools"),
+        {"pdf_tools": "pdf_tools", "router": "router"},
+    )
+    graph.add_edge("pdf_tools", "pdf_agent")
+
+    # CSV sub-loop: agent → tools → agent → … → router.
+    graph.add_conditional_edges(
+        "csv_agent",
+        _make_tool_or_router_check("csv_tools"),
+        {"csv_tools": "csv_tools", "router": "router"},
+    )
+    graph.add_edge("csv_tools", "csv_agent")
+
+    return graph
+
+
+# ── MCP config ───────────────────────────────────────────────────────
 
 def _get_mcp_server_config() -> dict:
     """Build the MCP server connection config from environment variables.
@@ -346,6 +513,8 @@ def _get_mcp_server_config() -> dict:
     )
 
 
+# ── History dump ─────────────────────────────────────────────────────
+
 LOG_FILE = "agent_log.txt"
 
 
@@ -369,8 +538,12 @@ async def _dump_history(agent, config) -> None:
         logger.exception("Failed to write session history to %s", LOG_FILE)
 
 
+# ── Interactive loop ─────────────────────────────────────────────────
+
 async def run_agent_loop(on_response=None):
     """Run the interactive agent loop.
+
+    The loop runs until the user types ``exit`` or presses Ctrl-C.
 
     Args:
         on_response: Optional callback ``(str) -> None`` called with each
@@ -389,7 +562,8 @@ async def run_agent_loop(on_response=None):
     logger.info("Loaded %d MCP tools", len(tools))
 
     checkpointer = MemorySaver()
-    agent = create_react_agent(llm, tools, prompt=_prompt, checkpointer=checkpointer)
+    graph = build_graph(llm, tools)
+    agent = graph.compile(checkpointer=checkpointer)
 
     # Each CLI session gets a unique thread so the checkpointer can
     # track the conversation history across turns.
@@ -421,8 +595,11 @@ async def run_agent_loop(on_response=None):
                     {"messages": [HumanMessage(content=user_input)]},
                     config,
                 )
-            # The last message is the assistant's final answer
+            # The last message is the router's final answer.
             answer = response["messages"][-1].content
+            # Strip the [DONE] marker if present.
+            if isinstance(answer, str) and answer.startswith("[DONE]"):
+                answer = answer[len("[DONE]"):].strip()
             logger.debug("Agent response: %s", answer)
             on_response(f"\n🤖 Assistant: {answer}\n")
         except Exception:
