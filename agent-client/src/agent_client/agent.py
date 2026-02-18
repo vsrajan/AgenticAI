@@ -28,6 +28,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.prebuilt import ToolNode
@@ -96,6 +97,23 @@ CSV_TOOL_NAMES = {
 }
 
 
+# ── Routing tools ────────────────────────────────────────────────────
+
+@tool
+def route_to_pdf(reason: str) -> str:
+    """Route the query to the PDF Documentation specialist agent."""
+    return reason
+
+
+@tool
+def route_to_csv(reason: str) -> str:
+    """Route the query to the CSV Data specialist agent."""
+    return reason
+
+
+ROUTING_TOOLS = [route_to_pdf, route_to_csv]
+
+
 # ── Prompts ──────────────────────────────────────────────────────────
 
 ROUTER_PROMPT = (
@@ -148,20 +166,15 @@ ROUTER_PROMPT = (
     "they can later provide them for recommendations.\n\n"
 
     "=== RESPONSE FORMAT ===\n\n"
-    "You MUST respond in EXACTLY one of these formats:\n\n"
-    "To route to a specialist — first line must be the tag, second "
-    "line a brief reason:\n"
-    "  [ROUTE: PDF]\n"
-    "  <reason>\n\n"
-    "  [ROUTE: CSV]\n"
-    "  <reason>\n\n"
-    "To provide the final answer — first line must be the tag, "
-    "remaining lines are the complete answer:\n"
-    "  [DONE]\n"
-    "  <full answer>\n\n"
+    "You have two routing tools available:\n"
+    "- route_to_pdf(reason) — delegate to the PDF specialist.\n"
+    "- route_to_csv(reason) — delegate to the CSV specialist.\n\n"
+    "Call the appropriate routing tool when you need a specialist. "
+    "When you have enough information to answer the user directly, "
+    "respond with plain text (do NOT call a tool).\n\n"
 
     "=== FINAL ANSWER GUIDELINES ===\n\n"
-    "When producing a final answer ([DONE]):\n"
+    "When producing a final answer:\n"
     "1. Synthesise information from the specialist agents' findings "
     "in the conversation history.\n"
     "2. Cite every fact sourced from PDF documentation with: "
@@ -359,15 +372,27 @@ def _trim_messages(messages: list) -> list:
 
 # ── Node factories ───────────────────────────────────────────────────
 
-def _make_router_node(llm):
+def _make_router_node(llm, routing_tools):
     """Create the router node — decides PDF, CSV, or final answer."""
+    llm_with_tools = llm.bind_tools(routing_tools)
 
     def router_node(state: MessagesState) -> dict:
         messages = _trim_messages(state["messages"])
-        response = llm.invoke(
+        response = llm_with_tools.invoke(
             [SystemMessage(content=ROUTER_PROMPT)] + messages
         )
-        return {"messages": [response]}
+        result = [response]
+        # When the router signals a routing decision via tool call,
+        # immediately append the corresponding ToolMessage so downstream
+        # nodes see a satisfied message history.
+        for tc in response.tool_calls:
+            result.append(
+                ToolMessage(
+                    content=tc["args"].get("reason", ""),
+                    tool_call_id=tc["id"],
+                )
+            )
+        return {"messages": result}
 
     return router_node
 
@@ -394,14 +419,27 @@ def _make_agent_node(llm, tools, prompt):
 # ── Routing / edge functions ─────────────────────────────────────────
 
 def route_from_router(state: MessagesState) -> str:
-    """Determine where to go after the router node."""
-    last_msg = state["messages"][-1]
-    content = last_msg.content if isinstance(last_msg.content, str) else ""
-    if "[ROUTE: PDF]" in content:
-        return "pdf_agent"
-    if "[ROUTE: CSV]" in content:
-        return "csv_agent"
-    # No routing tag (or [DONE]) → end the graph turn.
+    """Determine where to go after the router node.
+
+    The router node appends a ToolMessage after any routing tool call,
+    so the last message is either:
+      - a ToolMessage (routing decision) → check the preceding AIMessage
+      - an AIMessage with no tool_calls (final answer) → END
+    """
+    messages = state["messages"]
+    # Walk back past ToolMessages to find the router's AIMessage.
+    ai_msg = messages[-1]
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            ai_msg = msg
+            break
+    if hasattr(ai_msg, "tool_calls") and ai_msg.tool_calls:
+        tool_name = ai_msg.tool_calls[0]["name"]
+        if tool_name == "route_to_pdf":
+            return "pdf_agent"
+        if tool_name == "route_to_csv":
+            return "csv_agent"
+    # No tool call → final answer; end the graph turn.
     return END
 
 
@@ -441,7 +479,7 @@ def build_graph(llm, all_tools):
     graph = StateGraph(MessagesState)
 
     # ── Nodes ──
-    graph.add_node("router", _make_router_node(llm))
+    graph.add_node("router", _make_router_node(llm, ROUTING_TOOLS))
 
     graph.add_node("pdf_agent", _make_agent_node(llm, pdf_tools, PDF_PROMPT))
     graph.add_node("pdf_tools", ToolNode(pdf_tools))
@@ -612,9 +650,6 @@ async def run_agent_loop(on_response=None):
                 )
             # The last message is the router's final answer.
             answer = response["messages"][-1].content
-            # Strip the [DONE] marker if present.
-            if isinstance(answer, str) and answer.startswith("[DONE]"):
-                answer = answer[len("[DONE]"):].strip()
             logger.debug("Agent response: %s", answer)
             on_response(f"\n🤖 Assistant: {answer}\n")
         except Exception:
