@@ -428,6 +428,10 @@ def route_from_router(state: MessagesState) -> str:
     """
     messages = state["messages"]
     # Walk back past ToolMessages to find the router's AIMessage.
+    # This is a generator expression — it yields one AIMessage at a
+    # time (last-to-first) and stops as soon as next() pulls the first
+    # match.  We inspect AIMessage.tool_calls rather than the appended
+    # ToolMessage because it explicitly tells us *which* tool was called.
     ai_msg = next(
         (m for m in reversed(messages) if isinstance(m, AIMessage)),
         None,
