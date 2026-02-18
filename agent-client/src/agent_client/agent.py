@@ -428,12 +428,11 @@ def route_from_router(state: MessagesState) -> str:
     """
     messages = state["messages"]
     # Walk back past ToolMessages to find the router's AIMessage.
-    ai_msg = messages[-1]
-    for msg in reversed(messages):
-        if isinstance(msg, AIMessage):
-            ai_msg = msg
-            break
-    if hasattr(ai_msg, "tool_calls") and ai_msg.tool_calls:
+    ai_msg = next(
+        (m for m in reversed(messages) if isinstance(m, AIMessage)),
+        None,
+    )
+    if ai_msg is not None and ai_msg.tool_calls:
         tool_name = ai_msg.tool_calls[0]["name"]
         if tool_name == "route_to_pdf":
             return "pdf_agent"
