@@ -4,11 +4,17 @@ The agent connects to an already-running MCP server (stdio or SSE),
 loads the documentation and data tools, and routes user queries through
 specialised nodes:
 
-    Router  ──▶  PDF agent  ──▶  Router
-       │                            ▲
-       └───▶  CSV agent  ───────────┘
-       │
-       └───▶  END  (final answer)
+    START ──▶ (active_agent?) ──▶ specialist ↔ tools ──▶ END
+                    │                  │
+                    ▼                  ▼ (handoff)
+                 router            handoff ──▶ router
+                    │
+                    └──▶ END (greeting / chat)
+
+Once the router assigns a specialist, that specialist owns the
+conversation until the user switches context (e.g. from data
+questions to process questions).  The specialist hands back to the
+router via hand_off_to_router only on a context switch.
 
 The MCP server must be started separately — this client does NOT
 manage the server lifecycle.
@@ -97,7 +103,14 @@ CSV_TOOL_NAMES = {
 }
 
 
-# ── Routing tools ────────────────────────────────────────────────────
+# ── State ────────────────────────────────────────────────────────────
+
+class AgentState(MessagesState):
+    """Extended state that tracks which specialist owns the conversation."""
+    active_agent: str  # "pdf_agent", "csv_agent", or "" (use router)
+
+
+# ── Routing tools (used by the router) ───────────────────────────────
 
 @tool
 def route_to_pdf(reason: str) -> str:
@@ -112,6 +125,15 @@ def route_to_csv(reason: str) -> str:
 
 
 ROUTING_TOOLS = [route_to_pdf, route_to_csv]
+
+
+# ── Handoff tool (used by specialists) ───────────────────────────────
+
+@tool
+def hand_off_to_router(reason: str) -> str:
+    """Hand the conversation back to the router because the user's
+    question is outside your area of expertise."""
+    return reason
 
 
 # ── Prompts ──────────────────────────────────────────────────────────
@@ -134,61 +156,21 @@ ROUTER_PROMPT = (
     "procedures, FAQs → route to PDF.\n"
     "- Questions about specific access rights, peer recommendations, "
     "data lookups, entitlements, organisational data → route to CSV.\n"
-    "- If the question requires BOTH documentation AND data (e.g. "
-    "understanding a process then finding specific access rights), "
-    "route to PDF first for context, then CSV for data on the next "
-    "turn.\n"
-    "- If the specialist agents have already provided enough "
-    "information to fully answer the user's question → produce the "
-    "final answer.\n"
     "- If the user's question is a greeting or general chat that "
     "does not require tool lookups → answer directly.\n\n"
-
-    "=== MANDATORY CRITERIA CHECK (before routing to CSV) ===\n\n"
-    "This check applies ONLY to peer-based recommendation queries "
-    "(e.g. 'what access should I request?', 'what do my peers "
-    "have?').  For these queries, ensure the conversation contains:\n"
-    "  1. Job Title (REQUIRED)\n"
-    "  2. At least ONE of: OU, ParentOU, or a business hierarchy "
-    "value (AREANAME, SECTORNAME, SEGMENTNAME, FUNCTIONNAME)\n"
-    "If these are missing, ask the user for them BEFORE routing to "
-    "CSV.  Do NOT route to CSV for recommendations without these "
-    "criteria.\n\n"
-    "EXCEPTION — Exploratory / discovery queries should be routed "
-    "to CSV immediately WITHOUT requiring the above criteria. "
-    "Examples:\n"
-    "  - 'What organisational units are there?'\n"
-    "  - 'Show me the available job titles'\n"
-    "  - 'What business areas exist?'\n"
-    "  - 'Help me find my OU'\n"
-    "  - 'What datasets do you have?'\n"
-    "These queries let the user discover their own attributes so "
-    "they can later provide them for recommendations.\n\n"
 
     "=== RESPONSE FORMAT ===\n\n"
     "You have two routing tools available:\n"
     "- route_to_pdf(reason) — delegate to the PDF specialist.\n"
     "- route_to_csv(reason) — delegate to the CSV specialist.\n\n"
     "Call the appropriate routing tool when you need a specialist. "
-    "When you have enough information to answer the user directly, "
-    "respond with plain text (do NOT call a tool).\n\n"
-
-    "=== FINAL ANSWER GUIDELINES ===\n\n"
-    "When producing a final answer:\n"
-    "1. Synthesise information from the specialist agents' findings "
-    "in the conversation history.\n"
-    "2. Cite every fact sourced from PDF documentation with: "
-    "(Source: <page_path>, Page <N>).\n"
-    "3. Format data results as tables or lists.\n"
-    "4. Be concise but thorough.\n"
-    "5. If the data or documentation does not cover the user's "
-    "question, say so clearly.\n"
+    "When you can answer the user directly (greetings, general chat), "
+    "respond with plain text (do NOT call a tool).\n"
 )
 
 PDF_PROMPT = (
     "You are the PDF Documentation specialist for an Access "
-    "Governance assistant. Use your PDF documentation tools to find "
-    "information that answers the user's query.\n\n"
+    "Governance assistant. You answer the user directly.\n\n"
 
     "=== AVAILABLE TOOLS ===\n\n"
     "- list_topics — lists every available documentation topic and "
@@ -199,7 +181,18 @@ PDF_PROMPT = (
     "- read_page(page_path) — retrieves the complete text of a "
     "document. The text contains [Page N] markers so you can "
     "identify exactly which PDF page each piece of information "
-    "comes from.\n\n"
+    "comes from.\n"
+    "- hand_off_to_router(reason) — hand the conversation back to "
+    "the router if the user's question is outside your expertise.\n\n"
+
+    "=== WHEN TO HAND OFF ===\n\n"
+    "If the user asks about specific access rights, entitlements, "
+    "peer recommendations, data lookups, or organisational data, "
+    "call hand_off_to_router with the reason. These questions "
+    "belong to the CSV Data specialist.\n"
+    "For questions that span both documentation AND data, answer "
+    "only the documentation part and let the user know you cannot "
+    "help with the data part.\n\n"
 
     "=== SEARCH STRATEGY ===\n\n"
     "1. Call search_docs with the user's question (try different "
@@ -230,15 +223,14 @@ PDF_PROMPT = (
     "- Never omit citations for documentation-sourced information.\n\n"
 
     "=== OUTPUT ===\n\n"
-    "After completing your research, provide a thorough summary of "
-    "your findings with full citations. The routing agent will use "
-    "this to compose the final answer for the user.\n"
+    "Provide your answer directly to the user with full citations. "
+    "Be concise but thorough. If the documentation does not cover "
+    "the user's question, say so clearly.\n"
 )
 
 CSV_PROMPT = (
     "You are the CSV Data specialist for an Access Governance "
-    "assistant. Use your CSV dataset tools to find structured data "
-    "that answers the user's query.\n\n"
+    "assistant. You answer the user directly.\n\n"
 
     "=== AVAILABLE DATASETS ===\n\n"
     "Two CSV datasets provide structured data for access-rights "
@@ -285,19 +277,31 @@ CSV_PROMPT = (
     "for peer recommendations after identifying exact filter "
     "values.\n"
     "- get_column_values(dataset, column) — list all distinct "
-    "values in a column. Useful for small-cardinality columns.\n\n"
+    "values in a column. Useful for small-cardinality columns.\n"
+    "- hand_off_to_router(reason) — hand the conversation back to "
+    "the router if the user's question is outside your expertise.\n\n"
+
+    "=== WHEN TO HAND OFF ===\n\n"
+    "If the user asks about how something works, processes, "
+    "policies, procedures, FAQs, or how-to guides, call "
+    "hand_off_to_router with the reason. These questions belong "
+    "to the PDF Documentation specialist.\n"
+    "For questions that span both data AND documentation, answer "
+    "only the data part and let the user know you cannot help "
+    "with the documentation part.\n\n"
 
     "=== MANDATORY MINIMUM CRITERIA FOR PEER RECOMMENDATIONS ===\n\n"
     "Before running peer-based entitlement searches (Strategy 1), "
-    "you MUST have ALL of the following:\n"
+    "you MUST have ALL of the following from the conversation:\n"
     "  1. JOBTITLE — always required, no exceptions.\n"
     "  2. At least ONE of:\n"
     "     - OU (organisational unit)\n"
     "     - ParentOU (parent organisational unit)\n"
     "     - One business hierarchy value: AREANAME, SECTORNAME, "
     "SEGMENTNAME, or FUNCTIONNAME\n\n"
-    "If both criteria are not available in the conversation, state "
-    "what is missing so the routing agent can ask the user.\n\n"
+    "If these criteria are missing, ask the user directly for "
+    "the missing information. Do NOT proceed with peer "
+    "recommendations without these criteria.\n\n"
     "This restriction does NOT apply to exploratory queries "
     "(Strategy 3) such as listing column values, browsing "
     "datasets, or helping the user discover their own attributes.\n\n"
@@ -344,9 +348,9 @@ CSV_PROMPT = (
     "fewer filter columns.\n\n"
 
     "=== OUTPUT ===\n\n"
-    "After completing your research, provide a thorough summary of "
-    "your findings with formatted tables or lists. The routing "
-    "agent will use this to compose the final answer for the user.\n"
+    "Provide your answer directly to the user with formatted tables "
+    "or lists. Be concise but thorough. If the data does not cover "
+    "the user's question, say so clearly.\n"
 )
 
 
@@ -373,18 +377,20 @@ def _trim_messages(messages: list) -> list:
 # ── Node factories ───────────────────────────────────────────────────
 
 def _make_router_node(llm, routing_tools):
-    """Create the router node — decides PDF, CSV, or final answer."""
+    """Create the router node — decides PDF, CSV, or direct answer.
+
+    When routing to a specialist, sets ``active_agent`` so subsequent
+    turns skip the router and go directly to that specialist.
+    """
     llm_with_tools = llm.bind_tools(routing_tools)
 
-    def router_node(state: MessagesState) -> dict:
+    def router_node(state: AgentState) -> dict:
         messages = _trim_messages(state["messages"])
         response = llm_with_tools.invoke(
             [SystemMessage(content=ROUTER_PROMPT)] + messages
         )
         result = [response]
-        # When the router signals a routing decision via tool call,
-        # immediately append the corresponding ToolMessage so downstream
-        # nodes see a satisfied message history.
+        active_agent = ""
         for tc in response.tool_calls:
             result.append(
                 ToolMessage(
@@ -392,7 +398,11 @@ def _make_router_node(llm, routing_tools):
                     tool_call_id=tc["id"],
                 )
             )
-        return {"messages": result}
+            if tc["name"] == "route_to_pdf":
+                active_agent = "pdf_agent"
+            elif tc["name"] == "route_to_csv":
+                active_agent = "csv_agent"
+        return {"messages": result, "active_agent": active_agent}
 
     return router_node
 
@@ -406,7 +416,7 @@ def _make_agent_node(llm, tools, prompt):
     """
     llm_with_tools = llm.bind_tools(tools)
 
-    def agent_node(state: MessagesState) -> dict:
+    def agent_node(state: AgentState) -> dict:
         messages = _trim_messages(state["messages"])
         response = llm_with_tools.invoke(
             [SystemMessage(content=prompt)] + messages
@@ -416,22 +426,46 @@ def _make_agent_node(llm, tools, prompt):
     return agent_node
 
 
+# ── Handoff node ─────────────────────────────────────────────────────
+
+def _handoff_node(state: AgentState) -> dict:
+    """Process a hand_off_to_router tool call and clear the active agent.
+
+    Produces a ToolMessage for every pending tool call so the message
+    history stays valid, then resets ``active_agent`` to ``""`` so the
+    router takes over on the next step.
+    """
+    last_msg = state["messages"][-1]
+    result = []
+    for tc in last_msg.tool_calls:
+        if tc["name"] == "hand_off_to_router":
+            content = tc["args"].get("reason", "Routing to another specialist.")
+        else:
+            content = "Tool call cancelled due to handoff."
+        result.append(ToolMessage(content=content, tool_call_id=tc["id"]))
+    return {"messages": result, "active_agent": ""}
+
+
 # ── Routing / edge functions ─────────────────────────────────────────
 
-def route_from_router(state: MessagesState) -> str:
+def route_entry(state: AgentState) -> str:
+    """Route from START: skip the router if a specialist already owns
+    the conversation."""
+    active = state.get("active_agent", "")
+    if active in ("pdf_agent", "csv_agent"):
+        return active
+    return "router"
+
+
+def route_from_router(state: AgentState) -> str:
     """Determine where to go after the router node.
 
     The router node appends a ToolMessage after any routing tool call,
     so the last message is either:
       - a ToolMessage (routing decision) → check the preceding AIMessage
-      - an AIMessage with no tool_calls (final answer) → END
+      - an AIMessage with no tool_calls (direct answer) → END
     """
     messages = state["messages"]
-    # Walk back past ToolMessages to find the router's AIMessage.
-    # This is a generator expression — it yields one AIMessage at a
-    # time (last-to-first) and stops as soon as next() pulls the first
-    # match.  We inspect AIMessage.tool_calls rather than the appended
-    # ToolMessage because it explicitly tells us *which* tool was called.
     ai_msg = next(
         (m for m in reversed(messages) if isinstance(m, AIMessage)),
         None,
@@ -442,19 +476,27 @@ def route_from_router(state: MessagesState) -> str:
             return "pdf_agent"
         if tool_name == "route_to_csv":
             return "csv_agent"
-    # No tool call → final answer; end the graph turn.
+    # No tool call → direct answer; end the graph turn.
     return END
 
 
-def _make_tool_or_router_check(tool_node_name: str):
-    """Return an edge function: route to *tool_node_name* if there are
-    pending tool calls, otherwise back to the router."""
+def _make_specialist_edge(tool_node_name: str):
+    """Return an edge function for a specialist node.
 
-    def check(state: MessagesState) -> str:
+    Routing logic:
+      - hand_off_to_router tool call → ``"handoff"`` node
+      - MCP tool calls → *tool_node_name* (e.g. ``"pdf_tools"``)
+      - no tool calls (final answer) → ``END``
+    """
+
+    def check(state: AgentState) -> str:
         last_msg = state["messages"][-1]
         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+            if any(tc["name"] == "hand_off_to_router"
+                   for tc in last_msg.tool_calls):
+                return "handoff"
             return tool_node_name
-        return "router"
+        return END
 
     return check
 
@@ -462,61 +504,83 @@ def _make_tool_or_router_check(tool_node_name: str):
 # ── Graph builder ────────────────────────────────────────────────────
 
 def build_graph(llm, all_tools):
-    """Build the StateGraph with Router → PDF / CSV → Router loop.
+    """Build the StateGraph with persistent specialist ownership.
 
     Graph structure::
 
-        START ──▶ router ──(conditional)──▶ pdf_agent ──▶ pdf_tools ─┐
-                    │  ▲                       │                      │
-                    │  └───────────────────────┘◀─────────────────────┘
-                    │  ▲
-                    │  └───────────────────────┐◀─────────────────────┐
-                    └──(conditional)──▶ csv_agent ──▶ csv_tools ──────┘
-                    │
-                    └──▶ END
+        START ──(active_agent?)──▶ pdf_agent ↔ pdf_tools ──▶ END
+                       │               │
+                       │               └──▶ handoff ──▶ router
+                       │                                  │
+                       ├──▶ router ──(route)──▶ ...       │
+                       │       │                          │
+                       │       └──▶ END                   │
+                       │                                  │
+                       └──────────▶ csv_agent ↔ csv_tools ──▶ END
+                                       │
+                                       └──▶ handoff ──▶ router
+
+    Once the router assigns a specialist, ``active_agent`` is set in
+    the state.  On subsequent user turns, START routes directly to
+    that specialist, bypassing the router entirely.  The specialist
+    only hands back to the router via ``hand_off_to_router`` when the
+    user switches context.
     """
     # Split MCP tools into PDF and CSV groups.
     pdf_tools = [t for t in all_tools if t.name in PDF_TOOL_NAMES]
     csv_tools = [t for t in all_tools if t.name in CSV_TOOL_NAMES]
 
-    graph = StateGraph(MessagesState)
+    # Each specialist gets its MCP tools + the handoff tool.
+    pdf_all_tools = pdf_tools + [hand_off_to_router]
+    csv_all_tools = csv_tools + [hand_off_to_router]
+
+    graph = StateGraph(AgentState)
 
     # ── Nodes ──
     graph.add_node("router", _make_router_node(llm, ROUTING_TOOLS))
 
-    graph.add_node("pdf_agent", _make_agent_node(llm, pdf_tools, PDF_PROMPT))
+    graph.add_node("pdf_agent", _make_agent_node(llm, pdf_all_tools, PDF_PROMPT))
     graph.add_node("pdf_tools", ToolNode(pdf_tools))
 
-    graph.add_node("csv_agent", _make_agent_node(llm, csv_tools, CSV_PROMPT))
+    graph.add_node("csv_agent", _make_agent_node(llm, csv_all_tools, CSV_PROMPT))
     graph.add_node("csv_tools", ToolNode(csv_tools))
+
+    graph.add_node("handoff", _handoff_node)
 
     # ── Edges ──
 
-    # Entry point.
-    graph.add_edge(START, "router")
+    # Entry: check if a specialist already owns the conversation.
+    graph.add_conditional_edges(
+        START,
+        route_entry,
+        {"router": "router", "pdf_agent": "pdf_agent", "csv_agent": "csv_agent"},
+    )
 
-    # Router decides next step.
+    # Router decides which specialist to activate.
     graph.add_conditional_edges(
         "router",
         route_from_router,
         {"pdf_agent": "pdf_agent", "csv_agent": "csv_agent", END: END},
     )
 
-    # PDF sub-loop: agent → tools → agent → … → router.
+    # PDF sub-loop: agent → tools → agent → … → END or handoff.
     graph.add_conditional_edges(
         "pdf_agent",
-        _make_tool_or_router_check("pdf_tools"),
-        {"pdf_tools": "pdf_tools", "router": "router"},
+        _make_specialist_edge("pdf_tools"),
+        {"pdf_tools": "pdf_tools", "handoff": "handoff", END: END},
     )
     graph.add_edge("pdf_tools", "pdf_agent")
 
-    # CSV sub-loop: agent → tools → agent → … → router.
+    # CSV sub-loop: agent → tools → agent → … → END or handoff.
     graph.add_conditional_edges(
         "csv_agent",
-        _make_tool_or_router_check("csv_tools"),
-        {"csv_tools": "csv_tools", "router": "router"},
+        _make_specialist_edge("csv_tools"),
+        {"csv_tools": "csv_tools", "handoff": "handoff", END: END},
     )
     graph.add_edge("csv_tools", "csv_agent")
+
+    # Handoff returns to router for re-routing.
+    graph.add_edge("handoff", "router")
 
     return graph
 
@@ -651,7 +715,7 @@ async def run_agent_loop(on_response=None):
                     {"messages": [HumanMessage(content=user_input)]},
                     config,
                 )
-            # The last message is the router's final answer.
+            # The last message is the specialist's or router's answer.
             answer = response["messages"][-1].content
             logger.debug("Agent response: %s", answer)
             on_response(f"\n🤖 Assistant: {answer}\n")
