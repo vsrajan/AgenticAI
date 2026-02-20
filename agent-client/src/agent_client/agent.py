@@ -322,8 +322,8 @@ CSV_PROMPT = (
     "hierarchy level. Never drop JOBTITLE.\n"
     "  e. For top ResourceIDs, call search_dataset on Resources "
     "for names and descriptions.\n"
-    "  f. Present as table: Resource Name, Description, Requesting "
-    "System, Peer Count. Sort by Peer Count descending.\n\n"
+    "  f. Present as table: ResourceID, Resource Name, Resource "
+    "Description, Peer Count. Sort by Peer Count descending.\n\n"
 
     "Strategy 2 — Search by description:\n"
     "  a. search_dataset on Resources with the description.\n"
@@ -348,9 +348,12 @@ CSV_PROMPT = (
     "fewer filter columns.\n\n"
 
     "=== OUTPUT ===\n\n"
-    "Provide your answer directly to the user with formatted tables "
-    "or lists. Be concise but thorough. If the data does not cover "
-    "the user's question, say so clearly.\n"
+    "Provide your answer directly to the user. Be concise but "
+    "thorough. If the data does not cover the user's question, "
+    "say so clearly.\n\n"
+    "For peer-recommendation results, present a table with these "
+    "columns: ResourceID, Resource Name, Resource Description, "
+    "Peer Count. Sort by Peer Count descending.\n"
 )
 
 
