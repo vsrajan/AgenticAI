@@ -186,13 +186,24 @@ PDF_PROMPT = (
     "the router if the user's question is outside your expertise.\n\n"
 
     "=== WHEN TO HAND OFF ===\n\n"
-    "If the user asks about specific access rights, entitlements, "
-    "peer recommendations, data lookups, or organisational data, "
-    "call hand_off_to_router with the reason. These questions "
-    "belong to the CSV Data specialist.\n"
-    "For questions that span both documentation AND data, answer "
-    "only the documentation part and let the user know you cannot "
-    "help with the data part.\n\n"
+    "If the user asks ONLY about specific access rights, entitlements, "
+    "peer recommendations, data lookups, or organisational data "
+    "(and nothing documentation-related), call hand_off_to_router "
+    "with the reason. These questions belong to the CSV Data "
+    "specialist.\n\n"
+
+    "=== MIXED QUESTIONS (CRITICAL) ===\n\n"
+    "If the user's message contains BOTH a documentation question AND "
+    "a data question (e.g. 'How do I set up delegations? Also, what "
+    "access do I need?'), you MUST:\n"
+    "1. Answer the documentation part FIRST — call search_docs, "
+    "read_page, etc. as normal and provide a full cited answer.\n"
+    "2. In your final answer, tell the user: 'For the data part of "
+    "your question (e.g. specific access rights), please ask me "
+    "separately so I can route it to the right specialist.'\n"
+    "3. Do NOT call hand_off_to_router for mixed questions. If you "
+    "call hand_off_to_router alongside your search tools, all your "
+    "tool calls will be cancelled and the user will get no answer.\n\n"
 
     "=== SEARCH STRATEGY ===\n\n"
     "1. Call search_docs with the user's question (try different "
@@ -282,13 +293,23 @@ CSV_PROMPT = (
     "the router if the user's question is outside your expertise.\n\n"
 
     "=== WHEN TO HAND OFF ===\n\n"
-    "If the user asks about how something works, processes, "
-    "policies, procedures, FAQs, or how-to guides, call "
-    "hand_off_to_router with the reason. These questions belong "
-    "to the PDF Documentation specialist.\n"
-    "For questions that span both data AND documentation, answer "
-    "only the data part and let the user know you cannot help "
-    "with the documentation part.\n\n"
+    "If the user asks ONLY about how something works, processes, "
+    "policies, procedures, FAQs, or how-to guides (and nothing "
+    "data-related), call hand_off_to_router with the reason. "
+    "These questions belong to the PDF Documentation specialist.\n\n"
+
+    "=== MIXED QUESTIONS (CRITICAL) ===\n\n"
+    "If the user's message contains BOTH a data question AND a "
+    "documentation question (e.g. 'What access do my peers have? "
+    "Also, how does the approval process work?'), you MUST:\n"
+    "1. Answer the data part FIRST — call your data tools as "
+    "normal and provide a full answer.\n"
+    "2. In your final answer, tell the user: 'For the documentation "
+    "part of your question (e.g. processes, how-to), please ask me "
+    "separately so I can route it to the right specialist.'\n"
+    "3. Do NOT call hand_off_to_router for mixed questions. If you "
+    "call hand_off_to_router alongside your data tools, all your "
+    "tool calls will be cancelled and the user will get no answer.\n\n"
 
     "=== MANDATORY MINIMUM CRITERIA FOR PEER RECOMMENDATIONS ===\n\n"
     "Before running peer-based entitlement searches (Strategy 1), "
@@ -449,6 +470,68 @@ def _handoff_node(state: AgentState) -> dict:
     return {"messages": result, "active_agent": ""}
 
 
+# ── Custom tool node ─────────────────────────────────────────────────
+
+def _make_tool_node(domain_tools):
+    """Create a tool node that gracefully handles mixed domain + handoff calls.
+
+    When the specialist calls both domain tools and ``hand_off_to_router``
+    in a single response, this node:
+      - executes the domain tools normally via ``ToolNode``
+      - stubs ``hand_off_to_router`` with a directive telling the
+        specialist to answer its part and inform the user about the rest
+
+    This prevents the ToolNode from failing on the unknown handoff tool.
+    """
+    base_node = ToolNode(domain_tools)
+    domain_names = {t.name for t in domain_tools}
+
+    def node(state: AgentState) -> dict:
+        last_msg = state["messages"][-1]
+        handoff_calls = [
+            tc for tc in last_msg.tool_calls
+            if tc["name"] == "hand_off_to_router"
+        ]
+        domain_calls = [
+            tc for tc in last_msg.tool_calls
+            if tc["name"] in domain_names
+        ]
+
+        if not handoff_calls:
+            # No mixed calls — run all tools normally.
+            return base_node.invoke(state)
+
+        # Mixed calls: execute domain tools only, stub the handoff.
+        # Build a modified AIMessage containing only domain tool_calls
+        # so the base ToolNode can process them without errors.
+        modified_msg = AIMessage(
+            content=last_msg.content,
+            tool_calls=domain_calls,
+            id=last_msg.id,
+        )
+        modified_state = {**state, "messages": list(state["messages"])[:-1] + [modified_msg]}
+        result = base_node.invoke(modified_state)
+
+        # Add stub responses for the handoff calls.
+        for tc in handoff_calls:
+            result["messages"].append(
+                ToolMessage(
+                    content=(
+                        "Handoff was deferred because you also called "
+                        "domain tools. Answer the part within your "
+                        "expertise using the tool results above, then "
+                        "tell the user to ask separately about the part "
+                        "outside your expertise."
+                    ),
+                    tool_call_id=tc["id"],
+                )
+            )
+
+        return result
+
+    return node
+
+
 # ── Routing / edge functions ─────────────────────────────────────────
 
 def route_entry(state: AgentState) -> str:
@@ -487,17 +570,30 @@ def _make_specialist_edge(tool_node_name: str):
     """Return an edge function for a specialist node.
 
     Routing logic:
-      - hand_off_to_router tool call → ``"handoff"`` node
-      - MCP tool calls → *tool_node_name* (e.g. ``"pdf_tools"``)
+      - hand_off_to_router as the *only* tool call → ``"handoff"`` node
+      - MCP tool calls (possibly mixed with hand_off_to_router) →
+        *tool_node_name* — domain tools take priority so the specialist
+        can answer its part of a mixed question
       - no tool calls (final answer) → ``END``
     """
 
     def check(state: AgentState) -> str:
         last_msg = state["messages"][-1]
         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-            if any(tc["name"] == "hand_off_to_router"
-                   for tc in last_msg.tool_calls):
+            has_handoff = any(
+                tc["name"] == "hand_off_to_router"
+                for tc in last_msg.tool_calls
+            )
+            has_domain = any(
+                tc["name"] != "hand_off_to_router"
+                for tc in last_msg.tool_calls
+            )
+            if has_handoff and not has_domain:
+                # Pure handoff — no domain work to do.
                 return "handoff"
+            # Domain tools present (possibly alongside a stray handoff
+            # call).  Route to the tool node so the specialist can
+            # answer the part within its expertise.
             return tool_node_name
         return END
 
@@ -543,10 +639,10 @@ def build_graph(llm, all_tools):
     graph.add_node("router", _make_router_node(llm, ROUTING_TOOLS))
 
     graph.add_node("pdf_agent", _make_agent_node(llm, pdf_all_tools, PDF_PROMPT))
-    graph.add_node("pdf_tools", ToolNode(pdf_tools))
+    graph.add_node("pdf_tools", _make_tool_node(pdf_tools))
 
     graph.add_node("csv_agent", _make_agent_node(llm, csv_all_tools, CSV_PROMPT))
-    graph.add_node("csv_tools", ToolNode(csv_tools))
+    graph.add_node("csv_tools", _make_tool_node(csv_tools))
 
     graph.add_node("handoff", _handoff_node)
 
