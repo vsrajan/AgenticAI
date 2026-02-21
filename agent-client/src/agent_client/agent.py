@@ -768,12 +768,30 @@ async def _dump_history(agent, config) -> None:
         snapshots = [s async for s in agent.aget_state_history(config)]
         snapshots.reverse()  # chronological order
 
+        # Each snapshot's messages list is *cumulative* — it contains every
+        # message that existed at that checkpoint, not just the new ones.
+        # However, the snapshot metadata only records a single "source" node
+        # (the node that produced that checkpoint).  To figure out which node
+        # produced each *individual* message, we walk the snapshots in
+        # chronological order and use a sliding-window diff:
+        #
+        #   prev_count tracks where the previous snapshot's messages ended,
+        #   so snap_msgs[prev_count:] gives only the messages that were
+        #   *added* by the current snapshot's source node.
+        #
+        #   Iteration | prev_count (start) | len(snap_msgs) | slice examined
+        #   ----------|--------------------|-----------------|--------------
+        #   Snap 0    | 0                  | 3               | msgs 0–2
+        #   Snap 1    | 3                  | 5               | msgs 3–4
+        #   Snap 2    | 5                  | 7               | msgs 5–6
+        #
+        # After the loop, msg_id_to_node maps every message id to the graph
+        # node that produced it.
         msg_id_to_node: dict[str, str] = {}
         prev_count = 0
         for snap in snapshots:
             node = snap.metadata.get("source", "unknown")
             snap_msgs = snap.values.get("messages", [])
-            # Tag every message that is new compared to the previous snapshot.
             for msg in snap_msgs[prev_count:]:
                 msg_id_to_node[msg.id] = node
 
