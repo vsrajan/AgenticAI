@@ -752,20 +752,42 @@ LOG_FILE = "agent_log.txt"
 
 
 async def _dump_history(agent, config) -> None:
-    """Write the full conversation history from the checkpointer to *LOG_FILE*."""
+    """Write the full conversation history from the checkpointer to *LOG_FILE*.
+
+    Each message is annotated with the graph node that produced it so
+    that readers can trace the exact invocation flow.
+    """
     try:
         state = await agent.aget_state(config)
         messages = state.values.get("messages", [])
         if not messages:
             return
+
+        # Walk the checkpoint history (newest-first) and build a mapping
+        # from message id → source node that produced it.
+        snapshots = [s async for s in agent.aget_state_history(config)]
+        snapshots.reverse()  # chronological order
+
+        msg_id_to_node: dict[str, str] = {}
+        prev_count = 0
+        for snap in snapshots:
+            node = snap.metadata.get("source", "unknown")
+            snap_msgs = snap.values.get("messages", [])
+            # Tag every message that is new compared to the previous snapshot.
+            for msg in snap_msgs[prev_count:]:
+                msg_id_to_node[msg.id] = node
+
+            prev_count = len(snap_msgs)
+
         with open(LOG_FILE, "w", encoding="utf-8") as fh:
             fh.write(f"Agent session log — {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
             fh.write(f"Total messages: {len(messages)}\n")
             fh.write("=" * 60 + "\n\n")
             for msg in messages:
                 role = msg.__class__.__name__
+                node = msg_id_to_node.get(msg.id, "unknown")
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                fh.write(f"[{role}]\n{content}\n\n")
+                fh.write(f"[{role}]  (node: {node})\n{content}\n\n")
         logger.info("Session history written to %s (%d messages)", LOG_FILE, len(messages))
     except Exception:
         logger.exception("Failed to write session history to %s", LOG_FILE)
