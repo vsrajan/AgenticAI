@@ -514,9 +514,12 @@ def _make_tool_node(domain_tools):
             tool_calls=domain_calls,
             id=last_msg.id,
         )
-        # Shallow-copy state with a new messages list so we don't mutate
-        # the real graph state (AgentState is a dict, passed by reference).
-        modified_state = {**state, "messages": list(state["messages"])[:-1] + [modified_msg]}
+        # Unpack state and replace "messages" with a new list into modified_state,
+        # so we don't mutate the real graph state (AgentState is a dict, passed by reference).
+        modified_state = {
+            **state,
+            "messages": list(state["messages"])[:-1] + [modified_msg]
+        }
         # Returns {"messages": [ToolMessage, ...]} — one per domain tool call.
         # This does not touch the graph state; it's just a local result dict.
         result = base_node.invoke(modified_state)
