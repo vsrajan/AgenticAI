@@ -483,6 +483,11 @@ def _make_tool_node(domain_tools):
 
     This prevents the ToolNode from failing on the unknown handoff tool.
     """
+    # Standalone tool executor — does NOT mutate the graph state.
+    # ToolNode.invoke() takes a state dict, runs the tool calls found in it,
+    # and returns an update dict (e.g. {"messages": [ToolMessage, ...]}).
+    # The actual graph state is only updated later, when the graph runtime
+    # merges this node's return value via reducers (e.g. add_messages).
     base_node = ToolNode(domain_tools)
     domain_names = {t.name for t in domain_tools}
 
@@ -509,7 +514,11 @@ def _make_tool_node(domain_tools):
             tool_calls=domain_calls,
             id=last_msg.id,
         )
+        # Shallow-copy state with a new messages list so we don't mutate
+        # the real graph state (AgentState is a dict, passed by reference).
         modified_state = {**state, "messages": list(state["messages"])[:-1] + [modified_msg]}
+        # Returns {"messages": [ToolMessage, ...]} — one per domain tool call.
+        # This does not touch the graph state; it's just a local result dict.
         result = base_node.invoke(modified_state)
 
         # Add stub responses for the handoff calls.
@@ -527,6 +536,8 @@ def _make_tool_node(domain_tools):
                 )
             )
 
+        # The graph runtime will merge this return value into the real
+        # state via reducers (add_messages appends to state["messages"]).
         return result
 
     return node
