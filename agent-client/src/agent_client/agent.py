@@ -1,4 +1,4 @@
-"""LangGraph custom StateGraph agent with Router, PDF, and CSV nodes.
+"""LangGraph custom StateGraph agent with Router, Knowledgebase, and Resource nodes.
 
 The agent connects to an already-running MCP server (stdio or SSE),
 loads the documentation and data tools, and routes user queries through
@@ -92,8 +92,8 @@ class Spinner:
 KEEP_LAST_N = int(os.environ.get("KEEP_LAST_N_MSGS", "20"))
 
 # Tool name sets used for splitting MCP tools into groups.
-PDF_TOOL_NAMES = {"list_topics", "search_docs", "read_page"}
-CSV_TOOL_NAMES = {
+KNOWLEDGEBASE_TOOL_NAMES = {"list_topics", "search_docs", "read_page"}
+RESOURCE_TOOL_NAMES = {
     "list_datasets",
     "search_dataset",
     "filter_dataset",
@@ -107,24 +107,24 @@ CSV_TOOL_NAMES = {
 
 class AgentState(MessagesState):
     """Extended state that tracks which specialist owns the conversation."""
-    active_agent: str  # "pdf_agent", "csv_agent", or "" (use router)
+    active_agent: str  # "knowledgebase_agent", "resource_agent", or "" (use router)
 
 
 # ── Routing tools (used by the router) ───────────────────────────────
 
 @tool
-def route_to_pdf(reason: str) -> str:
-    """Route the query to the PDF Documentation specialist agent."""
+def route_to_knowledgebase(reason: str) -> str:
+    """Route the query to the Knowledgebase specialist agent."""
     return reason
 
 
 @tool
-def route_to_csv(reason: str) -> str:
-    """Route the query to the CSV Data specialist agent."""
+def route_to_resource(reason: str) -> str:
+    """Route the query to the Resource specialist agent."""
     return reason
 
 
-ROUTING_TOOLS = [route_to_pdf, route_to_csv]
+ROUTING_TOOLS = [route_to_knowledgebase, route_to_resource]
 
 
 # ── Handoff tool (used by specialists) ───────────────────────────────
@@ -144,32 +144,32 @@ ROUTER_PROMPT = (
     "decide the next step.\n\n"
 
     "You have two specialist agents:\n"
-    "1. PDF Documentation Agent — answers questions about how Access "
+    "1. Knowledgebase Agent — answers questions about how Access "
     "Governance works: processes, procedures, FAQs, how-to guides, "
     "and policies.\n"
-    "2. CSV Data Agent — handles structured data lookups: access "
+    "2. Resource Agent — handles structured data lookups: access "
     "rights catalogues, entitlement records, peer-based "
     "recommendations, and organisational data.\n\n"
 
     "=== DECISION RULES ===\n\n"
     "- Questions about how something works, processes, policies, "
-    "procedures, FAQs → route to PDF.\n"
+    "procedures, FAQs → route to Knowledgebase.\n"
     "- Questions about specific access rights, peer recommendations, "
-    "data lookups, entitlements, organisational data → route to CSV.\n"
+    "data lookups, entitlements, organisational data → route to Resource.\n"
     "- If the user's question is a greeting or general chat that "
     "does not require tool lookups → answer directly.\n\n"
 
     "=== RESPONSE FORMAT ===\n\n"
     "You have two routing tools available:\n"
-    "- route_to_pdf(reason) — delegate to the PDF specialist.\n"
-    "- route_to_csv(reason) — delegate to the CSV specialist.\n\n"
+    "- route_to_knowledgebase(reason) — delegate to the Knowledgebase specialist.\n"
+    "- route_to_resource(reason) — delegate to the Resource specialist.\n\n"
     "Call the appropriate routing tool when you need a specialist. "
     "When you can answer the user directly (greetings, general chat), "
     "respond with plain text (do NOT call a tool).\n"
 )
 
-PDF_PROMPT = (
-    "You are the PDF Documentation specialist for an Access "
+KNOWLEDGEBASE_PROMPT = (
+    "You are the Knowledgebase specialist for an Access "
     "Governance assistant. You answer the user directly.\n\n"
 
     "=== AVAILABLE TOOLS ===\n\n"
@@ -189,7 +189,7 @@ PDF_PROMPT = (
     "If the user asks ONLY about specific access rights, entitlements, "
     "peer recommendations, data lookups, or organisational data "
     "(and nothing documentation-related), call hand_off_to_router "
-    "with the reason. These questions belong to the CSV Data "
+    "with the reason. These questions belong to the Resource "
     "specialist.\n\n"
 
     "=== MIXED QUESTIONS (CRITICAL) ===\n\n"
@@ -239,8 +239,8 @@ PDF_PROMPT = (
     "the user's question, say so clearly.\n"
 )
 
-CSV_PROMPT = (
-    "You are the CSV Data specialist for an Access Governance "
+RESOURCE_PROMPT = (
+    "You are the Resource specialist for an Access Governance "
     "assistant. You answer the user directly.\n\n"
 
     "=== AVAILABLE DATASETS ===\n\n"
@@ -296,7 +296,7 @@ CSV_PROMPT = (
     "If the user asks ONLY about how something works, processes, "
     "policies, procedures, FAQs, or how-to guides (and nothing "
     "data-related), call hand_off_to_router with the reason. "
-    "These questions belong to the PDF Documentation specialist.\n\n"
+    "These questions belong to the Knowledgebase specialist.\n\n"
 
     "=== MIXED QUESTIONS (CRITICAL) ===\n\n"
     "If the user's message contains BOTH a data question AND a "
@@ -401,7 +401,7 @@ def _trim_messages(messages: list) -> list:
 # ── Node factories ───────────────────────────────────────────────────
 
 def _make_router_node(llm, routing_tools):
-    """Create the router node — decides PDF, CSV, or direct answer.
+    """Create the router node — decides Knowledgebase, Resource, or direct answer.
 
     When routing to a specialist, sets ``active_agent`` so subsequent
     turns skip the router and go directly to that specialist.
@@ -422,17 +422,17 @@ def _make_router_node(llm, routing_tools):
                     tool_call_id=tc["id"],
                 )
             )
-            if tc["name"] == "route_to_pdf":
-                active_agent = "pdf_agent"
-            elif tc["name"] == "route_to_csv":
-                active_agent = "csv_agent"
+            if tc["name"] == "route_to_knowledgebase":
+                active_agent = "knowledgebase_agent"
+            elif tc["name"] == "route_to_resource":
+                active_agent = "resource_agent"
         return {"messages": result, "active_agent": active_agent}
 
     return router_node
 
 
 def _make_agent_node(llm, tools, prompt):
-    """Create a specialist agent node (PDF or CSV).
+    """Create a specialist agent node (Knowledgebase or Resource).
 
     The returned node binds *tools* to the LLM so it can produce
     ``tool_calls``.  Actual tool execution happens in a separate
@@ -552,7 +552,7 @@ def route_entry(state: AgentState) -> str:
     """Route from START: skip the router if a specialist already owns
     the conversation."""
     active = state.get("active_agent", "")
-    if active in ("pdf_agent", "csv_agent"):
+    if active in ("knowledgebase_agent", "resource_agent"):
         return active
     return "router"
 
@@ -572,10 +572,10 @@ def route_from_router(state: AgentState) -> str:
     )
     if ai_msg is not None and ai_msg.tool_calls:
         tool_name = ai_msg.tool_calls[0]["name"]
-        if tool_name == "route_to_pdf":
-            return "pdf_agent"
-        if tool_name == "route_to_csv":
-            return "csv_agent"
+        if tool_name == "route_to_knowledgebase":
+            return "knowledgebase_agent"
+        if tool_name == "route_to_resource":
+            return "resource_agent"
     # No tool call → direct answer; end the graph turn.
     return END
 
@@ -621,17 +621,17 @@ def build_graph(llm, all_tools):
 
     Graph structure::
 
-        START ──(active_agent?)──▶ pdf_agent ↔ pdf_tools ──▶ END
-                       │               │
-                       │               └──▶ handoff ──▶ router
-                       │                                  │
-                       ├──▶ router ──(route)──▶ ...       │
-                       │       │                          │
-                       │       └──▶ END                   │
-                       │                                  │
-                       └──────────▶ csv_agent ↔ csv_tools ──▶ END
-                                       │
-                                       └──▶ handoff ──▶ router
+        START ──(active_agent?)──▶ knowledgebase_agent ↔ knowledgebase_tools ──▶ END
+                       │                    │
+                       │                    └──▶ handoff ──▶ router
+                       │                                       │
+                       ├──▶ router ──(route)──▶ ...            │
+                       │       │                               │
+                       │       └──▶ END                        │
+                       │                                       │
+                       └──────────▶ resource_agent ↔ resource_tools ──▶ END
+                                          │
+                                          └──▶ handoff ──▶ router
 
     Once the router assigns a specialist, ``active_agent`` is set in
     the state.  On subsequent user turns, START routes directly to
@@ -639,24 +639,24 @@ def build_graph(llm, all_tools):
     only hands back to the router via ``hand_off_to_router`` when the
     user switches context.
     """
-    # Split MCP tools into PDF and CSV groups.
-    pdf_tools = [t for t in all_tools if t.name in PDF_TOOL_NAMES]
-    csv_tools = [t for t in all_tools if t.name in CSV_TOOL_NAMES]
+    # Split MCP tools into Knowledgebase and Resource groups.
+    knowledgebase_tools = [t for t in all_tools if t.name in KNOWLEDGEBASE_TOOL_NAMES]
+    resource_tools = [t for t in all_tools if t.name in RESOURCE_TOOL_NAMES]
 
     # Each specialist gets its MCP tools + the handoff tool.
-    pdf_all_tools = pdf_tools + [hand_off_to_router]
-    csv_all_tools = csv_tools + [hand_off_to_router]
+    knowledgebase_all_tools = knowledgebase_tools + [hand_off_to_router]
+    resource_all_tools = resource_tools + [hand_off_to_router]
 
     graph = StateGraph(AgentState)
 
     # ── Nodes ──
     graph.add_node("router", _make_router_node(llm, ROUTING_TOOLS))
 
-    graph.add_node("pdf_agent", _make_agent_node(llm, pdf_all_tools, PDF_PROMPT))
-    graph.add_node("pdf_tools", _make_tool_node(pdf_tools))
+    graph.add_node("knowledgebase_agent", _make_agent_node(llm, knowledgebase_all_tools, KNOWLEDGEBASE_PROMPT))
+    graph.add_node("knowledgebase_tools", _make_tool_node(knowledgebase_tools))
 
-    graph.add_node("csv_agent", _make_agent_node(llm, csv_all_tools, CSV_PROMPT))
-    graph.add_node("csv_tools", _make_tool_node(csv_tools))
+    graph.add_node("resource_agent", _make_agent_node(llm, resource_all_tools, RESOURCE_PROMPT))
+    graph.add_node("resource_tools", _make_tool_node(resource_tools))
 
     graph.add_node("handoff", _handoff_node)
 
@@ -666,31 +666,31 @@ def build_graph(llm, all_tools):
     graph.add_conditional_edges(
         START,
         route_entry,
-        {"router": "router", "pdf_agent": "pdf_agent", "csv_agent": "csv_agent"},
+        {"router": "router", "knowledgebase_agent": "knowledgebase_agent", "resource_agent": "resource_agent"},
     )
 
     # Router decides which specialist to activate.
     graph.add_conditional_edges(
         "router",
         route_from_router,
-        {"pdf_agent": "pdf_agent", "csv_agent": "csv_agent", END: END},
+        {"knowledgebase_agent": "knowledgebase_agent", "resource_agent": "resource_agent", END: END},
     )
 
-    # PDF sub-loop: agent → tools → agent → … → END or handoff.
+    # Knowledgebase sub-loop: agent → tools → agent → … → END or handoff.
     graph.add_conditional_edges(
-        "pdf_agent",
-        _make_specialist_edge("pdf_tools"),
-        {"pdf_tools": "pdf_tools", "handoff": "handoff", END: END},
+        "knowledgebase_agent",
+        _make_specialist_edge("knowledgebase_tools"),
+        {"knowledgebase_tools": "knowledgebase_tools", "handoff": "handoff", END: END},
     )
-    graph.add_edge("pdf_tools", "pdf_agent")
+    graph.add_edge("knowledgebase_tools", "knowledgebase_agent")
 
-    # CSV sub-loop: agent → tools → agent → … → END or handoff.
+    # Resource sub-loop: agent → tools → agent → … → END or handoff.
     graph.add_conditional_edges(
-        "csv_agent",
-        _make_specialist_edge("csv_tools"),
-        {"csv_tools": "csv_tools", "handoff": "handoff", END: END},
+        "resource_agent",
+        _make_specialist_edge("resource_tools"),
+        {"resource_tools": "resource_tools", "handoff": "handoff", END: END},
     )
-    graph.add_edge("csv_tools", "csv_agent")
+    graph.add_edge("resource_tools", "resource_agent")
 
     # Handoff returns to router for re-routing.
     graph.add_edge("handoff", "router")
