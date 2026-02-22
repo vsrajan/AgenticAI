@@ -100,6 +100,8 @@ RESOURCE_TOOL_NAMES = {
     "filter_dataset_fuzzy",
     "count_by_column",
     "get_column_values",
+    "get_request_attributes",
+    "raise_entitlement_request",
 }
 
 
@@ -289,6 +291,13 @@ RESOURCE_PROMPT = (
     "values.\n"
     "- get_column_values(dataset, column) — list all distinct "
     "values in a column. Useful for small-cardinality columns.\n"
+    "- get_request_attributes — returns the schema of attributes "
+    "needed to raise an entitlement request. Call this first when "
+    "the user wants to request access.\n"
+    "- raise_entitlement_request(resource_id, justification, "
+    "start_date, end_date) — submit an entitlement access request. "
+    "Requires resource_id and justification; start_date and "
+    "end_date are optional.\n"
     "- hand_off_to_router(reason) — hand the conversation back to "
     "the router if the user's question is outside your expertise.\n\n"
 
@@ -357,6 +366,17 @@ RESOURCE_PROMPT = (
     "  - High-cardinality columns (JOBTITLE, CITY, etc.): use "
     "filter_dataset_fuzzy with a partial term.\n"
     "  Then proceed with Strategy 1 or 2.\n\n"
+
+    "Strategy 4 — Request access:\n"
+    "  a. Call get_request_attributes to learn what fields are "
+    "needed.\n"
+    "  b. Collect the required information from the user "
+    "(resource_id, justification, and any optional fields).\n"
+    "  c. If the user doesn't know the ResourceID, help them find "
+    "it first using Strategies 1-3.\n"
+    "  d. Once all required fields are gathered, call "
+    "raise_entitlement_request to submit.\n"
+    "  e. Report the result (request ID, status) to the user.\n\n"
 
     "=== RULES ===\n\n"
     "- Use filter_dataset_fuzzy for broad discovery; filter_dataset "

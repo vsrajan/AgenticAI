@@ -2,25 +2,31 @@
 
 Exposes tools for PDF documentation and CSV data to LangGraph agents:
 
-PDF tools:
+Knowledgebase tools:
   - list_topics: browse available documentation topics
   - search_docs: full-text BM25 search across all documents
   - read_page: retrieve the full text of a specific document
 
-CSV tools:
+Resource tools:
   - list_datasets: list all loaded CSV datasets and their columns
   - search_dataset: full-text search across a CSV dataset
   - filter_dataset: filter rows by exact column values
   - filter_dataset_fuzzy: filter rows by column regex patterns
   - get_column_values: list distinct values for a column
 
+Request tools:
+  - get_request_attributes: get the schema of attributes needed to raise a request
+  - raise_entitlement_request: submit an entitlement request (placeholder)
+
 Run with:
     uv run mcp-docs-server
 """
 
+import json
 import logging
 import os
 import sys
+import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -251,6 +257,74 @@ def get_column_values(dataset: str, column: str) -> list[str] | dict:
     """
     logger.info("get_column_values dataset=%r column=%r", dataset, column)
     return csv_store.get_distinct_values(dataset, column)
+
+
+# ---------------------------------------------------------------------------
+# Request tools
+# ---------------------------------------------------------------------------
+
+_REQUEST_CONFIG_PATH = Path(DOCS_DIR) / "request_config.json"
+
+
+def _load_request_config() -> dict:
+    """Load the request attributes schema from request_config.json."""
+    if not _REQUEST_CONFIG_PATH.exists():
+        return {"error": f"Request config not found at {_REQUEST_CONFIG_PATH}"}
+    with open(_REQUEST_CONFIG_PATH, encoding="utf-8") as f:
+        return json.load(f)
+
+
+@mcp.tool()
+def get_request_attributes() -> dict:
+    """Get the attributes required to raise an entitlement request.
+
+    Returns a schema describing the required and optional fields that
+    must be collected before calling raise_entitlement_request.
+    Call this first so you know what information to gather from the user.
+    """
+    logger.debug("get_request_attributes called")
+    return _load_request_config()
+
+
+@mcp.tool()
+def raise_entitlement_request(
+    resource_id: str,
+    justification: str,
+    start_date: str = "",
+    end_date: str = "",
+) -> dict:
+    """Submit an entitlement access request (placeholder).
+
+    This is a placeholder that returns a mock confirmation. It will be
+    replaced with a real API integration later.
+
+    Args:
+        resource_id: The ResourceID of the access right to request.
+        justification: Business justification for why this access is needed.
+        start_date: Optional requested start date (YYYY-MM-DD). Defaults to today.
+        end_date: Optional requested end date (YYYY-MM-DD). Empty for permanent access.
+    """
+    logger.info(
+        "raise_entitlement_request resource_id=%r justification=%r start_date=%r end_date=%r",
+        resource_id, justification, start_date, end_date,
+    )
+
+    if not resource_id:
+        return {"error": "resource_id is required."}
+    if not justification:
+        return {"error": "justification is required."}
+
+    request_id = f"REQ-{uuid.uuid4().hex[:8].upper()}"
+    return {
+        "status": "submitted",
+        "request_id": request_id,
+        "resource_id": resource_id,
+        "justification": justification,
+        "start_date": start_date or "today",
+        "end_date": end_date or "permanent",
+        "message": f"Request {request_id} has been submitted successfully. "
+                   f"This is a placeholder — no real request was created.",
+    }
 
 
 # ---------------------------------------------------------------------------

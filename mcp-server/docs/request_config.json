@@ -1,0 +1,26 @@
+{
+  "attributes": {
+    "ResourceID": {
+      "required": true,
+      "type": "string",
+      "description": "The unique identifier of the access right to request (from the Resources dataset)."
+    },
+    "justification": {
+      "required": true,
+      "type": "string",
+      "description": "Business justification explaining why this access right is needed."
+    },
+    "start_date": {
+      "required": false,
+      "type": "string",
+      "format": "YYYY-MM-DD",
+      "description": "Requested start date for the access right. Defaults to today if not provided."
+    },
+    "end_date": {
+      "required": false,
+      "type": "string",
+      "format": "YYYY-MM-DD",
+      "description": "Requested end date for the access right. Leave empty for permanent access."
+    }
+  }
+}
