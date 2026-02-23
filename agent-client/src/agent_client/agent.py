@@ -41,7 +41,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 
 from dotenv import load_dotenv, find_dotenv
-from ease_clients.utils.llm import get_llm
+from agent_client.llm import get_llm
 
 logger = logging.getLogger("agent_client.agent")
 
@@ -511,7 +511,7 @@ def _make_tool_node(domain_tools):
     base_node = ToolNode(domain_tools)
     domain_names = {t.name for t in domain_tools}
 
-    def node(state: AgentState) -> dict:
+    async def node(state: AgentState) -> dict:
         last_msg = state["messages"][-1]
         handoff_calls = [
             tc for tc in last_msg.tool_calls
@@ -524,7 +524,7 @@ def _make_tool_node(domain_tools):
 
         if not handoff_calls:
             # No mixed calls — run all tools normally.
-            return base_node.invoke(state)
+            return await base_node.ainvoke(state)
 
         # Mixed calls: execute domain tools only, stub the handoff.
         # Build a modified AIMessage containing only domain tool_calls
@@ -542,7 +542,7 @@ def _make_tool_node(domain_tools):
         }
         # Returns {"messages": [ToolMessage, ...]} — one per domain tool call.
         # This does not touch the graph state; it's just a local result dict.
-        result = base_node.invoke(modified_state)
+        result = await base_node.ainvoke(modified_state)
 
         # Add stub responses for the handoff calls.
         for tc in handoff_calls:
@@ -810,7 +810,14 @@ async def _dump_history(agent, config) -> None:
         msg_id_to_node: dict[str, str] = {}
         prev_count = 0
         for snap in snapshots:
-            node = snap.metadata.get("source", "unknown")
+            # metadata["source"] is always "input" or "loop" — not the
+            # actual graph node.  The node name lives in the "writes"
+            # dict, which maps node_name → state_update.
+            writes = snap.metadata.get("writes") or {}
+            if writes:
+                node = next(iter(writes))          # first (usually only) key
+            else:
+                node = snap.metadata.get("source", "unknown")
             snap_msgs = snap.values.get("messages", [])
             for msg in snap_msgs[prev_count:]:
                 msg_id_to_node[msg.id] = node
@@ -825,7 +832,12 @@ async def _dump_history(agent, config) -> None:
                 role = msg.__class__.__name__
                 node = msg_id_to_node.get(msg.id, "unknown")
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                fh.write(f"[{role}]  (node: {node})\n{content}\n\n")
+                fh.write(f"[{role}]  (node: {node})\n{content}\n")
+                # Show tool calls so AIMessages with empty content are understandable.
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        fh.write(f"  ↳ tool_call: {tc['name']}({tc.get('args', {})})\n")
+                fh.write("\n")
         logger.info("Session history written to %s (%d messages)", LOG_FILE, len(messages))
     except Exception:
         logger.exception("Failed to write session history to %s", LOG_FILE)
