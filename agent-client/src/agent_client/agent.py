@@ -49,38 +49,69 @@ logger = logging.getLogger("agent_client.agent")
 # ── Spinner ──────────────────────────────────────────────────────────
 
 class Spinner:
-    """Animated terminal spinner shown while the agent is thinking."""
+    """Animated terminal spinner with a mutable status message.
+
+    The spinner runs as a background asyncio task and can be updated
+    in-flight to reflect which phase the agent is in (routing, calling
+    tools, generating the answer, etc.).
+
+    Usage::
+
+        spinner = Spinner("Thinking")
+        await spinner.start()
+        # ... later ...
+        spinner.update("Calling tools")
+        # ... later ...
+        await spinner.stop()
+    """
 
     _FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
     def __init__(self, message: str = "Thinking") -> None:
         self._message = message
         self._task: asyncio.Task | None = None
+        self._max_len = len(message)  # track widest message for clean overwrite
+
+    def update(self, message: str) -> None:
+        """Change the spinner label while it is running."""
+        self._message = message
+        if len(message) > self._max_len:
+            self._max_len = len(message)
 
     async def _spin(self) -> None:
         write = sys.stderr.write
         flush = sys.stderr.flush
         try:
             for frame in itertools.cycle(self._FRAMES):
-                write(f"\r{frame} {self._message}…")
+                text = f"\r{frame} {self._message}…"
+                # Pad to max width so shorter messages fully overwrite longer ones.
+                write(text.ljust(self._max_len + 4))
                 flush()
                 await asyncio.sleep(0.08)
         except asyncio.CancelledError:
-            # Clear the spinner line
-            write("\r" + " " * (len(self._message) + 4) + "\r")
+            write("\r" + " " * (self._max_len + 4) + "\r")
             flush()
 
-    async def __aenter__(self) -> "Spinner":
+    async def start(self) -> None:
+        """Start the spinner background task."""
         self._task = asyncio.create_task(self._spin())
-        return self
 
-    async def __aexit__(self, *exc) -> None:
+    async def stop(self) -> None:
+        """Stop the spinner and clear its line."""
         if self._task:
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
+            self._task = None
+
+    async def __aenter__(self) -> "Spinner":
+        await self.start()
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await self.stop()
 
 
 # ── Configuration ────────────────────────────────────────────────────
@@ -441,9 +472,9 @@ def _make_router_node(llm, routing_tools):
     """
     llm_with_tools = llm.bind_tools(routing_tools)
 
-    def router_node(state: AgentState) -> dict:
+    async def router_node(state: AgentState) -> dict:
         messages = _trim_messages(state["messages"])
-        response = llm_with_tools.invoke(
+        response = await llm_with_tools.ainvoke(
             [SystemMessage(content=ROUTER_PROMPT)] + messages
         )
         result = [response]
@@ -473,9 +504,9 @@ def _make_agent_node(llm, tools, prompt):
     """
     llm_with_tools = llm.bind_tools(tools)
 
-    def agent_node(state: AgentState) -> dict:
+    async def agent_node(state: AgentState) -> dict:
         messages = _trim_messages(state["messages"])
-        response = llm_with_tools.invoke(
+        response = await llm_with_tools.ainvoke(
             [SystemMessage(content=prompt)] + messages
         )
         return {"messages": [response]}
@@ -858,10 +889,25 @@ async def _dump_history(agent, config) -> None:
 
 # ── Interactive loop ─────────────────────────────────────────────────
 
+# Phase labels shown in the spinner for each graph node.
+_NODE_PHASES = {
+    "router": "Routing",
+    "knowledgebase_agent": "Generating answer",
+    "resource_agent": "Generating answer",
+    "knowledgebase_tools": "Calling tools",
+    "resource_tools": "Calling tools",
+    "handoff": "Switching specialist",
+}
+
+
 async def run_agent_loop(on_response=None):
     """Run the interactive agent loop.
 
     The loop runs until the user types ``exit`` or presses Ctrl-C.
+
+    Uses ``astream_events`` to stream the assistant's final answer
+    token-by-token, so the user sees output progressively instead of
+    waiting for the entire graph to complete.
 
     Args:
         on_response: Optional callback ``(str) -> None`` called with each
@@ -908,15 +954,12 @@ async def run_agent_loop(on_response=None):
         logger.info("User query: %s", user_input)
 
         try:
-            async with Spinner("Thinking"):
-                response = await agent.ainvoke(
-                    {"messages": [HumanMessage(content=user_input)]},
-                    config,
-                )
-            # The last message is the specialist's or router's answer.
-            answer = response["messages"][-1].content
+            answer, streamed = await _stream_response(agent, user_input, config)
             logger.debug("Agent response: %s", answer)
-            on_response(f"\n🤖 Assistant: {answer}\n")
+            # Only call on_response if the answer was NOT already
+            # streamed to stdout token-by-token.
+            if not streamed:
+                on_response(f"\n🤖 Assistant: {answer}\n")
         except Exception:
             logger.exception("Error processing query")
             on_response(
@@ -926,3 +969,70 @@ async def run_agent_loop(on_response=None):
 
     # Dump full (untrimmed) conversation history on exit.
     await _dump_history(agent, config)
+
+
+async def _stream_response(agent, user_input: str, config: dict) -> tuple[str, bool]:
+    """Run the agent graph with token-level streaming.
+
+    Shows a phase-aware spinner while routing / executing tools,
+    then streams the final answer token-by-token.
+
+    Returns:
+        (answer_text, was_streamed) — *was_streamed* is True when the
+        answer was already written to stdout token-by-token.
+    """
+    spinner = Spinner("Thinking")
+    await spinner.start()
+
+    streaming = False   # True once the first answer token arrives
+    answer_parts: list[str] = []
+
+    try:
+        async for event in agent.astream_events(
+            {"messages": [HumanMessage(content=user_input)]},
+            config,
+            version="v2",
+        ):
+            kind = event["event"]
+
+            # Update spinner label when a new graph node starts.
+            if kind == "on_chain_start":
+                node = event.get("metadata", {}).get("langgraph_node", "")
+                phase = _NODE_PHASES.get(node)
+                if phase and not streaming:
+                    spinner.update(phase)
+
+            # Stream text tokens from the LLM.  GPT-4o produces either
+            # text content (final answer) or tool_call_chunks (tool
+            # invocations), never both in the same chunk.  Filtering on
+            # "has content, no tool_call_chunks" naturally selects only
+            # the final-answer tokens.
+            if kind == "on_chat_model_stream":
+                chunk = event["data"]["chunk"]
+                has_content = chunk.content
+                has_tool_calls = getattr(chunk, "tool_call_chunks", None)
+
+                if has_content and not has_tool_calls:
+                    if not streaming:
+                        streaming = True
+                        await spinner.stop()
+                        sys.stdout.write("\n🤖 Assistant: ")
+                    sys.stdout.write(chunk.content)
+                    sys.stdout.flush()
+                    answer_parts.append(chunk.content)
+    finally:
+        await spinner.stop()
+
+    if streaming:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+    # If streaming produced tokens, return the accumulated answer.
+    # Otherwise fall back to reading the final state (e.g. if the LLM
+    # didn't stream for some reason).
+    if answer_parts:
+        return "".join(answer_parts), True
+
+    state = await agent.aget_state(config)
+    messages = state.values.get("messages", [])
+    return (messages[-1].content if messages else ""), False
