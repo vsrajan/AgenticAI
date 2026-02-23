@@ -78,6 +78,9 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 - Added `get_request_attributes` and `raise_entitlement_request` MCP tools (dynamic params from `request_config.json`)
 - Added mixed-question handling (specialists answer their part, defer the rest)
 - Created Mermaid architecture diagrams in `docs/architecture.md`
+- Added token-level streaming via astream_events with phase-aware spinner
+- Fixed `_dump_history` node attribution -- uses snapshot.next instead of missing metadata["writes"] key (not persisted in LangGraph 1.0.8)
+- Normalized comment style: plain characters, `->` arrows, concise docstrings
 
 ## Code style
 
