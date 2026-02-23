@@ -921,54 +921,54 @@ async def run_agent_loop(on_response=None):
 
     logger.info("Connecting to MCP server …")
 
-    client = MultiServerMCPClient(mcp_config)
-    tools = await client.get_tools()
-    logger.info("Loaded %d MCP tools", len(tools))
+    async with MultiServerMCPClient(mcp_config) as client:
+        tools = await client.get_tools()
+        logger.info("Loaded %d MCP tools", len(tools))
 
-    checkpointer = MemorySaver()
-    graph = build_graph(llm, tools)
-    agent = graph.compile(checkpointer=checkpointer)
+        checkpointer = MemorySaver()
+        graph = build_graph(llm, tools)
+        agent = graph.compile(checkpointer=checkpointer)
 
-    # Each CLI session gets a unique thread so the checkpointer can
-    # track the conversation history across turns.
-    thread_id = uuid.uuid4().hex
-    config = {"configurable": {"thread_id": thread_id}}
+        # Each CLI session gets a unique thread so the checkpointer can
+        # track the conversation history across turns.
+        thread_id = uuid.uuid4().hex
+        config = {"configurable": {"thread_id": thread_id}}
 
-    print("\nAccess Governance Assistant")
-    print("=" * 40)
-    print('Type your question below. Type "exit" to quit.\n')
+        print("\nAccess Governance Assistant")
+        print("=" * 40)
+        print('Type your question below. Type "exit" to quit.\n')
 
-    while True:
-        try:
-            user_input = input("🧑 You: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
-            break
+        while True:
+            try:
+                user_input = input("🧑 You: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nGoodbye!")
+                break
 
-        if not user_input:
-            continue
-        if user_input.lower() == "exit":
-            print("Goodbye!")
-            break
+            if not user_input:
+                continue
+            if user_input.lower() == "exit":
+                print("Goodbye!")
+                break
 
-        logger.info("User query: %s", user_input)
+            logger.info("User query: %s", user_input)
 
-        try:
-            answer, streamed = await _stream_response(agent, user_input, config)
-            logger.debug("Agent response: %s", answer)
-            # Only call on_response if the answer was NOT already
-            # streamed to stdout token-by-token.
-            if not streamed:
-                on_response(f"\n🤖 Assistant: {answer}\n")
-        except Exception:
-            logger.exception("Error processing query")
-            on_response(
-                "\nAssistant: Sorry, an error occurred while "
-                "processing your question. Please try again.\n"
-            )
+            try:
+                answer, streamed = await _stream_response(agent, user_input, config)
+                logger.debug("Agent response: %s", answer)
+                # Only call on_response if the answer was NOT already
+                # streamed to stdout token-by-token.
+                if not streamed:
+                    on_response(f"\n🤖 Assistant: {answer}\n")
+            except Exception:
+                logger.exception("Error processing query")
+                on_response(
+                    "\nAssistant: Sorry, an error occurred while "
+                    "processing your question. Please try again.\n"
+                )
 
-    # Dump full (untrimmed) conversation history on exit.
-    await _dump_history(agent, config)
+        # Dump full (untrimmed) conversation history on exit.
+        await _dump_history(agent, config)
 
 
 async def _stream_response(agent, user_input: str, config: dict) -> tuple[str, bool]:
