@@ -85,11 +85,13 @@ mcp = FastMCP(
         "the source document and page number.\n\n"
         "CSV data tools:\n"
         "  Use list_datasets to discover available datasets and their columns. "
-        "Use search_dataset for free-text search across all columns, "
-        "filter_dataset for exact column matching, filter_dataset_fuzzy for "
-        "regex pattern matching on specific columns (e.g. partial names, "
-        "broad category searches), and get_column_values to discover what "
-        "values exist in a column."
+        "Use search_dataset for free-text search across all columns. "
+        "For discovery queries (listing matching values, counting occurrences), "
+        "ALWAYS prefer count_by_column — it returns compact {value, count} "
+        "summaries instead of full rows. Set fuzzy=True for regex matching. "
+        "Only use filter_dataset / filter_dataset_fuzzy when you need "
+        "actual row data (e.g. to inspect individual records). "
+        "Use get_column_values to discover what values exist in a column."
     ),
 )
 
@@ -183,28 +185,40 @@ def search_dataset(dataset: str, query: str, max_results: int = 10) -> list[dict
 
 
 @mcp.tool()
-def filter_dataset(dataset: str, filters: dict[str, str]) -> list[dict]:
+def filter_dataset(dataset: str, filters: dict[str, str], max_results: int = 100) -> list[dict]:
     """Filter rows in a CSV dataset by exact column values (case-insensitive).
+
+    Returns up to max_results matching rows. When the total matches exceed
+    max_results, the last element will be a metadata object with
+    _truncated=True and the total count. In that case, prefer
+    count_by_column for compact summary counts instead of fetching all rows.
 
     Use get_column_values first to discover valid filter values.
 
     Args:
         dataset: Name of the dataset (from list_datasets).
         filters: Column-value pairs to match, e.g. {"ou": "Finance", "location": "London"}.
+        max_results: Maximum rows to return (default 100).
     """
-    logger.info("filter_dataset dataset=%r filters=%r", dataset, filters)
-    results = csv_store.filter_rows(dataset, **filters)
+    logger.info("filter_dataset dataset=%r filters=%r max_results=%d", dataset, filters, max_results)
+    results = csv_store.filter_rows(dataset, max_results=max_results, **filters)
     logger.info("filter_dataset returned %d rows", len(results))
     return results
 
 
 @mcp.tool()
-def filter_dataset_fuzzy(dataset: str, filters: dict[str, str]) -> list[dict]:
+def filter_dataset_fuzzy(dataset: str, filters: dict[str, str], max_results: int = 100) -> list[dict]:
     """Filter rows in a CSV dataset using regex pattern matching (case-insensitive).
 
     Unlike filter_dataset (exact match), this performs regex matching so partial
     terms and patterns work. For example, {"JOBTITLE": "finance"} matches
     "Finance Manager", "Senior Finance Analyst", "VP of Financial Planning", etc.
+
+    Returns up to max_results matching rows. When results are truncated, the
+    last element will contain _truncated=True and the total match count.
+    For discovery queries (e.g. "what segments match TISO?"), prefer
+    count_by_column with fuzzy=True — it returns compact {value, count}
+    summaries instead of full rows.
 
     Supports regex syntax: "finance|accounting" matches either term,
     "senior.*engineer" matches "Senior Software Engineer", etc.
@@ -212,34 +226,45 @@ def filter_dataset_fuzzy(dataset: str, filters: dict[str, str]) -> list[dict]:
     Args:
         dataset: Name of the dataset (from list_datasets).
         filters: Column-regex pairs to match, e.g. {"JOBTITLE": "finance", "OU": "london"}.
+        max_results: Maximum rows to return (default 100).
     """
-    logger.info("filter_dataset_fuzzy dataset=%r filters=%r", dataset, filters)
-    results = csv_store.filter_rows_fuzzy(dataset, **filters)
+    logger.info("filter_dataset_fuzzy dataset=%r filters=%r max_results=%d", dataset, filters, max_results)
+    results = csv_store.filter_rows_fuzzy(dataset, max_results=max_results, **filters)
     logger.info("filter_dataset_fuzzy returned %d rows", len(results))
     return results
 
 
 @mcp.tool()
 def count_by_column(
-    dataset: str, column: str, filters: dict[str, str] | None = None
+    dataset: str, column: str, filters: dict[str, str] | None = None,
+    fuzzy: bool = False,
 ) -> list[dict] | dict:
-    """Filter rows then count occurrences of each value in a column.
+    """Count occurrences of each distinct value in a column, with optional filtering.
 
-    Returns a list of {value, count} objects sorted descending by count.
-    Useful for finding the most common access rights held by a peer group.
+    Returns a compact list of {value, count} objects sorted descending by count.
+    This is the PREFERRED tool for discovery queries like "what segments match X?"
+    or "how many people have job title Y?" — it returns summary counts instead
+    of full rows, keeping responses small.
+
+    When fuzzy=False (default), filters use exact matching.
+    When fuzzy=True, filters use regex pattern matching (same as
+    filter_dataset_fuzzy), so partial terms and patterns like
+    "finance|accounting" work.
 
     Args:
         dataset: Name of the dataset (from list_datasets).
-        column: Column to group by (e.g. "ResourceID").
+        column: Column to group and count by (e.g. "SEGMENTNAME", "ResourceID").
         filters: Optional column-value pairs to filter before counting,
                  e.g. {"JOBTITLE": "Software Engineer", "OU": "Finance"}.
+        fuzzy: If True, apply regex pattern matching on filter values
+               instead of exact matching (default False).
     """
     logger.info(
-        "count_by_column dataset=%r column=%r filters=%r",
-        dataset, column, filters,
+        "count_by_column dataset=%r column=%r filters=%r fuzzy=%r",
+        dataset, column, filters, fuzzy,
     )
     criteria = filters or {}
-    results = csv_store.count_by_column(dataset, column, **criteria)
+    results = csv_store.count_by_column(dataset, column, fuzzy=fuzzy, **criteria)
     logger.info("count_by_column returned %d groups", len(results) if isinstance(results, list) else 0)
     return results
 

@@ -101,21 +101,10 @@ class CsvDataset:
             results.append({**row, "_score": round(float(score), 3)})
         return results
 
-    def filter(self, **criteria: str) -> list[dict]:
-        """Filter rows where columns match the given values (case-insensitive).
+    # -- Private helpers (uncapped, used internally by count_by) ----------
 
-        Each keyword argument is a column=value exact-match filter.
-        Multiple criteria are ANDed together.
-
-        Input:  filter(JOBTITLE="Analyst", OU="Finance")
-        Output: [
-                    {"ResourceID": "R001", "JOBTITLE": "Analyst",
-                     "OU": "Finance", ...},
-                    {"ResourceID": "R017", "JOBTITLE": "Analyst",
-                     "OU": "Finance", ...},
-                ]
-        Returns [] if no rows match all criteria.
-        """
+    def _filter_rows(self, **criteria: str) -> list[dict]:
+        """Core exact-match filter — returns ALL matches, no cap."""
         matching = self.rows
         for col, value in criteria.items():
             if col not in self.columns:
@@ -127,22 +116,8 @@ class CsvDataset:
             ]
         return matching
 
-    def filter_fuzzy(self, **criteria: str) -> list[dict]:
-        """Filter rows where columns match the given regex patterns (case-insensitive).
-
-        Like ``filter()``, but each value is treated as a regex pattern
-        (falls back to literal match if the regex is invalid).  Useful
-        for partial or multi-term discovery.
-
-        Input:  filter_fuzzy(JOBTITLE="finance|accounting", OU="HR")
-        Output: [
-                    {"ResourceID": "R005", "JOBTITLE": "Finance Manager",
-                     "OU": "HR", ...},
-                    {"ResourceID": "R012", "JOBTITLE": "Accounting Lead",
-                     "OU": "HR", ...},
-                ]
-        Returns [] if no rows match all patterns.
-        """
+    def _filter_rows_fuzzy(self, **criteria: str) -> list[dict]:
+        """Core regex filter — returns ALL matches, no cap."""
         matching = self.rows
         for col, value in criteria.items():
             if col not in self.columns:
@@ -150,13 +125,50 @@ class CsvDataset:
             try:
                 pattern = re.compile(value, re.IGNORECASE)
             except re.error:
-                # Invalid regex — treat as a literal string.
                 pattern = re.compile(re.escape(value), re.IGNORECASE)
             matching = [
                 row for row in matching
                 if pattern.search(str(row.get(col, "")))
             ]
         return matching
+
+    # -- Public filter methods (capped) ------------------------------------
+
+    def filter(self, max_results: int = 100, **criteria: str) -> tuple[list[dict], int]:
+        """Filter rows where columns match the given values (case-insensitive).
+
+        Each keyword argument is a column=value exact-match filter.
+        Multiple criteria are ANDed together.  Returns at most
+        *max_results* rows plus the total match count.
+
+        Input:  filter(JOBTITLE="Analyst", OU="Finance")
+        Output: (
+                    [{"ResourceID": "R001", ...}, {"ResourceID": "R017", ...}],
+                    2,   # total matches
+                )
+        Returns ([], 0) if no rows match all criteria.
+        """
+        matching = self._filter_rows(**criteria)
+        total = len(matching)
+        return matching[:max_results], total
+
+    def filter_fuzzy(self, max_results: int = 100, **criteria: str) -> tuple[list[dict], int]:
+        """Filter rows where columns match the given regex patterns (case-insensitive).
+
+        Like ``filter()``, but each value is treated as a regex pattern
+        (falls back to literal match if the regex is invalid).  Returns at
+        most *max_results* rows plus the total match count.
+
+        Input:  filter_fuzzy(JOBTITLE="finance|accounting", OU="HR")
+        Output: (
+                    [{"ResourceID": "R005", ...}, {"ResourceID": "R012", ...}],
+                    2,   # total matches
+                )
+        Returns ([], 0) if no rows match all patterns.
+        """
+        matching = self._filter_rows_fuzzy(**criteria)
+        total = len(matching)
+        return matching[:max_results], total
 
     def distinct(self, column: str) -> list[str]:
         """Return sorted distinct non-empty values for a column.
@@ -170,12 +182,13 @@ class CsvDataset:
         values = {str(row[column]) for row in self.rows if row.get(column)}
         return sorted(values)
 
-    def count_by(self, column: str, **criteria: str) -> list[dict]:
+    def count_by(self, column: str, fuzzy: bool = False, **criteria: str) -> list[dict]:
         """Filter rows by *criteria*, then count occurrences of each
         distinct value in *column*.
 
-        First applies exact-match filters (same as ``filter()``), then
-        groups the surviving rows by *column* and counts each value.
+        When *fuzzy* is ``False`` (default), applies exact-match filters.
+        When *fuzzy* is ``True``, applies regex pattern matching (same
+        semantics as ``filter_fuzzy``).
 
         Input:  count_by("ResourceID", JOBTITLE="Analyst", OU="Finance")
         Output: [
@@ -186,7 +199,10 @@ class CsvDataset:
         Results are sorted descending by count.
         Returns [] if *column* does not exist.
         """
-        rows = self.filter(**criteria) if criteria else self.rows
+        if criteria:
+            rows = self._filter_rows_fuzzy(**criteria) if fuzzy else self._filter_rows(**criteria)
+        else:
+            rows = self.rows
         if column not in self.columns:
             return []
         counts: dict[str, int] = {}
@@ -341,15 +357,12 @@ class CsvStore:
             return [{"message": "No matching rows found.", "query": query}]
         return results
 
-    def filter_rows(self, dataset_name: str, **criteria: str) -> list[dict]:
+    def filter_rows(self, dataset_name: str, max_results: int = 100, **criteria: str) -> list[dict]:
         """Exact-match filter on a named dataset.  Delegates to ``CsvDataset.filter``.
 
-        Input:  filter_rows("Entitlements", JOBTITLE="Analyst", OU="Finance")
-        Output: [
-                    {"ResourceID": "R001", "JOBTITLE": "Analyst",
-                     "OU": "Finance", ...},
-                    ...
-                ]
+        Returns at most *max_results* rows.  When the total number of
+        matches exceeds *max_results*, a metadata dict with
+        ``_truncated=True`` is appended as the last element.
 
         Returns an error dict if the dataset name is invalid.
         """
@@ -357,19 +370,26 @@ class CsvStore:
         if ds is None:
             return [{"error": f"Dataset not found: {dataset_name}",
                      "available": self.dataset_names}]
-        return ds.filter(**criteria)
+        rows, total = ds.filter(max_results=max_results, **criteria)
+        if total > max_results:
+            rows.append({
+                "_truncated": True,
+                "_total_matches": total,
+                "_returned": max_results,
+                "_message": (
+                    f"Showing {max_results} of {total} matches. "
+                    f"Use count_by_column for compact summaries, "
+                    f"or add more filter columns to narrow results."
+                ),
+            })
+        return rows
 
-    def filter_rows_fuzzy(self, dataset_name: str, **criteria: str) -> list[dict]:
+    def filter_rows_fuzzy(self, dataset_name: str, max_results: int = 100, **criteria: str) -> list[dict]:
         """Regex-match filter on a named dataset.  Delegates to ``CsvDataset.filter_fuzzy``.
 
-        Input:  filter_rows_fuzzy("Entitlements",
-                                  JOBTITLE="finance|accounting", OU="HR")
-        Output: [
-                    {"ResourceID": "R005", "JOBTITLE": "Finance Manager",
-                     "OU": "HR", ...},
-                    {"ResourceID": "R012", "JOBTITLE": "Accounting Lead",
-                     "OU": "HR", ...},
-                ]
+        Returns at most *max_results* rows.  When the total number of
+        matches exceeds *max_results*, a metadata dict with
+        ``_truncated=True`` is appended as the last element.
 
         Returns an error dict if the dataset name is invalid.
         """
@@ -377,24 +397,32 @@ class CsvStore:
         if ds is None:
             return [{"error": f"Dataset not found: {dataset_name}",
                      "available": self.dataset_names}]
-        return ds.filter_fuzzy(**criteria)
+        rows, total = ds.filter_fuzzy(max_results=max_results, **criteria)
+        if total > max_results:
+            rows.append({
+                "_truncated": True,
+                "_total_matches": total,
+                "_returned": max_results,
+                "_message": (
+                    f"Showing {max_results} of {total} matches. "
+                    f"Use count_by_column with fuzzy=True for compact "
+                    f"summaries, or add more filter columns to narrow results."
+                ),
+            })
+        return rows
 
     def count_by_column(
-        self, dataset_name: str, column: str, **criteria: str
+        self, dataset_name: str, column: str, fuzzy: bool = False, **criteria: str
     ) -> list[dict] | dict:
-        """Group-count a column after applying optional exact-match filters.
+        """Group-count a column after applying optional filters.
 
-        Delegates to ``CsvDataset.count_by``.  Commonly used for
-        peer-based recommendations: filter Entitlements by JOBTITLE + OU,
-        then count by ResourceID to rank the most popular access rights.
+        Delegates to ``CsvDataset.count_by``.  When *fuzzy* is ``True``,
+        filter values are treated as regex patterns (case-insensitive);
+        when ``False`` (default), exact matching is used.
 
-        Input:  count_by_column("Entitlements", "ResourceID",
-                                JOBTITLE="Analyst", OU="Finance")
-        Output: [
-                    {"value": "R001", "count": 14},
-                    {"value": "R045", "count": 9},
-                    {"value": "R102", "count": 3},
-                ]
+        Commonly used for peer-based recommendations: filter Entitlements
+        by JOBTITLE + OU, then count by ResourceID to rank the most
+        popular access rights.
 
         Returns an error dict if the dataset or column is invalid.
         """
@@ -405,7 +433,7 @@ class CsvStore:
         if column not in ds.columns:
             return {"error": f"Column not found: {column}",
                     "available_columns": ds.columns}
-        return ds.count_by(column, **criteria)
+        return ds.count_by(column, fuzzy=fuzzy, **criteria)
 
     def get_distinct_values(self, dataset_name: str, column: str) -> list[str] | dict:
         """Return sorted distinct values for a column in a dataset.
