@@ -834,38 +834,24 @@ async def _dump_history(agent, config) -> None:
 
         # Each snapshot's messages list is *cumulative* — it contains every
         # message that existed at that checkpoint, not just the new ones.
-        # However, the snapshot metadata only records a single "source" node
-        # (the node that produced that checkpoint).  To figure out which node
-        # produced each *individual* message, we walk the snapshots in
-        # chronological order and use a sliding-window diff:
+        # A checkpoint is saved after each node executes, so
+        # snapshots[i-1].next[0] tells us which node produced snapshots[i].
         #
-        #   prev_count tracks where the previous snapshot's messages ended,
-        #   so snap_msgs[prev_count:] gives only the messages that were
-        #   *added* by the current snapshot's source node.
-        #
-        #   Iteration | prev_count (start) | len(snap_msgs) | slice examined
-        #   ----------|--------------------|-----------------|--------------
-        #   Snap 0    | 0                  | 3               | msgs 0–2
-        #   Snap 1    | 3                  | 5               | msgs 3–4
-        #   Snap 2    | 5                  | 7               | msgs 5–6
-        #
-        # After the loop, msg_id_to_node maps every message id to the graph
-        # node that produced it.
+        # We walk chronologically and use a sliding-window diff:
+        #   snap_msgs[prev_count:] gives only the messages *added* by the
+        #   node that produced this snapshot.
         msg_id_to_node: dict[str, str] = {}
         prev_count = 0
-        for snap in snapshots:
-            # metadata["source"] is always "input" or "loop" — not the
-            # actual graph node.  The node name lives in the "writes"
-            # dict, which maps node_name → state_update.
-            writes = snap.metadata.get("writes") or {}
-            if writes:
-                node = next(iter(writes))          # first (usually only) key
+        for i, snap in enumerate(snapshots):
+            # Determine which node produced this snapshot's new messages.
+            if i == 0:
+                node = snap.metadata.get("source", "input")
             else:
-                node = snap.metadata.get("source", "unknown")
+                prev_next = snapshots[i - 1].next
+                node = prev_next[0] if prev_next else "unknown"
             snap_msgs = snap.values.get("messages", [])
             for msg in snap_msgs[prev_count:]:
                 msg_id_to_node[msg.id] = node
-
             prev_count = len(snap_msgs)
 
         with open(LOG_FILE, "w", encoding="utf-8") as fh:
