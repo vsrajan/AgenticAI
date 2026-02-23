@@ -1,23 +1,20 @@
-"""LangGraph custom StateGraph agent with Router, Knowledgebase, and Resource nodes.
+"""LangGraph StateGraph agent with Router, Knowledgebase, and Resource nodes.
 
-The agent connects to an already-running MCP server (stdio or SSE),
-loads the documentation and data tools, and routes user queries through
-specialised nodes:
+Connects to an already-running MCP server (stdio or SSE), loads tools,
+and routes user queries through specialised nodes:
 
-    START ──▶ (active_agent?) ──▶ specialist ↔ tools ──▶ END
-                    │                  │
-                    ▼                  ▼ (handoff)
-                 router            handoff ──▶ router
-                    │
-                    └──▶ END (greeting / chat)
+  START -> (active_agent?) -> specialist <-> tools -> END
+               |                   |
+               v                   v (handoff)
+            router              handoff -> router
+               |
+               +-> END (greeting / chat)
 
 Once the router assigns a specialist, that specialist owns the
-conversation until the user switches context (e.g. from data
-questions to process questions).  The specialist hands back to the
-router via hand_off_to_router only on a context switch.
+conversation until the user switches context. The specialist hands
+back to the router via hand_off_to_router only on a context switch.
 
-The MCP server must be started separately — this client does NOT
-manage the server lifecycle.
+The MCP server must be started separately.
 """
 
 import asyncio
@@ -46,23 +43,13 @@ from agent_client.llm import get_llm
 logger = logging.getLogger("agent_client.agent")
 
 
-# ── Spinner ──────────────────────────────────────────────────────────
+# -- Spinner --
 
 class Spinner:
-    """Animated terminal spinner with a mutable status message.
+    """Animated terminal spinner shown while the agent is working.
 
-    The spinner runs as a background asyncio task and can be updated
-    in-flight to reflect which phase the agent is in (routing, calling
-    tools, generating the answer, etc.).
-
-    Usage::
-
-        spinner = Spinner("Thinking")
-        await spinner.start()
-        # ... later ...
-        spinner.update("Calling tools")
-        # ... later ...
-        await spinner.stop()
+    Runs as a background asyncio task. Update the label in-flight
+    to reflect the current phase (routing, calling tools, etc.).
     """
 
     _FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -70,10 +57,10 @@ class Spinner:
     def __init__(self, message: str = "Thinking") -> None:
         self._message = message
         self._task: asyncio.Task | None = None
-        self._max_len = len(message)  # track widest message for clean overwrite
+        self._max_len = len(message)  # widest message seen, for clean overwrite
 
     def update(self, message: str) -> None:
-        """Change the spinner label while it is running."""
+        """Change the spinner label while running."""
         self._message = message
         if len(message) > self._max_len:
             self._max_len = len(message)
@@ -84,7 +71,7 @@ class Spinner:
         try:
             for frame in itertools.cycle(self._FRAMES):
                 text = f"\r{frame} {self._message}…"
-                # Pad to max width so shorter messages fully overwrite longer ones.
+                # pad to max width so shorter messages overwrite longer ones
                 write(text.ljust(self._max_len + 4))
                 flush()
                 await asyncio.sleep(0.08)
@@ -114,15 +101,14 @@ class Spinner:
         await self.stop()
 
 
-# ── Configuration ────────────────────────────────────────────────────
+# -- Configuration --
 
-# Maximum number of messages to keep in conversation history.
-# Each turn can produce several messages (human, tool calls, tool
-# results, assistant answer), so 20 ≈ 3-4 full turns of context.
-# Set to 0 to disable trimming (unlimited history).
+# Max messages kept in context. Each turn produces several messages
+# (human, tool calls, results, answer), so 20 ~ 3-4 full turns.
+# Set to 0 to disable trimming.
 KEEP_LAST_N = int(os.environ.get("KEEP_LAST_N_MSGS", "20"))
 
-# Tool name sets used for splitting MCP tools into groups.
+# Tool name sets for splitting MCP tools into groups.
 KNOWLEDGEBASE_TOOL_NAMES = {"list_topics", "search_docs", "read_page"}
 RESOURCE_TOOL_NAMES = {
     "list_datasets",
@@ -136,14 +122,14 @@ RESOURCE_TOOL_NAMES = {
 }
 
 
-# ── State ────────────────────────────────────────────────────────────
+# -- State --
 
 class AgentState(MessagesState):
     """Extended state that tracks which specialist owns the conversation."""
     active_agent: str  # "knowledgebase_agent", "resource_agent", or "" (use router)
 
 
-# ── Routing tools (used by the router) ───────────────────────────────
+# -- Routing tools (used by the router) --
 
 @tool
 def route_to_knowledgebase(reason: str) -> str:
@@ -160,7 +146,7 @@ def route_to_resource(reason: str) -> str:
 ROUTING_TOOLS = [route_to_knowledgebase, route_to_resource]
 
 
-# ── Handoff tool (used by specialists) ───────────────────────────────
+# -- Handoff tool (used by specialists) --
 
 @tool
 def hand_off_to_router(reason: str) -> str:
@@ -169,7 +155,7 @@ def hand_off_to_router(reason: str) -> str:
     return reason
 
 
-# ── Prompts ──────────────────────────────────────────────────────────
+# -- Prompts --
 
 ROUTER_PROMPT = (
     "You are the routing agent for an Access Governance assistant. "
@@ -442,33 +428,29 @@ RESOURCE_PROMPT = (
 )
 
 
-# ── Helpers ──────────────────────────────────────────────────────────
+# -- Helpers --
 
 def _trim_messages(messages: list) -> list:
-    """Trim conversation history to the most recent messages.
+    """Keep only the most recent KEEP_LAST_N messages for the LLM.
 
     The checkpointer stores the full history, but the LLM only sees
-    the most recent ``KEEP_LAST_N`` messages.  This prevents
-    context-window overflow and attention dilution in long sessions.
+    a sliding window to prevent context overflow.
     """
     if KEEP_LAST_N > 0 and len(messages) > KEEP_LAST_N:
         messages = messages[-KEEP_LAST_N:]
-        # Drop orphaned ToolMessages at the start of the window —
-        # their preceding AIMessage (with tool_calls) was trimmed
-        # away, and the OpenAI API rejects tool-role messages without
-        # a prior tool_calls.
+        # drop orphaned ToolMessages at the start -- their parent
+        # AIMessage was trimmed and OpenAI rejects dangling tool msgs
         while messages and isinstance(messages[0], ToolMessage):
             messages = messages[1:]
     return messages
 
 
-# ── Node factories ───────────────────────────────────────────────────
+# -- Node factories --
 
 def _make_router_node(llm, routing_tools):
-    """Create the router node — decides Knowledgebase, Resource, or direct answer.
+    """Create the router node -- picks Knowledgebase, Resource, or answers directly.
 
-    When routing to a specialist, sets ``active_agent`` so subsequent
-    turns skip the router and go directly to that specialist.
+    Sets active_agent when routing so subsequent turns skip the router.
     """
     llm_with_tools = llm.bind_tools(routing_tools)
 
@@ -498,9 +480,8 @@ def _make_router_node(llm, routing_tools):
 def _make_agent_node(llm, tools, prompt):
     """Create a specialist agent node (Knowledgebase or Resource).
 
-    The returned node binds *tools* to the LLM so it can produce
-    ``tool_calls``.  Actual tool execution happens in a separate
-    ``ToolNode`` — this node only calls the LLM.
+    Binds tools to the LLM so it can produce tool_calls. Actual tool
+    execution happens in a separate ToolNode -- this node only calls the LLM.
     """
     llm_with_tools = llm.bind_tools(tools)
 
@@ -514,14 +495,14 @@ def _make_agent_node(llm, tools, prompt):
     return agent_node
 
 
-# ── Handoff node ─────────────────────────────────────────────────────
+# -- Handoff node --
 
 def _handoff_node(state: AgentState) -> dict:
-    """Process a hand_off_to_router tool call and clear the active agent.
+    """Process hand_off_to_router and clear active_agent.
 
-    Produces a ToolMessage for every pending tool call so the message
-    history stays valid, then resets ``active_agent`` to ``""`` so the
-    router takes over on the next step.
+    Produces a ToolMessage for every pending tool call to keep the
+    message history valid, then resets active_agent so the router
+    takes over on the next step.
     """
     last_msg = state["messages"][-1]
     result = []
@@ -534,24 +515,17 @@ def _handoff_node(state: AgentState) -> dict:
     return {"messages": result, "active_agent": ""}
 
 
-# ── Custom tool node ─────────────────────────────────────────────────
+# -- Custom tool node --
 
 def _make_tool_node(domain_tools):
-    """Create a tool node that gracefully handles mixed domain + handoff calls.
+    """Create a tool node that handles mixed domain + handoff calls.
 
-    When the specialist calls both domain tools and ``hand_off_to_router``
-    in a single response, this node:
-      - executes the domain tools normally via ``ToolNode``
-      - stubs ``hand_off_to_router`` with a directive telling the
-        specialist to answer its part and inform the user about the rest
-
-    This prevents the ToolNode from failing on the unknown handoff tool.
+    When the specialist calls both domain tools and hand_off_to_router
+    in a single response, this node executes the domain tools normally
+    and stubs the handoff with a directive to answer its part first.
     """
-    # Standalone tool executor — does NOT mutate the graph state.
-    # ToolNode.invoke() takes a state dict, runs the tool calls found in it,
-    # and returns an update dict (e.g. {"messages": [ToolMessage, ...]}).
-    # The actual graph state is only updated later, when the graph runtime
-    # merges this node's return value via reducers (e.g. add_messages).
+    # base_node runs tool calls and returns {"messages": [ToolMessage, ...]}
+    # without mutating graph state -- the runtime merges it via reducers.
     base_node = ToolNode(domain_tools)
     domain_names = {t.name for t in domain_tools}
 
@@ -567,28 +541,22 @@ def _make_tool_node(domain_tools):
         ]
 
         if not handoff_calls:
-            # No mixed calls — run all tools normally.
             return await base_node.ainvoke(state)
 
-        # Mixed calls: execute domain tools only, stub the handoff.
-        # Build a modified AIMessage containing only domain tool_calls
-        # so the base ToolNode can process them without errors.
+        # mixed calls -- run domain tools only, stub the handoff
         modified_msg = AIMessage(
             content=last_msg.content,
             tool_calls=domain_calls,
             id=last_msg.id,
         )
-        # Unpack state and replace "messages" with a new list into modified_state,
-        # so we don't mutate the real graph state (AgentState is a dict, passed by reference).
+        # copy state with only domain tool_calls so base_node doesn't choke
         modified_state = {
             **state,
             "messages": list(state["messages"])[:-1] + [modified_msg]
         }
-        # Returns {"messages": [ToolMessage, ...]} — one per domain tool call.
-        # This does not touch the graph state; it's just a local result dict.
         result = await base_node.ainvoke(modified_state)
 
-        # Add stub responses for the handoff calls.
+        # stub responses for the handoff calls
         for tc in handoff_calls:
             result["messages"].append(
                 ToolMessage(
@@ -603,18 +571,15 @@ def _make_tool_node(domain_tools):
                 )
             )
 
-        # The graph runtime will merge this return value into the real
-        # state via reducers (add_messages appends to state["messages"]).
         return result
 
     return node
 
 
-# ── Routing / edge functions ─────────────────────────────────────────
+# -- Routing / edge functions --
 
 def route_entry(state: AgentState) -> str:
-    """Route from START: skip the router if a specialist already owns
-    the conversation."""
+    """Entry edge: skip the router if a specialist already owns the conversation."""
     active = state.get("active_agent", "")
     if active in ("knowledgebase_agent", "resource_agent"):
         return active
@@ -622,13 +587,7 @@ def route_entry(state: AgentState) -> str:
 
 
 def route_from_router(state: AgentState) -> str:
-    """Determine where to go after the router node.
-
-    The router node appends a ToolMessage after any routing tool call,
-    so the last message is either:
-      - a ToolMessage (routing decision) → check the preceding AIMessage
-      - an AIMessage with no tool_calls (direct answer) → END
-    """
+    """After the router: follow the routing tool call to a specialist, or END."""
     messages = state["messages"]
     ai_msg = next(
         (m for m in reversed(messages) if isinstance(m, AIMessage)),
@@ -640,19 +599,16 @@ def route_from_router(state: AgentState) -> str:
             return "knowledgebase_agent"
         if tool_name == "route_to_resource":
             return "resource_agent"
-    # No tool call → direct answer; end the graph turn.
+    # no tool call -> direct answer, end the turn
     return END
 
 
 def _make_specialist_edge(tool_node_name: str):
     """Return an edge function for a specialist node.
 
-    Routing logic:
-      - hand_off_to_router as the *only* tool call → ``"handoff"`` node
-      - MCP tool calls (possibly mixed with hand_off_to_router) →
-        *tool_node_name* — domain tools take priority so the specialist
-        can answer its part of a mixed question
-      - no tool calls (final answer) → ``END``
+    hand_off_to_router only -> "handoff"
+    domain tool calls (possibly mixed with handoff) -> tool_node_name
+    no tool calls (final answer) -> END
     """
 
     def check(state: AgentState) -> str:
@@ -667,53 +623,46 @@ def _make_specialist_edge(tool_node_name: str):
                 for tc in last_msg.tool_calls
             )
             if has_handoff and not has_domain:
-                # Pure handoff — no domain work to do.
                 return "handoff"
-            # Domain tools present (possibly alongside a stray handoff
-            # call).  Route to the tool node so the specialist can
-            # answer the part within its expertise.
+            # domain tools present -- route to tool node even if
+            # there's a stray handoff alongside
             return tool_node_name
         return END
 
     return check
 
 
-# ── Graph builder ────────────────────────────────────────────────────
+# -- Graph builder --
 
 def build_graph(llm, all_tools):
     """Build the StateGraph with persistent specialist ownership.
 
-    Graph structure::
+    START -> (active_agent?) -> knowledgebase_agent <-> knowledgebase_tools -> END
+                |                     |
+                |                     +-> handoff -> router
+                |                                      |
+                +-> router -> (route) -> ...           |
+                |     |                                |
+                |     +-> END                          |
+                |                                      |
+                +-> resource_agent <-> resource_tools -> END
+                          |
+                          +-> handoff -> router
 
-        START ──(active_agent?)──▶ knowledgebase_agent ↔ knowledgebase_tools ──▶ END
-                       │                    │
-                       │                    └──▶ handoff ──▶ router
-                       │                                       │
-                       ├──▶ router ──(route)──▶ ...            │
-                       │       │                               │
-                       │       └──▶ END                        │
-                       │                                       │
-                       └──────────▶ resource_agent ↔ resource_tools ──▶ END
-                                          │
-                                          └──▶ handoff ──▶ router
-
-    Once the router assigns a specialist, ``active_agent`` is set in
-    the state.  On subsequent user turns, START routes directly to
-    that specialist, bypassing the router entirely.  The specialist
-    only hands back to the router via ``hand_off_to_router`` when the
-    user switches context.
+    Once the router assigns a specialist, active_agent is set. On
+    subsequent turns, START routes directly to that specialist. The
+    specialist only hands back via hand_off_to_router on context switch.
     """
-    # Split MCP tools into Knowledgebase and Resource groups.
     knowledgebase_tools = [t for t in all_tools if t.name in KNOWLEDGEBASE_TOOL_NAMES]
     resource_tools = [t for t in all_tools if t.name in RESOURCE_TOOL_NAMES]
 
-    # Each specialist gets its MCP tools + the handoff tool.
+    # each specialist gets its MCP tools + the handoff tool
     knowledgebase_all_tools = knowledgebase_tools + [hand_off_to_router]
     resource_all_tools = resource_tools + [hand_off_to_router]
 
     graph = StateGraph(AgentState)
 
-    # ── Nodes ──
+    # -- nodes --
     graph.add_node("router", _make_router_node(llm, ROUTING_TOOLS))
 
     graph.add_node("knowledgebase_agent", _make_agent_node(llm, knowledgebase_all_tools, KNOWLEDGEBASE_PROMPT))
@@ -724,23 +673,23 @@ def build_graph(llm, all_tools):
 
     graph.add_node("handoff", _handoff_node)
 
-    # ── Edges ──
+    # -- edges --
 
-    # Entry: check if a specialist already owns the conversation.
+    # entry: skip router if a specialist already owns the conversation
     graph.add_conditional_edges(
         START,
         route_entry,
         {"router": "router", "knowledgebase_agent": "knowledgebase_agent", "resource_agent": "resource_agent"},
     )
 
-    # Router decides which specialist to activate.
+    # router picks a specialist or answers directly
     graph.add_conditional_edges(
         "router",
         route_from_router,
         {"knowledgebase_agent": "knowledgebase_agent", "resource_agent": "resource_agent", END: END},
     )
 
-    # Knowledgebase sub-loop: agent → tools → agent → … → END or handoff.
+    # knowledgebase sub-loop: agent -> tools -> agent -> ... -> END or handoff
     graph.add_conditional_edges(
         "knowledgebase_agent",
         _make_specialist_edge("knowledgebase_tools"),
@@ -748,7 +697,7 @@ def build_graph(llm, all_tools):
     )
     graph.add_edge("knowledgebase_tools", "knowledgebase_agent")
 
-    # Resource sub-loop: agent → tools → agent → … → END or handoff.
+    # resource sub-loop: agent -> tools -> agent -> ... -> END or handoff
     graph.add_conditional_edges(
         "resource_agent",
         _make_specialist_edge("resource_tools"),
@@ -756,23 +705,19 @@ def build_graph(llm, all_tools):
     )
     graph.add_edge("resource_tools", "resource_agent")
 
-    # Handoff returns to router for re-routing.
+    # handoff returns to router for re-routing
     graph.add_edge("handoff", "router")
 
     return graph
 
 
-# ── MCP config ───────────────────────────────────────────────────────
+# -- MCP config --
 
 def _get_mcp_server_config() -> dict:
-    """Build the MCP server connection config from environment variables.
+    """Build MCP server connection config from env vars.
 
-    Supported transports:
-        sse   — connects to a running MCP server over HTTP/SSE
-                Requires MCP_SERVER_URL (e.g. http://host:8000/sse)
-        stdio — connects to a running MCP server via stdin/stdout pipe
-                Requires MCP_SERVER_COMMAND (e.g. "uv") and
-                MCP_SERVER_ARGS (e.g. "run --directory ../mcp-server mcp-docs-server")
+    sse   -- needs MCP_SERVER_URL (e.g. http://host:8000/sse)
+    stdio -- needs MCP_SERVER_COMMAND + MCP_SERVER_ARGS
     """
     server_name = os.environ.get("MCP_SERVER_NAME", "access-governance-docs")
     transport = os.environ.get("MCP_TRANSPORT", "sse").lower()
@@ -810,40 +755,30 @@ def _get_mcp_server_config() -> dict:
     )
 
 
-# ── History dump ─────────────────────────────────────────────────────
+# -- History dump --
 
 LOG_FILE = "agent_log.txt"
 
 
 async def _dump_history(agent, config) -> None:
-    """Write the full conversation history from the checkpointer to *LOG_FILE*.
-
-    Each message is annotated with the graph node that produced it so
-    that readers can trace the exact invocation flow.
-    """
+    """Write full conversation history to LOG_FILE with node annotations."""
     try:
         state = await agent.aget_state(config)
         messages = state.values.get("messages", [])
         if not messages:
             return
 
-        # Walk the checkpoint history (newest-first) and build a mapping
-        # from message id → source node that produced it.
+        # build mapping: message id -> graph node that produced it
         snapshots = [s async for s in agent.aget_state_history(config)]
-        snapshots.reverse()  # chronological order
+        snapshots.reverse()  # oldest first
 
-        # Each snapshot's messages list is *cumulative* — it contains every
-        # message that existed at that checkpoint, not just the new ones.
-        # A checkpoint is saved after each node executes, so
-        # snapshots[i-1].next[0] tells us which node produced snapshots[i].
-        #
-        # We walk chronologically and use a sliding-window diff:
-        #   snap_msgs[prev_count:] gives only the messages *added* by the
-        #   node that produced this snapshot.
+        # snapshots are cumulative -- each contains all messages up to
+        # that point. A checkpoint is saved after each node executes, so
+        # snapshots[i-1].next[0] is the node that produced snapshots[i].
+        # We diff adjacent snapshots to find newly added messages.
         msg_id_to_node: dict[str, str] = {}
         prev_count = 0
         for i, snap in enumerate(snapshots):
-            # Determine which node produced this snapshot's new messages.
             if i == 0:
                 node = snap.metadata.get("source", "input")
             else:
@@ -855,7 +790,7 @@ async def _dump_history(agent, config) -> None:
             prev_count = len(snap_msgs)
 
         with open(LOG_FILE, "w", encoding="utf-8") as fh:
-            fh.write(f"Agent session log — {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
+            fh.write(f"Agent session log -- {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
             fh.write(f"Total messages: {len(messages)}\n")
             fh.write("=" * 60 + "\n\n")
             for msg in messages:
@@ -863,19 +798,18 @@ async def _dump_history(agent, config) -> None:
                 node = msg_id_to_node.get(msg.id, "unknown")
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 fh.write(f"[{role}]  (node: {node})\n{content}\n")
-                # Show tool calls so AIMessages with empty content are understandable.
                 if hasattr(msg, "tool_calls") and msg.tool_calls:
                     for tc in msg.tool_calls:
-                        fh.write(f"  ↳ tool_call: {tc['name']}({tc.get('args', {})})\n")
+                        fh.write(f"  -> tool_call: {tc['name']}({tc.get('args', {})})\n")
                 fh.write("\n")
         logger.info("Session history written to %s (%d messages)", LOG_FILE, len(messages))
     except Exception:
         logger.exception("Failed to write session history to %s", LOG_FILE)
 
 
-# ── Interactive loop ─────────────────────────────────────────────────
+# -- Interactive loop --
 
-# Phase labels shown in the spinner for each graph node.
+# spinner labels per graph node
 _NODE_PHASES = {
     "router": "Routing",
     "knowledgebase_agent": "Generating answer",
@@ -887,17 +821,10 @@ _NODE_PHASES = {
 
 
 async def run_agent_loop(on_response=None):
-    """Run the interactive agent loop.
+    """Interactive agent loop. Runs until the user types 'exit' or Ctrl-C.
 
-    The loop runs until the user types ``exit`` or presses Ctrl-C.
-
-    Uses ``astream_events`` to stream the assistant's final answer
-    token-by-token, so the user sees output progressively instead of
-    waiting for the entire graph to complete.
-
-    Args:
-        on_response: Optional callback ``(str) -> None`` called with each
-            assistant response.  Defaults to ``print``.
+    Streams the final answer token-by-token via astream_events.
+    on_response(str) is called for non-streamed answers (defaults to print).
     """
     if on_response is None:
         on_response = print
@@ -915,8 +842,7 @@ async def run_agent_loop(on_response=None):
     graph = build_graph(llm, tools)
     agent = graph.compile(checkpointer=checkpointer)
 
-    # Each CLI session gets a unique thread so the checkpointer can
-    # track the conversation history across turns.
+    # unique thread per CLI session for conversation tracking
     thread_id = uuid.uuid4().hex
     config = {"configurable": {"thread_id": thread_id}}
 
@@ -942,8 +868,7 @@ async def run_agent_loop(on_response=None):
         try:
             answer, streamed = await _stream_response(agent, user_input, config)
             logger.debug("Agent response: %s", answer)
-            # Only call on_response if the answer was NOT already
-            # streamed to stdout token-by-token.
+            # only print if the answer wasn't already streamed
             if not streamed:
                 on_response(f"\n🤖 Assistant: {answer}\n")
         except Exception:
@@ -953,24 +878,20 @@ async def run_agent_loop(on_response=None):
                 "processing your question. Please try again.\n"
             )
 
-    # Dump full (untrimmed) conversation history on exit.
+    # dump full (untrimmed) history on exit
     await _dump_history(agent, config)
 
 
 async def _stream_response(agent, user_input: str, config: dict) -> tuple[str, bool]:
-    """Run the agent graph with token-level streaming.
-
-    Shows a phase-aware spinner while routing / executing tools,
+    """Run the graph with streaming. Shows a spinner during routing/tools,
     then streams the final answer token-by-token.
 
-    Returns:
-        (answer_text, was_streamed) — *was_streamed* is True when the
-        answer was already written to stdout token-by-token.
+    Returns (answer_text, was_streamed).
     """
     spinner = Spinner("Thinking")
     await spinner.start()
 
-    streaming = False   # True once the first answer token arrives
+    streaming = False
     answer_parts: list[str] = []
 
     try:
@@ -981,18 +902,15 @@ async def _stream_response(agent, user_input: str, config: dict) -> tuple[str, b
         ):
             kind = event["event"]
 
-            # Update spinner label when a new graph node starts.
+            # update spinner when a new graph node starts
             if kind == "on_chain_start":
                 node = event.get("metadata", {}).get("langgraph_node", "")
                 phase = _NODE_PHASES.get(node)
                 if phase and not streaming:
                     spinner.update(phase)
 
-            # Stream text tokens from the LLM.  GPT-4o produces either
-            # text content (final answer) or tool_call_chunks (tool
-            # invocations), never both in the same chunk.  Filtering on
-            # "has content, no tool_call_chunks" naturally selects only
-            # the final-answer tokens.
+            # stream text tokens -- content chunks without tool_call_chunks
+            # are final-answer tokens
             if kind == "on_chat_model_stream":
                 chunk = event["data"]["chunk"]
                 has_content = chunk.content
@@ -1013,9 +931,7 @@ async def _stream_response(agent, user_input: str, config: dict) -> tuple[str, b
         sys.stdout.write("\n")
         sys.stdout.flush()
 
-    # If streaming produced tokens, return the accumulated answer.
-    # Otherwise fall back to reading the final state (e.g. if the LLM
-    # didn't stream for some reason).
+    # fall back to reading final state if nothing was streamed
     if answer_parts:
         return "".join(answer_parts), True
 

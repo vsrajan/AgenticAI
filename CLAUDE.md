@@ -25,12 +25,12 @@ docs/
 The agent is a LangGraph `StateGraph` with 6 nodes:
 
 ```
-START → route_entry() → Router → knowledgebase_agent / resource_agent
-                                    ↕ tool loop            ↕ tool loop
-                                  knowledgebase_tools     resource_tools
-                                    ↘ handoff ↙
-                                      Router (re-route)
-                                        → END
+START -> route_entry() -> Router -> knowledgebase_agent / resource_agent
+                                      <-> tool loop            <-> tool loop
+                                    knowledgebase_tools       resource_tools
+                                       \   handoff   /
+                                        Router (re-route)
+                                          -> END
 ```
 
 - **State**: `AgentState(messages: list, active_agent: str)`
@@ -78,3 +78,14 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 - Added `get_request_attributes` and `raise_entitlement_request` MCP tools (dynamic params from `request_config.json`)
 - Added mixed-question handling (specialists answer their part, defer the rest)
 - Created Mermaid architecture diagrams in `docs/architecture.md`
+
+## Code style
+
+- **Comments**: Write in plain, human-like English. Use simple alphanumeric characters only.
+  - Use `->` for arrows, not `-->`, unicode arrows, or em dashes
+  - Use `--` for dashes, not em dashes or unicode
+  - Use `+->` for branching, not `└──▶` or other box-drawing characters
+  - Keep comments lowercase unless starting a sentence
+  - Minimal indentation inside comments -- avoid deeply nested comment formatting
+  - Section headers: `# -- Section name --` (not `# ── Section ──────`)
+- **Docstrings**: Concise and direct. No RST backtick markup (`` ``var`` ``). Refer to identifiers by name plainly.
