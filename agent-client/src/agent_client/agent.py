@@ -430,11 +430,60 @@ RESOURCE_PROMPT = (
 
 # -- Helpers --
 
+# Max character length for a single ToolMessage's content.
+# MCP adapters can return content as a list of thousands of blocks,
+# which exceeds OpenAI's 16,384 array-element limit. _compact_content
+# consolidates and truncates to stay within bounds.
+MAX_TOOL_CONTENT_LEN = int(os.environ.get("MAX_TOOL_CONTENT_LEN", "80000"))
+
+
+def _compact_content(msg):
+    """Consolidate list-type ToolMessage content into a single text string.
+
+    MCP adapters store tool results as a list of content blocks. Large results
+    can exceed OpenAI's 16,384 array-element limit. This joins all text blocks
+    into one string and truncates if it exceeds MAX_TOOL_CONTENT_LEN.
+
+    Returns a new ToolMessage (never mutates the original) so the checkpointer's
+    saved state is not corrupted.
+    """
+    if not isinstance(msg, ToolMessage):
+        return msg
+    content = msg.content
+    if isinstance(content, list):
+        # consolidate list of content blocks into a single string
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and "text" in block:
+                parts.append(block["text"])
+            elif isinstance(block, str):
+                parts.append(block)
+            else:
+                parts.append(str(block))
+        text = "\n".join(parts)
+    else:
+        text = content
+
+    if len(text) <= MAX_TOOL_CONTENT_LEN and isinstance(content, str):
+        return msg  # nothing to change
+
+    if len(text) > MAX_TOOL_CONTENT_LEN:
+        text = text[:MAX_TOOL_CONTENT_LEN] + "\n...[truncated]"
+
+    return ToolMessage(
+        content=text,
+        tool_call_id=msg.tool_call_id,
+        name=msg.name,
+        id=msg.id,
+    )
+
+
 def _trim_messages(messages: list) -> list:
     """Keep only the most recent KEEP_LAST_N messages for the LLM.
 
     The checkpointer stores the full history, but the LLM only sees
-    a sliding window to prevent context overflow.
+    a sliding window to prevent context overflow. Also compacts any
+    ToolMessage with oversized content (list or long string).
     """
     if KEEP_LAST_N > 0 and len(messages) > KEEP_LAST_N:
         messages = messages[-KEEP_LAST_N:]
@@ -442,6 +491,9 @@ def _trim_messages(messages: list) -> list:
         # AIMessage was trimmed and OpenAI rejects dangling tool msgs
         while messages and isinstance(messages[0], ToolMessage):
             messages = messages[1:]
+    # consolidate oversized tool results so they don't exceed
+    # OpenAI's content array limit (16,384 elements)
+    messages = [_compact_content(m) for m in messages]
     return messages
 
 
