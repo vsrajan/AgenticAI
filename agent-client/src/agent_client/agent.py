@@ -943,10 +943,23 @@ async def _stream_response(agent, user_input: str, config: dict) -> tuple[str, b
     spinner = Spinner("Thinking")
     await spinner.start()
 
+    # streaming is a one-shot latch: False while the LLM is routing or calling
+    # tools, flips to True on the first displayable answer token. It serves two
+    # purposes: (1) gates spinner updates -- once True the spinner is stopped and
+    # never updated again, so it can't overwrite answer text already on screen;
+    # (2) prints the "Assistant:" header exactly once on the False -> True edge.
     streaming = False
     answer_parts: list[str] = []
 
     try:
+        # astream_events is an async generator -- it runs the full graph and
+        # yields a dict for every internal event (node start, LLM token, tool
+        # finish, etc.) as they happen. Contrast with the other execution methods:
+        #   ainvoke        -> runs graph, returns final state (no intermediate visibility)
+        #   astream        -> runs graph, yields state deltas per node (node-level granularity)
+        #   astream_events -> runs graph, yields per-runnable events (token-level granularity)
+        # We use astream_events because we need token-level streaming for the
+        # live typing effect plus node-start events for spinner phase updates.
         async for event in agent.astream_events(
             {"messages": [HumanMessage(content=user_input)]},
             config,
@@ -999,6 +1012,10 @@ async def _stream_response(agent, user_input: str, config: dict) -> tuple[str, b
                         streaming = True
                         await spinner.stop()
                         sys.stdout.write("\n🤖 Assistant: ")
+                    # sys.stdout.write + flush instead of print() so each token
+                    # appears immediately with no added newline -- gives the user
+                    # a live typing effect. sys is Python's standard library module
+                    # (imported at top of file); sys.stdout is the process stdout.
                     sys.stdout.write(chunk.content)
                     sys.stdout.flush()
                     answer_parts.append(chunk.content)
