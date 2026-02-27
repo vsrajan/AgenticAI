@@ -810,6 +810,24 @@ def _get_mcp_server_config() -> dict:
 # -- History dump --
 
 LOG_FILE = "agent_log.txt"
+STREAM_FILE = "agent_stream.txt"
+
+
+def _write_stream_entry(fh, msg, node: str) -> None:
+    """Append a single message entry to the stream file.
+
+    Format matches _dump_history: [ClassName]  (node: xxx) followed by
+    content and any tool_calls. Flushes after each entry so tail -f
+    sees it immediately.
+    """
+    role = msg.__class__.__name__
+    content = msg.content if isinstance(msg.content, str) else str(msg.content)
+    fh.write(f"[{role}]  (node: {node})\n{content}\n")
+    if hasattr(msg, "tool_calls") and msg.tool_calls:
+        for tc in msg.tool_calls:
+            fh.write(f"  -> tool_call: {tc['name']}({tc.get('args', {})})\n")
+    fh.write("\n")
+    fh.flush()
 
 
 async def _dump_history(agent, config) -> None:
@@ -898,6 +916,11 @@ async def run_agent_loop(on_response=None):
     thread_id = uuid.uuid4().hex
     config = {"configurable": {"thread_id": thread_id}}
 
+    # reset the stream file for this session so it doesn't grow unboundedly
+    with open(STREAM_FILE, "w", encoding="utf-8") as fh:
+        fh.write(f"Agent stream log -- {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
+        fh.write("=" * 60 + "\n")
+
     print("\nAccess Governance Assistant")
     print("=" * 40)
     print('Type your question below. Type "exit" to quit.\n')
@@ -950,6 +973,11 @@ async def _stream_response(agent, user_input: str, config: dict) -> tuple[str, b
     # (2) prints the "Assistant:" header exactly once on the False -> True edge.
     streaming = False
     answer_parts: list[str] = []
+
+    # stream messages to file in real time so `tail -f agent_stream.txt` works
+    stream_fh = open(STREAM_FILE, "a", encoding="utf-8")
+    stream_fh.write(f"\n--- turn {datetime.datetime.now():%H:%M:%S} ---\n\n")
+    _write_stream_entry(stream_fh, HumanMessage(content=user_input), "input")
 
     try:
         # astream_events is an async generator -- it runs the full graph and
@@ -1019,8 +1047,20 @@ async def _stream_response(agent, user_input: str, config: dict) -> tuple[str, b
                     sys.stdout.write(chunk.content)
                     sys.stdout.flush()
                     answer_parts.append(chunk.content)
+
+            # log completed node output to stream file for tail -f
+            if kind == "on_chain_end":
+                node = event.get("metadata", {}).get("langgraph_node", "")
+                if node:
+                    output = event.get("data", {}).get("output", {})
+                    msgs = []
+                    if isinstance(output, dict):
+                        msgs = output.get("messages", [])
+                    for msg in msgs:
+                        _write_stream_entry(stream_fh, msg, node)
     finally:
         await spinner.stop()
+        stream_fh.close()
 
     if streaming:
         sys.stdout.write("\n")
