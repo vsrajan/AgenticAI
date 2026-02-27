@@ -74,8 +74,14 @@ class Spinner:
                 # pad to max width so shorter messages overwrite longer ones
                 write(text.ljust(self._max_len + 4))
                 flush()
+                # yield control to the event loop so the agent graph can
+                # run between animation frames -- without this await the
+                # spinner would block the entire loop
                 await asyncio.sleep(0.08)
         except asyncio.CancelledError:
+            # cancel() in stop() schedules a CancelledError that lands
+            # at the await asyncio.sleep above. Clear the spinner line
+            # before exiting so subsequent output starts on a clean line.
             write("\r" + " " * (self._max_len + 4) + "\r")
             flush()
 
@@ -86,7 +92,13 @@ class Spinner:
     async def stop(self) -> None:
         """Stop the spinner and clear its line."""
         if self._task:
+            # cancel() just sets a flag and returns immediately -- the
+            # CancelledError hasn't been raised inside _spin yet
             self._task.cancel()
+            # await the task so _spin's CancelledError handler (line
+            # clearing) runs before we return. Awaiting a cancelled task
+            # re-raises CancelledError to the caller, so we suppress it
+            # here because the cancellation is intentional.
             try:
                 await self._task
             except asyncio.CancelledError:
