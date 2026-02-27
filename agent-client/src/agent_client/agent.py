@@ -82,6 +82,10 @@ class Spinner:
             # cancel() in stop() schedules a CancelledError that lands
             # at the await asyncio.sleep above. Clear the spinner line
             # before exiting so subsequent output starts on a clean line.
+            # \r moves cursor to column 0, spaces overwrite the widest
+            # label ever shown (+4 covers the frame char, spacing, and
+            # ellipsis), then a second \r resets the cursor to column 0
+            # so the next print starts on a clean line.
             write("\r" + " " * (self._max_len + 4) + "\r")
             flush()
 
