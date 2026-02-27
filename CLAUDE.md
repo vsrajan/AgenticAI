@@ -92,3 +92,8 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
   - Minimal indentation inside comments -- avoid deeply nested comment formatting
   - Section headers: `# -- Section name --` (not `# ── Section ──────`)
 - **Docstrings**: Concise and direct. No RST backtick markup (`` ``var`` ``). Refer to identifiers by name plainly.
+
+## To do
+
+- Refactor `on_response` callback so streamed token output is also pluggable instead of hardcoded to `sys.stdout` -- needed before the agent loop can be embedded in a non-CLI frontend
+- Add a web UI frontend to the agent (replace or supplement the CLI interface)
