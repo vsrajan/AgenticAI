@@ -82,6 +82,10 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 - Fixed `_dump_history` node attribution -- uses snapshot.next instead of missing metadata["writes"] key (not persisted in LangGraph 1.0.8)
 - Normalized comment style: plain characters, `->` arrows, concise docstrings
 
+## General instructions
+
+- Default to **plan mode** -- always present a plan and wait for approval before making changes. Do not use auto-accept unless explicitly told to switch.
+
 ## Code style
 
 - **Comments**: Write in plain, human-like English. Use simple alphanumeric characters only.
