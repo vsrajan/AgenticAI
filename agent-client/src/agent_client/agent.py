@@ -954,6 +954,32 @@ async def _stream_response(agent, user_input: str, config: dict) -> tuple[str, b
         ):
             kind = event["event"]
 
+            # -- astream_events (v2) event kinds --
+            # LangGraph/LangChain emits events named on_[type]_(start|stream|end).
+            # Each runnable type produces a triplet:
+            #
+            #   chain       -> on_chain_start, on_chain_stream, on_chain_end
+            #   chat_model  -> on_chat_model_start, on_chat_model_stream, on_chat_model_end
+            #   llm         -> on_llm_start, on_llm_stream, on_llm_end
+            #   tool        -> on_tool_start, on_tool_stream, on_tool_end
+            #   retriever   -> on_retriever_start, on_retriever_stream, on_retriever_end
+            #   prompt      -> on_prompt_start, on_prompt_end
+            #   custom      -> on_custom_event
+            #
+            # _start  -- runnable invoked; data.input has the input
+            # _stream -- incremental chunk; data.chunk has the partial result
+            # _end    -- runnable finished; data.output has the final result
+            #
+            # In LangGraph, on_chain_start fires per graph node; metadata.langgraph_node
+            # identifies which node. on_chat_model_stream yields AIMessageChunk with
+            # .content (text tokens) and optionally .tool_call_chunks (partial tool JSON).
+            #
+            # We only use on_chain_start (spinner updates) and on_chat_model_stream
+            # (token display) -- everything else is handled internally by the graph.
+            #
+            # Ref: https://api.python.langchain.com/en/latest/runnables/langchain_core.runnables.schema.StreamEvent.html
+            # Ref: https://docs.langchain.com/oss/python/langchain/streaming
+
             # update spinner when a new graph node starts
             if kind == "on_chain_start":
                 node = event.get("metadata", {}).get("langgraph_node", "")
