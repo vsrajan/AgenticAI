@@ -18,11 +18,14 @@ graph LR
         Router["Router Node"]
         KB["Knowledgebase<br/>Agent"]
         Res["Resource<br/>Agent"]
+        Qual["Quality<br/>Agent"]
         Handoff["Handoff Node"]
         Router --> KB
         Router --> Res
+        Router --> Qual
         KB --> Handoff
         Res --> Handoff
+        Qual --> Handoff
         Handoff --> Router
     end
 
@@ -47,6 +50,7 @@ graph LR
     style Router fill:#bbdefb,stroke:#2b579a,stroke-width:2px
     style KB fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
     style Res fill:#fff3e0,stroke:#e65c00,stroke-width:2px
+    style Qual fill:#e1f5fe,stroke:#0277bd,stroke-width:2px
     style Handoff fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
     style KBTools fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px
     style ResTools fill:#fff3e0,stroke:#e65c00,stroke-width:1px
@@ -57,7 +61,7 @@ graph LR
 
 ## 2. LangGraph Agent Graph
 
-The agent is built as a **LangGraph StateGraph** with 6 nodes and
+The agent is built as a **LangGraph StateGraph** with 8 nodes and
 conditional edges that route based on LLM tool-call decisions.
 State tracks `messages[]` and `active_agent` (persistent specialist
 ownership across turns).
@@ -66,14 +70,16 @@ ownership across turns).
 graph TD
     START(["START"])
 
-    START -->|"active_agent set<br/>→ resume specialist"| KB_AGENT
-    START -->|"active_agent set<br/>→ resume specialist"| RES_AGENT
-    START -->|"no active_agent<br/>→ go to router"| ROUTER
+    START -->|"active_agent set<br/>-> resume specialist"| KB_AGENT
+    START -->|"active_agent set<br/>-> resume specialist"| RES_AGENT
+    START -->|"active_agent set<br/>-> resume specialist"| QUAL_AGENT
+    START -->|"no active_agent<br/>-> go to router"| ROUTER
 
-    ROUTER{"Router<br/><small>LLM decides routing<br/>using route_to_knowledgebase()<br/>or route_to_resource()</small>"}
+    ROUTER{"Router<br/><small>LLM decides routing<br/>using route_to_knowledgebase(),<br/>route_to_resource(), or<br/>route_to_quality_checker()</small>"}
 
     ROUTER -->|"called route_to_knowledgebase"| KB_AGENT
     ROUTER -->|"called route_to_resource"| RES_AGENT
+    ROUTER -->|"called route_to_quality_checker"| QUAL_AGENT
     ROUTER -->|"direct answer<br/>(greeting / chat)"| END_R(["END"])
 
     subgraph kb_loop ["Knowledgebase Specialist Loop"]
@@ -90,14 +96,23 @@ graph TD
         RES_TOOLS -->|"return results"| RES_AGENT
     end
 
+    subgraph qual_loop ["Quality Specialist Loop"]
+        QUAL_AGENT["quality_agent<br/><small>Data quality checker</small>"]
+        QUAL_TOOLS["quality_tools<br/><small>get_quality_criteria ·<br/>filter_dataset_fuzzy · +4 more</small>"]
+        QUAL_AGENT -->|"has domain<br/>tool calls"| QUAL_TOOLS
+        QUAL_TOOLS -->|"return results"| QUAL_AGENT
+    end
+
     KB_AGENT -->|"hand_off_to_router<br/>only (no domain tools)"| HANDOFF
     RES_AGENT -->|"hand_off_to_router<br/>only (no domain tools)"| HANDOFF
+    QUAL_AGENT -->|"hand_off_to_router<br/>only (no domain tools)"| HANDOFF
 
     HANDOFF["handoff<br/><small>Clears active_agent</small>"]
     HANDOFF -->|"re-route"| ROUTER
 
     KB_AGENT -->|"final answer<br/>(no tool calls)"| END_KB(["END"])
     RES_AGENT -->|"final answer<br/>(no tool calls)"| END_RES(["END"])
+    QUAL_AGENT -->|"final answer<br/>(no tool calls)"| END_QUAL(["END"])
 
     style START fill:#1a365d,stroke:#1a365d,color:#fff
     style ROUTER fill:#bbdefb,stroke:#2b579a,stroke-width:2px
@@ -105,12 +120,16 @@ graph TD
     style KB_TOOLS fill:#c8e6c9,stroke:#2e7d32,stroke-width:1px
     style RES_AGENT fill:#fff3e0,stroke:#e65c00,stroke-width:2px
     style RES_TOOLS fill:#ffe0b2,stroke:#e65c00,stroke-width:1px
+    style QUAL_AGENT fill:#e1f5fe,stroke:#0277bd,stroke-width:2px
+    style QUAL_TOOLS fill:#b3e5fc,stroke:#0277bd,stroke-width:1px
     style HANDOFF fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
     style END_R fill:#c62828,stroke:#c62828,color:#fff
     style END_KB fill:#c62828,stroke:#c62828,color:#fff
     style END_RES fill:#c62828,stroke:#c62828,color:#fff
+    style END_QUAL fill:#c62828,stroke:#c62828,color:#fff
     style kb_loop fill:#f1f8e9,stroke:#2e7d32,stroke-width:1px,stroke-dasharray:5
     style res_loop fill:#fff8e1,stroke:#e65c00,stroke-width:1px,stroke-dasharray:5
+    style qual_loop fill:#e1f5fe,stroke:#0277bd,stroke-width:1px,stroke-dasharray:5
 ```
 
 ### Conditional Edge Summary
@@ -121,6 +140,7 @@ graph TD
 | | | `active_agent` is empty | Router |
 | `route_from_router()` | Router | Called `route_to_knowledgebase` | knowledgebase_agent |
 | | | Called `route_to_resource` | resource_agent |
+| | | Called `route_to_quality_checker` | quality_agent |
 | | | No tool call (direct answer) | END |
 | `specialist_edge()` | Specialist | Has domain tool calls | Specialist's tool node |
 | | | `hand_off_to_router` only | Handoff |
@@ -130,7 +150,7 @@ graph TD
 
 ## 3. MCP Server — Tool Architecture
 
-The MCP server exposes **11 tools** organized into three groups.
+The MCP server exposes **12 tools** organized into four groups.
 Tools are discovered dynamically by the agent client at startup via the
 MCP protocol.
 
@@ -158,11 +178,16 @@ graph TD
             T10["get_request_attributes()<br/><small>Return required/optional fields<br/>for an entitlement request</small>"]
             T11["raise_entitlement_request(**kwargs)<br/><small>Submit an entitlement access<br/>request (placeholder)</small>"]
         end
+
+        subgraph QUAL_GROUP ["Quality Tools"]
+            T12["get_quality_criteria()<br/><small>Return data quality criteria<br/>checklist for resource evaluation</small>"]
+        end
     end
 
     KB_GROUP -->|"reads"| DOC_IDX["DocIndex<br/><small>PDF → per-page BM25 index</small>"]
     RES_GROUP -->|"queries"| CSV_STORE["CsvStore<br/><small>CSV → in-memory DataFrame</small>"]
     REQ_GROUP -->|"reads schema"| REQ_CFG["request_config.json<br/><small>Dynamic parameter schema</small>"]
+    QUAL_GROUP -->|"reads criteria"| QUAL_CFG["quality_criteria.json<br/><small>Quality criteria checklist</small>"]
 
     style MCP_SERVER fill:#e0f2f1,stroke:#00696b,stroke-width:2px
     style KB_GROUP fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
@@ -182,13 +207,17 @@ graph TD
     style T9 fill:#fff,stroke:#e65c00
     style T10 fill:#fff,stroke:#6a1b9a
     style T11 fill:#fff,stroke:#6a1b9a
+    style QUAL_GROUP fill:#e1f5fe,stroke:#0277bd,stroke-width:2px
+    style QUAL_CFG fill:#b3e5fc,stroke:#0277bd,stroke-width:1px
+    style T12 fill:#fff,stroke:#0277bd
 ```
 
 ### Tool Bindings per Agent Node
 
 | Agent Node | Bound Tools | Notes |
 |---|---|---|
-| **Router** | `route_to_knowledgebase(reason)`, `route_to_resource(reason)` | Internal routing tools (not MCP). Can also answer directly. |
+| **Router** | `route_to_knowledgebase(reason)`, `route_to_resource(reason)`, `route_to_quality_checker(reason)` | Internal routing tools (not MCP). Can also answer directly. |
 | **knowledgebase_agent** | `list_topics`, `search_docs`, `read_page`, `hand_off_to_router` | MCP tools + handoff |
 | **resource_agent** | `list_datasets`, `search_dataset`, `filter_dataset`, `filter_dataset_fuzzy`, `count_by_column`, `get_column_values`, `get_request_attributes`, `raise_entitlement_request`, `hand_off_to_router` | MCP tools + handoff |
-| **handoff** | *(none — processes pending `hand_off_to_router` calls)* | Clears `active_agent` and returns to Router |
+| **quality_agent** | `get_quality_criteria`, `filter_dataset`, `filter_dataset_fuzzy`, `search_dataset`, `list_datasets`, `get_column_values`, `hand_off_to_router` | MCP tools (shared resource tools + quality tool) + handoff |
+| **handoff** | *(none -- processes pending `hand_off_to_router` calls)* | Clears `active_agent` and returns to Router |

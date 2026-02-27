@@ -1,0 +1,130 @@
+{
+  "criteria": [
+    {
+      "range": "Asset",
+      "name": "Asset Name",
+      "description": "Name of the application as it appears on entitlement management systems. A meaningful name is expected. This attribute does not need to be changed. It is written in English.",
+      "importance": "Very Important"
+    },
+    {
+      "range": "Asset",
+      "name": "Asset Description",
+      "description": "Text explaining the usage of the application, including key functions and corresponding tasks. Written in generally understandable, business-related language. Targeted at a user without specific knowledge about the application. Does not contain uncommon abbreviations. It is written in English.",
+      "importance": "Very Important"
+    },
+    {
+      "range": "Asset",
+      "name": "Asset Usage",
+      "description": "States which user group(s) at application level are allowed to use the access rights of this application (who utilizes the application, where is it used). Should not contain uncommon abbreviations. It is written in English.",
+      "importance": "Important"
+    },
+    {
+      "range": "Asset",
+      "name": "Asset Restrictions",
+      "description": "Text states any kind of terms and restrictions which influence the application's utilization. Should not contain uncommon abbreviations. Only fill out if applicable. It is written in English.",
+      "importance": "Nice to Have"
+    },
+    {
+      "range": "Asset",
+      "name": "Authorization Contact",
+      "description": "Responsible person for the accuracy and correctness of all attributes around access to the application. The authorization contact should belong to Business organization and not to IT (except for Technical Applications). The authorization contact needs to be present in goto/who is who.",
+      "importance": "Very Important"
+    },
+    {
+      "range": "Access Right",
+      "name": "Access Right Name",
+      "description": "Name of the access right as it appears on entitlement management systems. A meaningful name is expected. This attribute should not be changed as it means a configuration change with possible functional impact.",
+      "importance": "Very Important"
+    },
+    {
+      "range": "Access Right",
+      "name": "Profile Name",
+      "description": "Name of the access right profile as it appears on entitlement management systems. A meaningful name is expected. This attribute should not be changed as it means a configuration change with possible functional impact.",
+      "importance": "Important"
+    },
+    {
+      "range": "Access Right",
+      "name": "Access Right Short Description",
+      "description": "Short description of the access right functionality. Must not conflict with access right description. Abbreviations are allowed if they are listed under officially approved acronyms or explained in the Description/Usage field of the Access Right. It is written in English.",
+      "importance": "Very Important"
+    },
+    {
+      "range": "Access Right",
+      "name": "Profile Description",
+      "description": "Short description of the profile. Must not conflict with Description. Abbreviations are allowed. It is written in English.",
+      "importance": "Important"
+    },
+    {
+      "range": "Access Right",
+      "name": "Access Right Description",
+      "description": "Explanatory and concise text which explains the purpose of the Access Right. Contains information about the functionality (e.g. if Access Mode = Write, what exactly can the user change/modify with this access right). Written in generally understandable, business-related language. Targeted at a user without specific IT knowledge. Does not contain uncommon abbreviations. It is written in English.",
+      "importance": "Very Important"
+    },
+    {
+      "range": "Access Right",
+      "name": "Access Right Usage",
+      "description": "Text listing the expected users/user groups to have and use this Access Right. Specific functional job descriptions, roles or similar should be provided. Has to be consistent with Usage defined on Asset level. Should not contain uncommon abbreviations. It is written in English.",
+      "importance": "Important"
+    },
+    {
+      "range": "Access Right",
+      "name": "Access Right Criticality",
+      "description": "Weighing of the sensitivity of the data and/or the system accessible by the access right. Must be aligned with the Application Criticality.",
+      "importance": "Very Important"
+    },
+    {
+      "range": "Access Right",
+      "name": "Access Mode",
+      "description": "Text describing the privilege granted to the user by the Access Right, i.e. Write, Read or Manage.",
+      "importance": "Very Important"
+    },
+    {
+      "range": "Access Right",
+      "name": "CID Access Type",
+      "description": "Reflects the type of Client Identifying Data accessed by the access right. Needs to be in line with the application's definition in SERA.",
+      "importance": "Very Important"
+    },
+    {
+      "range": "Access Right",
+      "name": "Bulk CID Access",
+      "description": "Indicates if country-specific Bulk CID definitions are met (see ECMS Handbook) and can be accessed/generated with the access right.",
+      "importance": "Very Important"
+    },
+    {
+      "range": "Access Right",
+      "name": "CID Classification",
+      "description": "Level of confidentiality assurance required for CID accessible with this access right. Examples: None, Confidential, Strictly-Confidential.",
+      "importance": "Very Important"
+    },
+    {
+      "range": "Access Right",
+      "name": "Information Barrier Restriction",
+      "description": "The attribute reflects the applicable information barriers restriction. Primarily applicable for IB. See goto/infobarrier for more information.",
+      "importance": "Nice to Have"
+    },
+    {
+      "range": "Access Right",
+      "name": "Cross Border Access",
+      "description": "Reflects from which countries outside the data-owning jurisdiction the data can be accessed.",
+      "importance": "Important"
+    },
+    {
+      "range": "Access Right",
+      "name": "Access Type",
+      "description": "Text describing the level/range granted by the Access Right (data versus function).",
+      "importance": "Important"
+    },
+    {
+      "range": "Access Right",
+      "name": "ONO/ODP Approvals",
+      "description": "Correct reference to applicable ODPs.",
+      "importance": "Nice to Have"
+    },
+    {
+      "range": "Access Right",
+      "name": "ONO/ODP Countries",
+      "description": "ODP countries according to the ODP request.",
+      "importance": "Nice to Have"
+    }
+  ]
+}

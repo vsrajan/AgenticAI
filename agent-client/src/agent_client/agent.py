@@ -1,4 +1,4 @@
-"""LangGraph StateGraph agent with Router, Knowledgebase, and Resource nodes.
+"""LangGraph StateGraph agent with Router, Knowledgebase, Resource, and Quality nodes.
 
 Connects to an already-running MCP server (stdio or SSE), loads tools,
 and routes user queries through specialised nodes:
@@ -136,13 +136,21 @@ RESOURCE_TOOL_NAMES = {
     "get_request_attributes",
     "raise_entitlement_request",
 }
+QUALITY_TOOL_NAMES = {
+    "get_quality_criteria",
+    "filter_dataset",
+    "filter_dataset_fuzzy",
+    "search_dataset",
+    "list_datasets",
+    "get_column_values",
+}
 
 
 # -- State --
 
 class AgentState(MessagesState):
     """Extended state that tracks which specialist owns the conversation."""
-    active_agent: str  # "knowledgebase_agent", "resource_agent", or "" (use router)
+    active_agent: str  # "knowledgebase_agent", "resource_agent", "quality_agent", or "" (use router)
 
 
 # -- Routing tools (used by the router) --
@@ -159,7 +167,13 @@ def route_to_resource(reason: str) -> str:
     return reason
 
 
-ROUTING_TOOLS = [route_to_knowledgebase, route_to_resource]
+@tool
+def route_to_quality_checker(reason: str) -> str:
+    """Route the query to the Data Quality Checker specialist."""
+    return reason
+
+
+ROUTING_TOOLS = [route_to_knowledgebase, route_to_resource, route_to_quality_checker]
 
 
 # -- Handoff tool (used by specialists) --
@@ -178,26 +192,33 @@ ROUTER_PROMPT = (
     "Analyse the user's query and the conversation history, then "
     "decide the next step.\n\n"
 
-    "You have two specialist agents:\n"
-    "1. Knowledgebase Agent — answers questions about how Access "
+    "You have three specialist agents:\n"
+    "1. Knowledgebase Agent -- answers questions about how Access "
     "Governance works: processes, procedures, FAQs, how-to guides, "
     "and policies.\n"
-    "2. Resource Agent — handles structured data lookups: access "
+    "2. Resource Agent -- handles structured data lookups: access "
     "rights catalogues, entitlement records, peer-based "
-    "recommendations, and organisational data.\n\n"
+    "recommendations, and organisational data.\n"
+    "3. Data Quality Checker -- evaluates the quality of resource "
+    "metadata against a criteria checklist. Route here when the user "
+    "asks to check, audit, or evaluate the quality of specific "
+    "resources.\n\n"
 
     "=== DECISION RULES ===\n\n"
     "- Questions about how something works, processes, policies, "
-    "procedures, FAQs → route to Knowledgebase.\n"
+    "procedures, FAQs -> route to Knowledgebase.\n"
     "- Questions about specific access rights, peer recommendations, "
-    "data lookups, entitlements, organisational data → route to Resource.\n"
+    "data lookups, entitlements, organisational data -> route to Resource.\n"
+    "- Questions about data quality, auditing resource metadata, "
+    "checking completeness of resource records -> route to Quality Checker.\n"
     "- If the user's question is a greeting or general chat that "
-    "does not require tool lookups → answer directly.\n\n"
+    "does not require tool lookups -> answer directly.\n\n"
 
     "=== RESPONSE FORMAT ===\n\n"
-    "You have two routing tools available:\n"
-    "- route_to_knowledgebase(reason) — delegate to the Knowledgebase specialist.\n"
-    "- route_to_resource(reason) — delegate to the Resource specialist.\n\n"
+    "You have three routing tools available:\n"
+    "- route_to_knowledgebase(reason) -- delegate to the Knowledgebase specialist.\n"
+    "- route_to_resource(reason) -- delegate to the Resource specialist.\n"
+    "- route_to_quality_checker(reason) -- delegate to the Data Quality Checker.\n\n"
     "Call the appropriate routing tool when you need a specialist. "
     "When you can answer the user directly (greetings, general chat), "
     "respond with plain text (do NOT call a tool).\n"
@@ -443,6 +464,77 @@ RESOURCE_PROMPT = (
     "Peer Count. Sort by Peer Count descending.\n"
 )
 
+QUALITY_PROMPT = (
+    "You are the Data Quality Checker specialist for an Access "
+    "Governance assistant. You evaluate resource metadata against "
+    "a quality criteria checklist and produce structured reports.\n\n"
+
+    "=== WORKFLOW ===\n\n"
+    "1. Parse the comma-separated ResourceIds from the user's message.\n"
+    "2. Call list_datasets to discover the current column names on "
+    "the Resources dataset.\n"
+    "3. Call get_quality_criteria to load the quality checklist.\n"
+    "4. Fetch resource data using filter_dataset_fuzzy on the "
+    "Resources dataset with a ResourceID regex pattern joining "
+    "all IDs with | (e.g. {\"ResourceID\": \"id1|id2|id3\"}). "
+    "This returns full rows with all columns -- no column mapping "
+    "is needed.\n"
+    "5. For each resource, evaluate each criterion against the "
+    "entire row data (all columns). Use the criterion description "
+    "to judge whether any column satisfies it:\n"
+    "   - Does the resource data contain information that meets "
+    "the criterion?\n"
+    "   - Is that information meaningful and complete?\n"
+    "   - Verdict: Pass, Fail, or Partial (with explanation).\n"
+    "6. Produce a structured quality report.\n\n"
+
+    "=== EVALUATION RULES ===\n\n"
+    "- Criteria are NOT mapped to specific columns. Evaluate each "
+    "criterion against all available columns in the resource row.\n"
+    "- A criterion passes if any column (or combination of columns) "
+    "provides data that satisfies the criterion description.\n"
+    "- A criterion fails if no column contains relevant data, or "
+    "the data is empty, meaningless, or clearly insufficient.\n"
+    "- Mark as Partial when some relevant data exists but does not "
+    "fully satisfy the criterion description.\n"
+    "- Pay attention to importance levels: Very Important, Important, "
+    "and Nice to Have. Flag Very Important failures prominently.\n"
+    "- If a criterion description says 'only fill out if applicable' "
+    "and the field is empty, that is acceptable (not a failure).\n\n"
+
+    "=== AVAILABLE TOOLS ===\n\n"
+    "- list_datasets -- shows datasets, column names, and row counts. "
+    "Call this first to discover the Resources dataset schema.\n"
+    "- get_quality_criteria -- returns the quality criteria checklist "
+    "with name, description, importance, and range for each criterion.\n"
+    "- filter_dataset_fuzzy(dataset, filters) -- regex pattern matching "
+    "on columns. Use to batch-fetch resources by ResourceID.\n"
+    "- filter_dataset(dataset, filters) -- exact match filtering.\n"
+    "- search_dataset(dataset, query) -- free-text BM25 search.\n"
+    "- get_column_values(dataset, column) -- list distinct values.\n"
+    "- hand_off_to_router(reason) -- hand the conversation back if "
+    "the question is outside your expertise.\n\n"
+
+    "=== WHEN TO HAND OFF ===\n\n"
+    "If the user asks about processes, policies, peer recommendations, "
+    "or anything not related to data quality evaluation, call "
+    "hand_off_to_router with the reason.\n\n"
+
+    "=== OUTPUT FORMAT ===\n\n"
+    "For each resource, produce a table:\n\n"
+    "| Criterion | Importance | Status | Notes |\n"
+    "|-----------|------------|--------|-------|\n\n"
+    "Then produce a summary table:\n\n"
+    "| ResourceId | Name | Score | Very Important Gaps | Status |\n"
+    "|------------|------|-------|---------------------|--------|\n\n"
+    "Status values: Good (all Very Important pass), At Risk (any "
+    "Very Important fail), Needs Review (only Important/Nice to Have "
+    "failures).\n\n"
+    "Be thorough but concise. List the column(s) you matched each "
+    "criterion against in the Notes column so the user can verify "
+    "your assessment.\n"
+)
+
 
 # -- Helpers --
 
@@ -540,6 +632,8 @@ def _make_router_node(llm, routing_tools):
                 active_agent = "knowledgebase_agent"
             elif tc["name"] == "route_to_resource":
                 active_agent = "resource_agent"
+            elif tc["name"] == "route_to_quality_checker":
+                active_agent = "quality_agent"
         return {"messages": result, "active_agent": active_agent}
 
     return router_node
@@ -649,7 +743,7 @@ def _make_tool_node(domain_tools):
 def route_entry(state: AgentState) -> str:
     """Entry edge: skip the router if a specialist already owns the conversation."""
     active = state.get("active_agent", "")
-    if active in ("knowledgebase_agent", "resource_agent"):
+    if active in ("knowledgebase_agent", "resource_agent", "quality_agent"):
         return active
     return "router"
 
@@ -667,6 +761,8 @@ def route_from_router(state: AgentState) -> str:
             return "knowledgebase_agent"
         if tool_name == "route_to_resource":
             return "resource_agent"
+        if tool_name == "route_to_quality_checker":
+            return "quality_agent"
     # no tool call -> direct answer, end the turn
     return END
 
@@ -714,6 +810,10 @@ def build_graph(llm, all_tools):
                 |     +-> END                          |
                 |                                      |
                 +-> resource_agent <-> resource_tools -> END
+                |         |
+                |         +-> handoff -> router
+                |
+                +-> quality_agent <-> quality_tools -> END
                           |
                           +-> handoff -> router
 
@@ -723,10 +823,12 @@ def build_graph(llm, all_tools):
     """
     knowledgebase_tools = [t for t in all_tools if t.name in KNOWLEDGEBASE_TOOL_NAMES]
     resource_tools = [t for t in all_tools if t.name in RESOURCE_TOOL_NAMES]
+    quality_tools = [t for t in all_tools if t.name in QUALITY_TOOL_NAMES]
 
     # each specialist gets its MCP tools + the handoff tool
     knowledgebase_all_tools = knowledgebase_tools + [hand_off_to_router]
     resource_all_tools = resource_tools + [hand_off_to_router]
+    quality_all_tools = quality_tools + [hand_off_to_router]
 
     graph = StateGraph(AgentState)
 
@@ -739,6 +841,9 @@ def build_graph(llm, all_tools):
     graph.add_node("resource_agent", _make_agent_node(llm, resource_all_tools, RESOURCE_PROMPT))
     graph.add_node("resource_tools", _make_tool_node(resource_tools))
 
+    graph.add_node("quality_agent", _make_agent_node(llm, quality_all_tools, QUALITY_PROMPT))
+    graph.add_node("quality_tools", _make_tool_node(quality_tools))
+
     graph.add_node("handoff", _handoff_node)
 
     # -- edges --
@@ -747,14 +852,24 @@ def build_graph(llm, all_tools):
     graph.add_conditional_edges(
         START,
         route_entry,
-        {"router": "router", "knowledgebase_agent": "knowledgebase_agent", "resource_agent": "resource_agent"},
+        {
+            "router": "router",
+            "knowledgebase_agent": "knowledgebase_agent",
+            "resource_agent": "resource_agent",
+            "quality_agent": "quality_agent",
+        },
     )
 
     # router picks a specialist or answers directly
     graph.add_conditional_edges(
         "router",
         route_from_router,
-        {"knowledgebase_agent": "knowledgebase_agent", "resource_agent": "resource_agent", END: END},
+        {
+            "knowledgebase_agent": "knowledgebase_agent",
+            "resource_agent": "resource_agent",
+            "quality_agent": "quality_agent",
+            END: END,
+        },
     )
 
     # knowledgebase sub-loop: agent -> tools -> agent -> ... -> END or handoff
@@ -772,6 +887,14 @@ def build_graph(llm, all_tools):
         {"resource_tools": "resource_tools", "handoff": "handoff", END: END},
     )
     graph.add_edge("resource_tools", "resource_agent")
+
+    # quality sub-loop: agent -> tools -> agent -> ... -> END or handoff
+    graph.add_conditional_edges(
+        "quality_agent",
+        _make_specialist_edge("quality_tools"),
+        {"quality_tools": "quality_tools", "handoff": "handoff", END: END},
+    )
+    graph.add_edge("quality_tools", "quality_agent")
 
     # handoff returns to router for re-routing
     graph.add_edge("handoff", "router")
@@ -900,8 +1023,10 @@ _NODE_PHASES = {
     "router": "Routing",
     "knowledgebase_agent": "Generating answer",
     "resource_agent": "Generating answer",
+    "quality_agent": "Evaluating quality",
     "knowledgebase_tools": "Calling tools",
     "resource_tools": "Calling tools",
+    "quality_tools": "Calling tools",
     "handoff": "Switching specialist",
 }
 

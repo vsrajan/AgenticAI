@@ -353,6 +353,33 @@ def raise_entitlement_request(
 
 
 # ---------------------------------------------------------------------------
+# Quality tools
+# ---------------------------------------------------------------------------
+
+_QUALITY_CRITERIA_PATH = Path(DOCS_DIR) / "quality_criteria.json"
+
+
+def _load_quality_criteria() -> dict:
+    """Load the quality criteria checklist from quality_criteria.json."""
+    if not _QUALITY_CRITERIA_PATH.exists():
+        return {"error": f"Quality criteria config not found at {_QUALITY_CRITERIA_PATH}"}
+    with open(_QUALITY_CRITERIA_PATH, encoding="utf-8") as f:
+        return json.load(f)
+
+
+@mcp.tool()
+def get_quality_criteria() -> dict:
+    """Get the data quality criteria checklist for resource evaluation.
+
+    Returns a list of criteria, each with a name, description (what
+    constitutes a pass), importance level, and range (Asset or Access Right).
+    The quality agent uses these criteria to evaluate resource metadata.
+    """
+    logger.debug("get_quality_criteria called")
+    return _load_quality_criteria()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
