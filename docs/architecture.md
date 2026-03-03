@@ -9,9 +9,10 @@ and an **MCP Server** (FastMCP) that exposes documentation, data, and
 request tools.
 
 ```mermaid
+%%{init: {'theme': 'default', 'themeVariables': {'fontSize': '12px'}, 'flowchart': {'useMaxWidth': false}}}%%
 graph LR
-    User["👤 User<br/>(CLI / Chat)"]
-    User -->|"prompt"| Agent
+    User["User<br/>(CLI / Chat)"]
+    User -->|"prompt"| Router
 
     subgraph AgentClient["Agent Client (LangGraph)"]
         direction TB
@@ -29,7 +30,7 @@ graph LR
         Handoff --> Router
     end
 
-    Agent -->|"tool calls<br/>MCP protocol<br/>(SSE / stdio)"| MCP
+    Res -->|"tool calls<br/>MCP protocol<br/>(SSE / stdio)"| MCP
 
     subgraph MCP["MCP Server (FastMCP)"]
         direction TB
@@ -38,23 +39,23 @@ graph LR
         ReqTools["Request Tools"]
     end
 
-    Agent <-->|"LLM calls"| LLM["Azure OpenAI<br/>(GPT-4o)"]
+    Router <-->|"LLM calls"| LLM["Azure OpenAI<br/>(GPT-4o)"]
 
     MCP --> Data["Data Sources<br/>PDF docs · CSV files<br/>request_config.json"]
 
-    style AgentClient fill:#d6e4f0,stroke:#2b579a,stroke-width:2px
-    style MCP fill:#e0f2f1,stroke:#00696b,stroke-width:2px
-    style LLM fill:#e3f2fd,stroke:#2b579a,stroke-width:2px
-    style Data fill:#f5f5f5,stroke:#666,stroke-width:1px
-    style User fill:#e0e0e0,stroke:#666,stroke-width:1px
-    style Router fill:#bbdefb,stroke:#2b579a,stroke-width:2px
-    style KB fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    style Res fill:#fff3e0,stroke:#e65c00,stroke-width:2px
-    style Qual fill:#e1f5fe,stroke:#0277bd,stroke-width:2px
-    style Handoff fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
-    style KBTools fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px
-    style ResTools fill:#fff3e0,stroke:#e65c00,stroke-width:1px
-    style ReqTools fill:#f3e5f5,stroke:#6a1b9a,stroke-width:1px
+    style AgentClient fill:#d6e4f0,stroke:#2b579a,stroke-width:2px,color:#000
+    style MCP fill:#e0f2f1,stroke:#00696b,stroke-width:2px,color:#000
+    style LLM fill:#e3f2fd,stroke:#2b579a,stroke-width:2px,color:#000
+    style Data fill:#f5f5f5,stroke:#666,stroke-width:1px,color:#000
+    style User fill:#e0e0e0,stroke:#666,stroke-width:1px,color:#000
+    style Router fill:#bbdefb,stroke:#2b579a,stroke-width:2px,color:#000
+    style KB fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
+    style Res fill:#fff3e0,stroke:#e65c00,stroke-width:2px,color:#000
+    style Qual fill:#e1f5fe,stroke:#0277bd,stroke-width:2px,color:#000
+    style Handoff fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px,color:#000
+    style KBTools fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px,color:#000
+    style ResTools fill:#fff3e0,stroke:#e65c00,stroke-width:1px,color:#000
+    style ReqTools fill:#f3e5f5,stroke:#6a1b9a,stroke-width:1px,color:#000
 ```
 
 ---
@@ -67,6 +68,7 @@ State tracks `messages[]` and `active_agent` (persistent specialist
 ownership across turns).
 
 ```mermaid
+%%{init: {'theme': 'default', 'themeVariables': {'fontSize': '12px'}, 'flowchart': {'useMaxWidth': false}}}%%
 graph TD
     START(["START"])
 
@@ -114,22 +116,22 @@ graph TD
     RES_AGENT -->|"final answer<br/>(no tool calls)"| END_RES(["END"])
     QUAL_AGENT -->|"final answer<br/>(no tool calls)"| END_QUAL(["END"])
 
-    style START fill:#1a365d,stroke:#1a365d,color:#fff
-    style ROUTER fill:#bbdefb,stroke:#2b579a,stroke-width:2px
-    style KB_AGENT fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    style KB_TOOLS fill:#c8e6c9,stroke:#2e7d32,stroke-width:1px
-    style RES_AGENT fill:#fff3e0,stroke:#e65c00,stroke-width:2px
-    style RES_TOOLS fill:#ffe0b2,stroke:#e65c00,stroke-width:1px
-    style QUAL_AGENT fill:#e1f5fe,stroke:#0277bd,stroke-width:2px
-    style QUAL_TOOLS fill:#b3e5fc,stroke:#0277bd,stroke-width:1px
-    style HANDOFF fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
-    style END_R fill:#c62828,stroke:#c62828,color:#fff
-    style END_KB fill:#c62828,stroke:#c62828,color:#fff
-    style END_RES fill:#c62828,stroke:#c62828,color:#fff
-    style END_QUAL fill:#c62828,stroke:#c62828,color:#fff
-    style kb_loop fill:#f1f8e9,stroke:#2e7d32,stroke-width:1px,stroke-dasharray:5
-    style res_loop fill:#fff8e1,stroke:#e65c00,stroke-width:1px,stroke-dasharray:5
-    style qual_loop fill:#e1f5fe,stroke:#0277bd,stroke-width:1px,stroke-dasharray:5
+    style START fill:#90caf9,stroke:#2b579a,stroke-width:2px,color:#000
+    style ROUTER fill:#bbdefb,stroke:#2b579a,stroke-width:2px,color:#000
+    style KB_AGENT fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
+    style KB_TOOLS fill:#c8e6c9,stroke:#2e7d32,stroke-width:1px,color:#000
+    style RES_AGENT fill:#fff3e0,stroke:#e65c00,stroke-width:2px,color:#000
+    style RES_TOOLS fill:#ffe0b2,stroke:#e65c00,stroke-width:1px,color:#000
+    style QUAL_AGENT fill:#e1f5fe,stroke:#0277bd,stroke-width:2px,color:#000
+    style QUAL_TOOLS fill:#b3e5fc,stroke:#0277bd,stroke-width:1px,color:#000
+    style HANDOFF fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px,color:#000
+    style END_R fill:#ef9a9a,stroke:#c62828,stroke-width:2px,color:#000
+    style END_KB fill:#ef9a9a,stroke:#c62828,stroke-width:2px,color:#000
+    style END_RES fill:#ef9a9a,stroke:#c62828,stroke-width:2px,color:#000
+    style END_QUAL fill:#ef9a9a,stroke:#c62828,stroke-width:2px,color:#000
+    style kb_loop fill:#f1f8e9,stroke:#2e7d32,stroke-width:1px,stroke-dasharray:5,color:#000
+    style res_loop fill:#fff8e1,stroke:#e65c00,stroke-width:1px,stroke-dasharray:5,color:#000
+    style qual_loop fill:#e1f5fe,stroke:#0277bd,stroke-width:1px,stroke-dasharray:5,color:#000
 ```
 
 ### Conditional Edge Summary
@@ -155,6 +157,7 @@ Tools are discovered dynamically by the agent client at startup via the
 MCP protocol.
 
 ```mermaid
+%%{init: {'theme': 'default', 'themeVariables': {'fontSize': '12px'}, 'flowchart': {'useMaxWidth': false}}}%%
 graph TD
     subgraph MCP_SERVER ["MCP Server (FastMCP)"]
         direction TB
@@ -184,32 +187,32 @@ graph TD
         end
     end
 
-    KB_GROUP -->|"reads"| DOC_IDX["DocIndex<br/><small>PDF → per-page BM25 index</small>"]
-    RES_GROUP -->|"queries"| CSV_STORE["CsvStore<br/><small>CSV → in-memory DataFrame</small>"]
+    KB_GROUP -->|"reads"| DOC_IDX["DocIndex<br/><small>PDF -> per-page BM25 index</small>"]
+    RES_GROUP -->|"queries"| CSV_STORE["CsvStore<br/><small>CSV -> in-memory DataFrame</small>"]
     REQ_GROUP -->|"reads schema"| REQ_CFG["request_config.json<br/><small>Dynamic parameter schema</small>"]
     QUAL_GROUP -->|"reads criteria"| QUAL_CFG["quality_criteria.json<br/><small>Quality criteria checklist</small>"]
 
-    style MCP_SERVER fill:#e0f2f1,stroke:#00696b,stroke-width:2px
-    style KB_GROUP fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px
-    style RES_GROUP fill:#fff3e0,stroke:#e65c00,stroke-width:2px
-    style REQ_GROUP fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px
-    style DOC_IDX fill:#c8e6c9,stroke:#2e7d32,stroke-width:1px
-    style CSV_STORE fill:#ffe0b2,stroke:#e65c00,stroke-width:1px
-    style REQ_CFG fill:#e1bee7,stroke:#6a1b9a,stroke-width:1px
-    style T1 fill:#fff,stroke:#2e7d32
-    style T2 fill:#fff,stroke:#2e7d32
-    style T3 fill:#fff,stroke:#2e7d32
-    style T4 fill:#fff,stroke:#e65c00
-    style T5 fill:#fff,stroke:#e65c00
-    style T6 fill:#fff,stroke:#e65c00
-    style T7 fill:#fff,stroke:#e65c00
-    style T8 fill:#fff,stroke:#e65c00
-    style T9 fill:#fff,stroke:#e65c00
-    style T10 fill:#fff,stroke:#6a1b9a
-    style T11 fill:#fff,stroke:#6a1b9a
-    style QUAL_GROUP fill:#e1f5fe,stroke:#0277bd,stroke-width:2px
-    style QUAL_CFG fill:#b3e5fc,stroke:#0277bd,stroke-width:1px
-    style T12 fill:#fff,stroke:#0277bd
+    style MCP_SERVER fill:#e0f2f1,stroke:#00696b,stroke-width:2px,color:#000
+    style KB_GROUP fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
+    style RES_GROUP fill:#fff3e0,stroke:#e65c00,stroke-width:2px,color:#000
+    style REQ_GROUP fill:#f3e5f5,stroke:#6a1b9a,stroke-width:2px,color:#000
+    style DOC_IDX fill:#c8e6c9,stroke:#2e7d32,stroke-width:1px,color:#000
+    style CSV_STORE fill:#ffe0b2,stroke:#e65c00,stroke-width:1px,color:#000
+    style REQ_CFG fill:#e1bee7,stroke:#6a1b9a,stroke-width:1px,color:#000
+    style T1 fill:#fff,stroke:#2e7d32,color:#000
+    style T2 fill:#fff,stroke:#2e7d32,color:#000
+    style T3 fill:#fff,stroke:#2e7d32,color:#000
+    style T4 fill:#fff,stroke:#e65c00,color:#000
+    style T5 fill:#fff,stroke:#e65c00,color:#000
+    style T6 fill:#fff,stroke:#e65c00,color:#000
+    style T7 fill:#fff,stroke:#e65c00,color:#000
+    style T8 fill:#fff,stroke:#e65c00,color:#000
+    style T9 fill:#fff,stroke:#e65c00,color:#000
+    style T10 fill:#fff,stroke:#6a1b9a,color:#000
+    style T11 fill:#fff,stroke:#6a1b9a,color:#000
+    style QUAL_GROUP fill:#e1f5fe,stroke:#0277bd,stroke-width:2px,color:#000
+    style QUAL_CFG fill:#b3e5fc,stroke:#0277bd,stroke-width:1px,color:#000
+    style T12 fill:#fff,stroke:#0277bd,color:#000
 ```
 
 ### Tool Bindings per Agent Node
