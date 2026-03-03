@@ -9,7 +9,7 @@ and an **MCP Server** (FastMCP) that exposes documentation, data, and
 request tools.
 
 ```mermaid
-%%{init: {'theme': 'default', 'themeVariables': {'fontSize': '12px'}, 'flowchart': {'useMaxWidth': false}}}%%
+%%{init: {'theme': 'default', 'themeVariables': {'fontSize': '12px', 'background': '#ffffff'}, 'flowchart': {'useMaxWidth': false}}}%%
 graph LR
     User["User<br/>(CLI / Chat)"]
     User -->|"prompt"| Router
@@ -30,7 +30,9 @@ graph LR
         Handoff --> Router
     end
 
-    Res -->|"tool calls<br/>MCP protocol<br/>(SSE / stdio)"| MCP
+    KB -->|"tool calls<br/>MCP protocol<br/>(SSE / stdio)"| MCP
+    Res --> MCP
+    Qual --> MCP
 
     subgraph MCP["MCP Server (FastMCP)"]
         direction TB
@@ -39,7 +41,9 @@ graph LR
         ReqTools["Request Tools"]
     end
 
-    Router <-->|"LLM calls"| LLM["Azure OpenAI<br/>(GPT-4o)"]
+    KB <-->|"LLM calls"| LLM["Azure OpenAI<br/>(GPT-4o)"]
+    Res <--> LLM
+    Qual <--> LLM
 
     MCP --> Data["Data Sources<br/>PDF docs · CSV files<br/>request_config.json"]
 
@@ -68,7 +72,7 @@ State tracks `messages[]` and `active_agent` (persistent specialist
 ownership across turns).
 
 ```mermaid
-%%{init: {'theme': 'default', 'themeVariables': {'fontSize': '12px'}, 'flowchart': {'useMaxWidth': false}}}%%
+%%{init: {'theme': 'default', 'themeVariables': {'fontSize': '12px', 'background': '#ffffff'}, 'flowchart': {'useMaxWidth': false}}}%%
 graph TD
     START(["START"])
 
@@ -157,7 +161,7 @@ Tools are discovered dynamically by the agent client at startup via the
 MCP protocol.
 
 ```mermaid
-%%{init: {'theme': 'default', 'themeVariables': {'fontSize': '12px'}, 'flowchart': {'useMaxWidth': false}}}%%
+%%{init: {'theme': 'default', 'themeVariables': {'fontSize': '12px', 'background': '#ffffff'}, 'flowchart': {'useMaxWidth': false}}}%%
 graph TD
     subgraph MCP_SERVER ["MCP Server (FastMCP)"]
         direction TB
