@@ -285,11 +285,22 @@ class CsvStore:
                     ["ResourceID", "name", "DESCRIPTION"],
                 )
         """
-        with open(path, newline="", encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            columns = reader.fieldnames or []
-            rows = list(reader)
-        return rows, list(columns)
+        for enc in ("utf-8-sig", "cp1252"):
+            try:
+                with open(path, newline="", encoding=enc) as f:
+                    reader = csv.DictReader(f)
+                    columns = reader.fieldnames or []
+                    rows = list(reader)
+                if enc != "utf-8-sig":
+                    logger.warning("Read %s with fallback encoding %s", path.name, enc)
+                return rows, list(columns)
+            except UnicodeDecodeError:
+                continue
+        # all encodings failed -- raise so _load_all logs and skips
+        raise UnicodeDecodeError(
+            "utf-8", b"", 0, 1,
+            f"Could not decode {path.name} with any supported encoding",
+        )
 
     @property
     def dataset_names(self) -> list[str]:
