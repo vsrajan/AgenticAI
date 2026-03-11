@@ -7,9 +7,11 @@ resource discovery, and entitlement management. Powered by Azure OpenAI (GPT-4o)
 
 ```
 agent-client/src/agent_client/
-  agent.py       — LangGraph StateGraph (router + 3 specialists + handoff)
-  llm.py         — Azure OpenAI config
-  cli.py         — CLI entry point
+  agent.py        — LangGraph StateGraph (router + 3 specialists + handoff)
+  llm.py          — Azure OpenAI config
+  cli.py          — CLI entry point (interactive agent)
+  scanner.py      — Batch scan engine (reuses agent graph)
+  scanner_cli.py  — CLI entry point (batch scanner)
 
 mcp-server/src/mcp_docs_server/
   server.py      — FastMCP server (12 tools over SSE/stdio)
@@ -60,8 +62,11 @@ For full diagrams with conditional edges and data flow, see `docs/architecture.m
 # MCP server
 cd mcp-server && uv run mcp-docs-server
 
-# Agent client (in a separate terminal)
+# Agent client -- interactive (in a separate terminal)
 cd agent-client && uv run agent-client
+
+# Incident scanner -- batch mode (in a separate terminal)
+cd agent-client && uv run scan-cli ../mcp-server/docs/Incidents.csv -o scan_results.csv
 ```
 
 Required env vars: `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`
@@ -83,6 +88,7 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 - Fixed `_dump_history` node attribution -- uses snapshot.next instead of missing metadata["writes"] key (not persisted in LangGraph 1.0.8)
 - Normalized comment style: plain characters, `->` arrows, concise docstrings
 - Added Data Quality Checker specialist (quality_agent) with 21 criteria from `quality_criteria.json`; evaluates resource metadata dynamically against all CSV columns
+- Added standalone incident scanner CLI (scan-cli) -- batch mode that reuses the agent graph without modifying agent.py
 
 ## General instructions
 

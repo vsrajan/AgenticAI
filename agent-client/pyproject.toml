@@ -12,6 +12,7 @@ dependencies = [
 
 [project.scripts]
 agent-client = "agent_client.cli:main"
+scan-cli = "agent_client.scanner_cli:main"
 
 [build-system]
 requires = ["hatchling"]

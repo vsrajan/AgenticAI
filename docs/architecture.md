@@ -228,3 +228,47 @@ graph TD
 | **resource_agent** | `list_datasets`, `search_dataset`, `filter_dataset`, `filter_dataset_fuzzy`, `count_by_column`, `get_column_values`, `get_request_attributes`, `raise_entitlement_request`, `hand_off_to_router` | MCP tools + handoff |
 | **quality_agent** | `get_quality_criteria`, `filter_dataset`, `filter_dataset_fuzzy`, `search_dataset`, `list_datasets`, `get_column_values`, `hand_off_to_router` | MCP tools (shared resource tools + quality tool) + handoff |
 | **handoff** | *(none -- processes pending `hand_off_to_router` calls)* | Clears `active_agent` and returns to Router |
+
+---
+
+## 4. Incident Scanner -- Batch Flow
+
+The scanner CLI (`scan-cli`) is a standalone batch tool that reuses the
+existing agent graph without modification. It reads incidents from a CSV,
+runs each through the knowledgebase agent, and writes a coverage report.
+
+```mermaid
+%%{init: {'theme': 'default', 'themeVariables': {'fontSize': '12px', 'background': '#ffffff'}, 'flowchart': {'useMaxWidth': false}}}%%
+graph TD
+    CLI["scan-cli<br/><small>scanner_cli.main()</small>"]
+    CSV_IN["Incidents CSV<br/><small>CsvIncidentSource</small>"]
+    SCAN["scanner.run_scan()<br/><small>batch engine</small>"]
+
+    CLI -->|"read"| CSV_IN
+    CSV_IN -->|"list[Incident]"| SCAN
+
+    SCAN -->|"for each incident"| COMPILE["graph.compile()<br/><small>fresh, no checkpointer</small>"]
+    COMPILE -->|"ainvoke<br/>active_agent=knowledgebase_agent"| KB["knowledgebase_agent<br/><small>reused from agent.py</small>"]
+
+    KB <-->|"search_docs, read_page<br/>list_topics"| MCP["MCP Server<br/><small>knowledgebase tools</small>"]
+    KB <-->|"LLM calls"| LLM["Azure OpenAI"]
+
+    KB -->|"answer"| RESULT["ScanResult<br/><small>has_coverage, matched_topics</small>"]
+    RESULT -->|"collect all"| CSV_OUT["scan_results.csv<br/><small>_write_results_csv()</small>"]
+
+    style CLI fill:#e0e0e0,stroke:#666,stroke-width:2px,color:#000
+    style CSV_IN fill:#f5f5f5,stroke:#666,stroke-width:1px,color:#000
+    style SCAN fill:#d6e4f0,stroke:#2b579a,stroke-width:2px,color:#000
+    style COMPILE fill:#bbdefb,stroke:#2b579a,stroke-width:1px,color:#000
+    style KB fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
+    style MCP fill:#e0f2f1,stroke:#00696b,stroke-width:2px,color:#000
+    style LLM fill:#e3f2fd,stroke:#2b579a,stroke-width:2px,color:#000
+    style RESULT fill:#fff3e0,stroke:#e65c00,stroke-width:1px,color:#000
+    style CSV_OUT fill:#f5f5f5,stroke:#666,stroke-width:1px,color:#000
+```
+
+Key points:
+- **No router involved** -- `active_agent="knowledgebase_agent"` bypasses routing
+- **Fresh graph per incident** -- no shared conversation state between incidents
+- **Reuses agent.py** -- imports `build_graph` and `_get_mcp_server_config` directly
+- **Coverage heuristic** -- parses citations from the agent response to detect gaps
