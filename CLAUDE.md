@@ -7,11 +7,15 @@ resource discovery, and entitlement management. Powered by Azure OpenAI (GPT-4o)
 
 ```
 agent-client/src/agent_client/
-  agent.py        — LangGraph StateGraph (router + 3 specialists + handoff)
-  llm.py          — Azure OpenAI config
-  cli.py          — CLI entry point (interactive agent)
-  scanner.py      — Batch scan engine (reuses agent graph)
-  scanner_cli.py  — CLI entry point (batch scanner)
+  agent.py            — LangGraph StateGraph (router + 3 specialists + handoff)
+  llm.py              — Azure OpenAI config
+  cli.py              — CLI entry point (interactive agent)
+  incident_sources.py — Incident dataclass + CSV/ServiceNow source classes
+  scanner.py          — Batch scan engine (reuses agent graph)
+  scanner_cli.py      — CLI entry point (batch scanner)
+
+agent-client/data/
+  Incidents.csv       — Sample ServiceNow-style incident data (12 incidents)
 
 mcp-server/src/mcp_docs_server/
   server.py      — FastMCP server (12 tools over SSE/stdio)
@@ -66,7 +70,7 @@ cd mcp-server && uv run mcp-docs-server
 cd agent-client && uv run agent-client
 
 # Incident scanner -- batch mode (in a separate terminal)
-cd agent-client && uv run scan-cli ../mcp-server/docs/Incidents.csv -o scan_results.csv
+cd agent-client && uv run scan-cli data/Incidents.csv -o scan_results.csv
 ```
 
 Required env vars: `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`
@@ -89,6 +93,7 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 - Normalized comment style: plain characters, `->` arrows, concise docstrings
 - Added Data Quality Checker specialist (quality_agent) with 21 criteria from `quality_criteria.json`; evaluates resource metadata dynamically against all CSV columns
 - Added standalone incident scanner CLI (scan-cli) -- batch mode that reuses the agent graph without modifying agent.py
+- Extracted incident sources to dedicated module (incident_sources.py) with CsvIncidentSource and ServiceNow stub
 
 ## General instructions
 

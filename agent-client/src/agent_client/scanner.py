@@ -7,10 +7,10 @@ the knowledgebase_agent directly to search documentation for coverage.
 Typical call sequence:
 
     scan_cli.main()
-      +-> CsvIncidentSource.fetch_open_incidents()
-      |     reads incidents.csv -> list[Incident]
+      +-> source.fetch_open_incidents()
+      |     reads incidents -> list[Incident]
       |
-      +-> scanner.run_scan(source, output_path)
+      +-> scanner.run_scan(incidents, output_path)
             +-> get_llm(), _get_mcp_server_config(), build_graph()
             |
             +-> for each incident:
@@ -24,6 +24,7 @@ Typical call sequence:
 
 import csv
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,28 +33,12 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from agent_client.llm import get_llm
 from agent_client.agent import build_graph, _get_mcp_server_config
+from agent_client.incident_sources import Incident
 
 logger = logging.getLogger("agent_client.scanner")
 
 
 # -- Data classes --
-
-@dataclass
-class Incident:
-    """A single incident record from the source CSV."""
-    id: str
-    short_description: str
-    description: str
-    priority: str
-    state: str
-    category: str
-    subcategory: str
-    assignment_group: str
-    assigned_to: str
-    opened_date: str
-    resolved_date: str
-    resolution_notes: str
-
 
 @dataclass
 class ScanResult:
@@ -66,47 +51,6 @@ class ScanResult:
     answer: str
     has_coverage: bool
     matched_topics: list[str] = field(default_factory=list)
-
-
-# -- Incident source --
-
-class CsvIncidentSource:
-    """Reads incidents from a CSV file."""
-
-    # maps CSV column headers to Incident field names
-    _FIELD_MAP = {
-        "IncidentID": "id",
-        "ShortDescription": "short_description",
-        "Description": "description",
-        "Priority": "priority",
-        "State": "state",
-        "Category": "category",
-        "Subcategory": "subcategory",
-        "AssignmentGroup": "assignment_group",
-        "AssignedTo": "assigned_to",
-        "OpenedDate": "opened_date",
-        "ResolvedDate": "resolved_date",
-        "ResolutionNotes": "resolution_notes",
-    }
-
-    def __init__(self, csv_path: Path):
-        self.csv_path = csv_path
-
-    def fetch_open_incidents(self) -> list[Incident]:
-        """Read CSV and return only open/in-progress incidents."""
-        incidents: list[Incident] = []
-        with open(self.csv_path, newline="", encoding="utf-8") as fh:
-            reader = csv.DictReader(fh)
-            for row in reader:
-                mapped = {
-                    field_name: row.get(csv_col, "").strip()
-                    for csv_col, field_name in self._FIELD_MAP.items()
-                }
-                incident = Incident(**mapped)
-                if incident.state.lower() in ("open", "in progress", "new"):
-                    incidents.append(incident)
-        logger.info("Loaded %d open incidents from %s", len(incidents), self.csv_path)
-        return incidents
 
 
 # -- Scan engine --
@@ -150,7 +94,6 @@ def _parse_coverage(answer: str) -> tuple[bool, list[str]]:
 
     # positive signal -- citations like (Source: topic/file.pdf, Page N)
     topics: list[str] = []
-    import re
     for match in re.finditer(r"\(Source:\s*([^,)]+)", answer):
         topic = match.group(1).strip()
         if topic and topic not in topics:

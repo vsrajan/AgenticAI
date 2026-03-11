@@ -1,11 +1,12 @@
 """Command-line entry point for the incident scanner.
 
-Reads incidents from a CSV file, runs each through the knowledgebase agent
-to check documentation coverage, and writes results to an output CSV.
+Reads incidents from a source (CSV file or ServiceNow), runs each through
+the knowledgebase agent to check documentation coverage, and writes
+results to an output CSV.
 
 Usage:
-    scan-cli incidents.csv                    # output: scan_results.csv
-    scan-cli incidents.csv -o my_results.csv  # custom output path
+    scan-cli data/Incidents.csv                    # output: scan_results.csv
+    scan-cli data/Incidents.csv -o my_results.csv  # custom output path
 """
 
 import argparse
@@ -53,8 +54,21 @@ def main():
         print(f"Error: file not found: {args.incidents_csv}", file=sys.stderr)
         sys.exit(1)
 
-    from agent_client.scanner import CsvIncidentSource, run_scan
+    from agent_client.incident_sources import CsvIncidentSource
+    from agent_client.scanner import run_scan
 
+    # -- incident source --
+    # CSV mode (default): reads incidents from a local CSV file.
+    # to switch to ServiceNow, replace the two lines below with:
+    #
+    #   from agent_client.incident_sources import ServiceNowIncidentSource
+    #   source = ServiceNowIncidentSource(
+    #       instance_url=os.environ["SERVICENOW_URL"],
+    #       username=os.environ["SERVICENOW_USER"],
+    #       password=os.environ["SERVICENOW_PASSWORD"],
+    #   )
+    #
+    # and remove the incidents_csv positional argument from argparse above.
     source = CsvIncidentSource(args.incidents_csv)
     incidents = source.fetch_open_incidents()
 

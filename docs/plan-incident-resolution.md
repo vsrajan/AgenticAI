@@ -6,10 +6,10 @@ Users want to correlate access governance incidents with knowledgebase documenta
 
 **Key design decisions:**
 - agent.py stays completely unchanged -- no new specialist, no new routing
-- Scanner is a separate CLI (`scan-cli`) that reads incidents from CSV and runs each through the knowledgebase agent
-- Incidents.csv lives on the MCP server (auto-discovered by CsvStore) for interactive queries, but the scanner reads it directly for batch processing
+- Scanner is a separate CLI (`scan-cli`) that reads incidents from a pluggable source and runs each through the knowledgebase agent
+- Incidents.csv lives on the client side (`agent-client/data/`) -- the MCP server and agent client run on different machines
+- Incident sources are abstracted behind a common interface (`fetch_open_incidents() -> list[Incident]`), making it easy to swap CSV for ServiceNow
 - Each incident gets a fresh graph invocation (no checkpointer, no shared state)
-- No new MCP tools -- existing resource tools (`list_datasets`, `search_dataset`, etc.) already work with the auto-discovered Incidents dataset for interactive use
 
 ---
 
@@ -17,8 +17,8 @@ Users want to correlate access governance incidents with knowledgebase documenta
 
 ```
 scan_cli.main()
-  +-> CsvIncidentSource.fetch_open_incidents()
-  |     reads incidents.csv -> list[Incident]
+  +-> source.fetch_open_incidents()
+  |     CsvIncidentSource or ServiceNowIncidentSource -> list[Incident]
   |
   +-> scanner.run_scan(incidents, output_path)
         +-> get_llm(), _get_mcp_server_config(), build_graph()
@@ -42,16 +42,17 @@ The scanner skips the router entirely by setting `active_agent="knowledgebase_ag
 
 | File | Purpose |
 |------|---------|
-| `agent-client/src/agent_client/scanner.py` | Batch scan engine (see module details below) |
-| `agent-client/src/agent_client/scanner_cli.py` | CLI entry point: argparse, .env loading, summary output |
-| `mcp-server/docs/Incidents.csv` | Sample ServiceNow-style incident data (12 open incidents) |
+| `agent-client/src/agent_client/incident_sources.py` | Incident dataclass, CsvIncidentSource, ServiceNowIncidentSource (stub) |
+| `agent-client/src/agent_client/scanner.py` | Batch scan engine: ScanResult, _build_question, _parse_coverage, run_scan, _write_results_csv |
+| `agent-client/src/agent_client/scanner_cli.py` | CLI entry point: argparse, .env loading, source selection, summary output |
+| `agent-client/data/Incidents.csv` | Sample ServiceNow-style incident data (12 open incidents) |
 
 ### Modified files
 
 | File | Change |
 |------|--------|
 | `agent-client/pyproject.toml` | Added `scan-cli = "agent_client.scanner_cli:main"` script entry point |
-| `CLAUDE.md` | Documented scanner_cli.py and scanner.py in repo structure, added scan-cli to "How to run", added to recent work |
+| `CLAUDE.md` | Documented new files in repo structure, updated scan-cli command, added to recent work |
 | `docs/architecture.md` | Added section 4 "Incident Scanner -- Batch Flow" with Mermaid diagram |
 
 ### Unchanged files
@@ -61,33 +62,57 @@ The scanner skips the router entirely by setting `active_agent="knowledgebase_ag
 | `agent-client/src/agent_client/agent.py` | Scanner imports `build_graph` and `_get_mcp_server_config` directly -- no modifications needed |
 | `agent-client/src/agent_client/llm.py` | Scanner imports `get_llm` directly |
 | `agent-client/src/agent_client/cli.py` | Interactive CLI is unrelated to batch scanning |
-| `mcp-server/src/mcp_docs_server/server.py` | CsvStore auto-discovers Incidents.csv -- no new tools needed |
+| `mcp-server/src/mcp_docs_server/server.py` | No changes -- scanner reads incidents locally, not via MCP |
 
 ---
 
 ## Module details
 
-### scanner.py
+### incident_sources.py
 
-**Imports from agent.py (unchanged):**
-- `build_graph(llm, all_tools)` -- builds the StateGraph with all specialist nodes
-- `_get_mcp_server_config()` -- reads MCP_SERVER_URL / MCP_TRANSPORT env vars
+Contains the Incident dataclass and all incident source implementations.
 
-**Imports from llm.py (unchanged):**
-- `get_llm()` -- returns configured AzureChatOpenAI instance
-
-**Data classes:**
-
-`Incident` -- one record from the source CSV:
-- id, short_description, description, priority, state, category, subcategory, assignment_group, assigned_to, opened_date, resolved_date, resolution_notes
-
-`ScanResult` -- output of scanning one incident:
-- incident_id, short_description, category, subcategory, question, answer, has_coverage (bool), matched_topics (list[str])
+**Incident dataclass:**
+- Fields: id, short_description, description, priority, state, category, subcategory, assignment_group, assigned_to, opened_date, resolved_date, resolution_notes
+- Generic field names (not tied to CSV headers or ServiceNow column names)
+- Each source class maps its own schema to these fields
 
 **CsvIncidentSource:**
-- `__init__(csv_path)` -- stores path
-- `fetch_open_incidents()` -- reads CSV via DictReader, maps column headers to Incident fields via `_FIELD_MAP`, filters to state in ("open", "in progress", "new")
+- `__init__(csv_path: Path)` -- stores path
+- `fetch_open_incidents() -> list[Incident]` -- reads CSV via DictReader, maps column headers to Incident fields via `_FIELD_MAP`, filters to state in ("open", "in progress", "new")
 - `_FIELD_MAP` -- maps CSV headers (IncidentID, ShortDescription, ...) to Incident field names (id, short_description, ...)
+
+**ServiceNowIncidentSource (stub):**
+- `__init__(instance_url, username, password, query=None)` -- stores connection params; default query filters to open/new incidents (state=1 or state=2)
+- `fetch_open_incidents() -> list[Incident]` -- raises NotImplementedError; docstring documents full implementation steps:
+  - Build request URL: `{instance_url}/api/now/table/incident`
+  - Set query params: sysparm_query, sysparm_fields, sysparm_display_value, sysparm_limit
+  - Send GET with basic auth
+  - Parse JSON response (records in `response["result"]`)
+  - Map each record via `_map_record()`
+- `_map_record(record: dict) -> Incident` -- raises NotImplementedError; docstring documents ServiceNow field -> Incident field mapping:
+  - number -> id
+  - short_description -> short_description
+  - description -> description
+  - priority -> priority (ServiceNow uses 1-5 numeric)
+  - state -> state (1=New, 2=In Progress, 3=On Hold, etc.)
+  - category -> category
+  - subcategory -> subcategory
+  - assignment_group -> assignment_group (display_value)
+  - assigned_to -> assigned_to (display_value)
+  - opened_at -> opened_date
+  - resolved_at -> resolved_date
+  - close_notes -> resolution_notes
+
+### scanner.py
+
+**Imports from other modules:**
+- `build_graph`, `_get_mcp_server_config` from agent.py (unchanged)
+- `get_llm` from llm.py (unchanged)
+- `Incident` from incident_sources.py
+
+**ScanResult dataclass:**
+- Fields: incident_id, short_description, category, subcategory, question, answer, has_coverage (bool), matched_topics (list[str])
 
 **_build_question(incident):**
 - Converts an incident into a structured prompt for the knowledgebase agent
@@ -121,7 +146,9 @@ The scanner skips the router entirely by setting `active_agent="knowledgebase_ag
 - `main()`:
   - argparse with positional `incidents_csv` and optional `-o`/`--output` (default: `scan_results.csv`)
   - Validates input file exists
-  - Creates CsvIncidentSource, calls `fetch_open_incidents()`
+  - Creates incident source (CsvIncidentSource by default)
+  - Inline comments show how to swap to ServiceNowIncidentSource
+  - Calls `fetch_open_incidents()`
   - Exits early if no open incidents
   - Calls `asyncio.run(run_scan(incidents, output_path))`
   - Prints summary: N covered, N gap(s) out of N incident(s)
@@ -129,6 +156,8 @@ The scanner skips the router entirely by setting `active_agent="knowledgebase_ag
 ---
 
 ## Incidents.csv
+
+Located at `agent-client/data/Incidents.csv` (client-side sample data).
 
 12 sample incidents covering common access governance scenarios:
 
@@ -151,6 +180,28 @@ All 12 are State=Open with Priority 1-3. CSV columns: IncidentID, ShortDescripti
 
 ---
 
+## Switching to ServiceNow
+
+To replace the CSV source with a live ServiceNow instance:
+
+1. Implement `ServiceNowIncidentSource.fetch_open_incidents()` and `_map_record()` in `incident_sources.py` (see docstrings for API details and field mapping)
+2. Add `requests` to `pyproject.toml` dependencies
+3. In `scanner_cli.py`, swap the source (comments in the file show exactly where):
+   ```python
+   from agent_client.incident_sources import ServiceNowIncidentSource
+   source = ServiceNowIncidentSource(
+       instance_url=os.environ["SERVICENOW_URL"],
+       username=os.environ["SERVICENOW_USER"],
+       password=os.environ["SERVICENOW_PASSWORD"],
+   )
+   ```
+4. Remove the `incidents_csv` positional argument from argparse (no longer needed)
+5. Set env vars: `SERVICENOW_URL`, `SERVICENOW_USER`, `SERVICENOW_PASSWORD`
+
+The rest of the pipeline (scanner.py, agent.py, MCP tools) stays unchanged.
+
+---
+
 ## How to run
 
 ```bash
@@ -158,10 +209,10 @@ All 12 are State=Open with Priority 1-3. CSV columns: IncidentID, ShortDescripti
 cd mcp-server && uv run mcp-docs-server
 
 # run the scanner (in another terminal)
-cd agent-client && uv run scan-cli ../mcp-server/docs/Incidents.csv -o scan_results.csv
+cd agent-client && uv run scan-cli data/Incidents.csv -o scan_results.csv
 ```
 
-The scanner reads the CSV directly, connects to the MCP server for knowledgebase tool calls, and writes results to the output file.
+The scanner reads incidents from the local CSV, connects to the MCP server for knowledgebase tool calls, and writes results to the output file.
 
 ---
 
@@ -171,7 +222,7 @@ The results CSV contains:
 
 | Column | Description |
 |--------|-------------|
-| IncidentID | ID from the source CSV |
+| IncidentID | ID from the source |
 | ShortDescription | Brief incident summary |
 | Category | Incident category |
 | Subcategory | Incident subcategory |
@@ -184,7 +235,7 @@ The results CSV contains:
 ## Verification
 
 1. Start MCP server (`cd mcp-server && uv run mcp-docs-server`)
-2. Run scanner (`cd agent-client && uv run scan-cli ../mcp-server/docs/Incidents.csv`)
+2. Run scanner (`cd agent-client && uv run scan-cli data/Incidents.csv`)
 3. Check that scan_results.csv is produced with one row per open incident (12 rows)
 4. Verify HasCoverage and MatchedTopics columns are populated
 5. Confirm agent.py was not modified (`git diff agent-client/src/agent_client/agent.py` shows no changes)
