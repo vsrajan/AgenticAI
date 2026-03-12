@@ -45,6 +45,7 @@ class ScanResult:
     """Result of scanning one incident against the knowledgebase."""
     incident_id: str
     short_description: str
+    description: str
     category: str
     subcategory: str
     question: str
@@ -159,10 +160,12 @@ async def run_scan(
                     break
 
             coverage, topics = _parse_coverage(answer)
+            logger.debug("incident.id=%r for %s", incident.id, incident.short_description)
 
             results.append(ScanResult(
                 incident_id=incident.id,
                 short_description=incident.short_description,
+                description=incident.description,
                 category=incident.category,
                 subcategory=incident.subcategory,
                 question=question,
@@ -180,6 +183,7 @@ async def run_scan(
             results.append(ScanResult(
                 incident_id=incident.id,
                 short_description=incident.short_description,
+                description=incident.description,
                 category=incident.category,
                 subcategory=incident.subcategory,
                 question=question,
@@ -196,6 +200,7 @@ def _write_results_csv(results: list[ScanResult], path: Path) -> None:
     fieldnames = [
         "IncidentID",
         "ShortDescription",
+        "Description",
         "Category",
         "Subcategory",
         "HasCoverage",
@@ -209,6 +214,7 @@ def _write_results_csv(results: list[ScanResult], path: Path) -> None:
             writer.writerow({
                 "IncidentID": r.incident_id,
                 "ShortDescription": r.short_description,
+                "Description": r.description,
                 "Category": r.category,
                 "Subcategory": r.subcategory,
                 "HasCoverage": r.has_coverage,
