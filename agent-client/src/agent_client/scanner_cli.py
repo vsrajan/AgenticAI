@@ -25,10 +25,11 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 LOG_LEVEL = os.environ.get("AGENT_LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(
-    level=LOG_LEVEL,
+    level=logging.WARNING,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[logging.StreamHandler(sys.stderr)],
 )
+logging.getLogger("agent_client").setLevel(LOG_LEVEL)
 logger = logging.getLogger("agent_client.scanner_cli")
 
 
