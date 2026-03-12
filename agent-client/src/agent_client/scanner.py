@@ -49,7 +49,7 @@ class ScanResult:
     subcategory: str
     question: str
     answer: str
-    has_coverage: bool
+    has_coverage: str  # "full", "partial", or "none"
     matched_topics: list[str] = field(default_factory=list)
 
 
@@ -72,10 +72,11 @@ or prevent this type of incident.
 3. If there is a gap -- what specific documentation is missing."""
 
 
-def _parse_coverage(answer: str) -> tuple[bool, list[str]]:
+def _parse_coverage(answer: str) -> tuple[str, list[str]]:
     """Heuristic: check if the agent found relevant documentation.
 
-    Returns (has_coverage, list_of_matched_topic_names).
+    Returns (coverage, list_of_matched_topic_names) where coverage is
+    "full", "partial", or "none".
     """
     lower = answer.lower()
 
@@ -100,8 +101,13 @@ def _parse_coverage(answer: str) -> tuple[bool, list[str]]:
         if topic and topic not in topics:
             topics.append(topic)
 
-    has_coverage = bool(topics) and not has_gap
-    return has_coverage, topics
+    if topics and not has_gap:
+        coverage = "full"
+    elif topics and has_gap:
+        coverage = "partial"
+    else:
+        coverage = "none"
+    return coverage, topics
 
 
 async def run_scan(
@@ -152,7 +158,7 @@ async def run_scan(
                         answer = msg.content
                         break
 
-                has_coverage, topics = _parse_coverage(answer)
+                coverage, topics = _parse_coverage(answer)
 
                 results.append(ScanResult(
                     incident_id=incident.id,
@@ -161,12 +167,12 @@ async def run_scan(
                     subcategory=incident.subcategory,
                     question=question,
                     answer=answer,
-                    has_coverage=has_coverage,
+                    has_coverage=coverage,
                     matched_topics=topics,
                 ))
                 logger.info(
                     "  -> coverage=%s, topics=%d",
-                    has_coverage, len(topics),
+                    coverage, len(topics),
                 )
 
             except Exception:
@@ -178,7 +184,7 @@ async def run_scan(
                     subcategory=incident.subcategory,
                     question=question,
                     answer="ERROR: scan failed -- see logs",
-                    has_coverage=False,
+                    has_coverage="none",
                 ))
 
     _write_results_csv(results, output_path)

@@ -93,9 +93,10 @@ def main():
     results = asyncio.run(run_scan(incidents, args.output))
 
     # summary
-    covered = sum(1 for r in results if r.has_coverage)
-    gaps = len(results) - covered
-    print(f"\nScan complete: {covered} covered, {gaps} gap(s) out of {len(results)} incident(s).")
+    full = sum(1 for r in results if r.has_coverage == "full")
+    partial = sum(1 for r in results if r.has_coverage == "partial")
+    gaps = sum(1 for r in results if r.has_coverage == "none")
+    print(f"\nScan complete: {full} covered, {partial} partial, {gaps} gap(s) out of {len(results)} incident(s).")
     print(f"Results written to {args.output}")
 
 
