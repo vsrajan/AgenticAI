@@ -125,67 +125,67 @@ async def run_scan(
     mcp_config = _get_mcp_server_config()
 
     logger.info("Connecting to MCP server ...")
-    async with MultiServerMCPClient(mcp_config) as client:
-        tools = await client.get_tools()
-        logger.info("Loaded %d MCP tools", len(tools))
+    client = MultiServerMCPClient(mcp_config)
+    tools = await client.get_tools()
+    logger.info("Loaded %d MCP tools", len(tools))
 
-        graph = build_graph(llm, tools)
-        results: list[ScanResult] = []
+    graph = build_graph(llm, tools)
+    results: list[ScanResult] = []
 
-        for i, incident in enumerate(incidents, 1):
-            logger.info(
-                "[%d/%d] Scanning %s: %s",
-                i, len(incidents), incident.id, incident.short_description,
+    for i, incident in enumerate(incidents, 1):
+        logger.info(
+            "[%d/%d] Scanning %s: %s",
+            i, len(incidents), incident.id, incident.short_description,
+        )
+        question = _build_question(incident)
+
+        # compile fresh each time -- no checkpointer, no shared state
+        agent = graph.compile()
+
+        try:
+            final_state = await agent.ainvoke(
+                {
+                    "messages": [HumanMessage(content=question)],
+                    "active_agent": "knowledgebase_agent",
+                },
+                {"recursion_limit": 50},
             )
-            question = _build_question(incident)
 
-            # compile fresh each time -- no checkpointer, no shared state
-            agent = graph.compile()
+            # extract the last AI message as the answer
+            answer = ""
+            for msg in reversed(final_state["messages"]):
+                if isinstance(msg, AIMessage) and msg.content:
+                    answer = msg.content
+                    break
 
-            try:
-                final_state = await agent.ainvoke(
-                    {
-                        "messages": [HumanMessage(content=question)],
-                        "active_agent": "knowledgebase_agent",
-                    },
-                    {"recursion_limit": 50},
-                )
+            coverage, topics = _parse_coverage(answer)
 
-                # extract the last AI message as the answer
-                answer = ""
-                for msg in reversed(final_state["messages"]):
-                    if isinstance(msg, AIMessage) and msg.content:
-                        answer = msg.content
-                        break
+            results.append(ScanResult(
+                incident_id=incident.id,
+                short_description=incident.short_description,
+                category=incident.category,
+                subcategory=incident.subcategory,
+                question=question,
+                answer=answer,
+                has_coverage=coverage,
+                matched_topics=topics,
+            ))
+            logger.info(
+                "  -> coverage=%s, topics=%d",
+                coverage, len(topics),
+            )
 
-                coverage, topics = _parse_coverage(answer)
-
-                results.append(ScanResult(
-                    incident_id=incident.id,
-                    short_description=incident.short_description,
-                    category=incident.category,
-                    subcategory=incident.subcategory,
-                    question=question,
-                    answer=answer,
-                    has_coverage=coverage,
-                    matched_topics=topics,
-                ))
-                logger.info(
-                    "  -> coverage=%s, topics=%d",
-                    coverage, len(topics),
-                )
-
-            except Exception:
-                logger.exception("  -> ERROR scanning %s", incident.id)
-                results.append(ScanResult(
-                    incident_id=incident.id,
-                    short_description=incident.short_description,
-                    category=incident.category,
-                    subcategory=incident.subcategory,
-                    question=question,
-                    answer="ERROR: scan failed -- see logs",
-                    has_coverage="none",
-                ))
+        except Exception:
+            logger.exception("  -> ERROR scanning %s", incident.id)
+            results.append(ScanResult(
+                incident_id=incident.id,
+                short_description=incident.short_description,
+                category=incident.category,
+                subcategory=incident.subcategory,
+                question=question,
+                answer="ERROR: scan failed -- see logs",
+                has_coverage="none",
+            ))
 
     _write_results_csv(results, output_path)
     return results
