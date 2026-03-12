@@ -34,20 +34,32 @@ logger = logging.getLogger("agent_client.scanner_cli")
 
 def main():
     """Entry point invoked by the scan-cli console script."""
+    # ArgumentParser handles command-line argument parsing. It defines
+    # what arguments the script accepts, validates them, and auto-generates
+    # a usage/help message. If required args are missing or invalid, it
+    # prints an error and exits with code 2.
     parser = argparse.ArgumentParser(
         description="Scan incidents against the knowledgebase for documentation coverage.",
     )
+    # positional argument (no dash prefix) -- required. The user must
+    # provide a CSV file path. type=Path converts the string to a
+    # pathlib.Path object automatically.
     parser.add_argument(
         "incidents_csv",
         type=Path,
         help="Path to the incidents CSV file.",
     )
+    # optional argument (dash prefix). -o is the short form, --output
+    # is the long form. Defaults to scan_results.csv if not provided.
     parser.add_argument(
         "-o", "--output",
         type=Path,
         default=Path("scan_results.csv"),
         help="Output CSV path (default: scan_results.csv).",
     )
+    # parse_args() reads sys.argv (the command line), matches values
+    # against the definitions above, and returns a namespace object
+    # where args.incidents_csv and args.output hold the parsed values.
     args = parser.parse_args()
 
     if not args.incidents_csv.exists():
