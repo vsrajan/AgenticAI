@@ -79,7 +79,7 @@ class CsvIncidentSource:
     def fetch_open_incidents(self) -> list[Incident]:
         """Read CSV and return only open/in-progress incidents."""
         incidents: list[Incident] = []
-        with open(self.csv_path, newline="", encoding="utf-8") as fh:
+        with open(self.csv_path, newline="", encoding="utf-8-sig") as fh:
             reader = csv.DictReader(fh)
             for row in reader:
                 mapped = {
