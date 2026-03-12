@@ -965,7 +965,7 @@ async def run_agent_loop(on_response=None):
 
     # unique thread per CLI session for conversation tracking
     thread_id = uuid.uuid4().hex
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 50}
 
     # reset the stream file for this session so it doesn't grow unboundedly
     with open(STREAM_FILE, "w", encoding="utf-8") as fh:

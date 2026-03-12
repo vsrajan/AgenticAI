@@ -136,10 +136,13 @@ async def run_scan(
             agent = graph.compile()
 
             try:
-                final_state = await agent.ainvoke({
-                    "messages": [HumanMessage(content=question)],
-                    "active_agent": "knowledgebase_agent",
-                })
+                final_state = await agent.ainvoke(
+                    {
+                        "messages": [HumanMessage(content=question)],
+                        "active_agent": "knowledgebase_agent",
+                    },
+                    {"recursion_limit": 50},
+                )
 
                 # extract the last AI message as the answer
                 answer = ""
