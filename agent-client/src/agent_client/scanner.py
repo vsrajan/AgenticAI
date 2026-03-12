@@ -57,18 +57,19 @@ class ScanResult:
 
 def _build_question(incident: Incident) -> str:
     """Turn an incident into a knowledgebase search question."""
-    return (
-        f"I have an access governance incident that needs documentation coverage analysis.\n\n"
-        f"Incident: {incident.short_description}\n"
-        f"Category: {incident.category} / {incident.subcategory}\n"
-        f"Description: {incident.description}\n\n"
-        f"Search the knowledgebase for any documentation that covers the scenario "
-        f"described in this incident. Tell me:\n"
-        f"1. Which documents and pages are relevant (with citations).\n"
-        f"2. Whether the existing documentation adequately covers how to resolve "
-        f"or prevent this type of incident.\n"
-        f"3. If there is a gap -- what specific documentation is missing."
-    )
+    return f"""\
+I have an access governance incident that needs documentation coverage analysis.
+
+Incident: {incident.short_description}
+Category: {incident.category} / {incident.subcategory}
+Description: {incident.description}
+
+Search the knowledgebase for any documentation that covers the scenario \
+described in this incident. Tell me:
+1. Which documents and pages are relevant (with citations).
+2. Whether the existing documentation adequately covers how to resolve \
+or prevent this type of incident.
+3. If there is a gap -- what specific documentation is missing."""
 
 
 def _parse_coverage(answer: str) -> tuple[bool, list[str]]:
