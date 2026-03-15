@@ -1,7 +1,7 @@
 {
   "type": "excalidraw",
   "version": 2,
-  "source": "https://excalidraw.com",
+  "source": "https://marketplace.visualstudio.com/items?itemName=pomdtr.excalidraw-editor",
   "elements": [
     {
       "id": "d4_cli",
@@ -20,15 +20,27 @@
       "seed": 4001,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "boundElements": [
-        { "id": "d4_cli_label", "type": "text" },
-        { "id": "d4_arrow_cli_csv", "type": "arrow" }
+        {
+          "id": "d4_cli_label",
+          "type": "text"
+        },
+        {
+          "id": "d4_arrow_cli_csv",
+          "type": "arrow"
+        }
       ],
-      "updated": 1710000000000,
+      "updated": 1773578363788,
       "link": null,
       "locked": false,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 2042104720,
+      "index": "a0",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_cli_label",
@@ -53,14 +65,19 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578363788,
       "link": null,
       "locked": false,
       "containerId": "d4_cli",
       "originalText": "scan-cli\nscanner_cli.main()",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 642528624,
+      "index": "a1",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_csv_in",
@@ -79,16 +96,31 @@
       "seed": 4003,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "boundElements": [
-        { "id": "d4_csv_in_label", "type": "text" },
-        { "id": "d4_arrow_cli_csv", "type": "arrow" },
-        { "id": "d4_arrow_csv_scan", "type": "arrow" }
+        {
+          "id": "d4_csv_in_label",
+          "type": "text"
+        },
+        {
+          "id": "d4_arrow_cli_csv",
+          "type": "arrow"
+        },
+        {
+          "id": "d4_arrow_csv_scan",
+          "type": "arrow"
+        }
       ],
-      "updated": 1710000000000,
+      "updated": 1773578363788,
       "link": null,
       "locked": false,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 1540364688,
+      "index": "a2",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_csv_in_label",
@@ -113,14 +145,19 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578363788,
       "link": null,
       "locked": false,
       "containerId": "d4_csv_in",
       "originalText": "Incidents CSV\nCsvIncidentSource",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 470026096,
+      "index": "a3",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_scan",
@@ -139,16 +176,31 @@
       "seed": 4005,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "boundElements": [
-        { "id": "d4_scan_label", "type": "text" },
-        { "id": "d4_arrow_csv_scan", "type": "arrow" },
-        { "id": "d4_arrow_scan_compile", "type": "arrow" }
+        {
+          "id": "d4_scan_label",
+          "type": "text"
+        },
+        {
+          "id": "d4_arrow_csv_scan",
+          "type": "arrow"
+        },
+        {
+          "id": "d4_arrow_scan_compile",
+          "type": "arrow"
+        }
       ],
-      "updated": 1710000000000,
+      "updated": 1773578363788,
       "link": null,
       "locked": false,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 464938896,
+      "index": "a4",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_scan_label",
@@ -173,14 +225,19 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578363788,
       "link": null,
       "locked": false,
       "containerId": "d4_scan",
       "originalText": "scanner.run_scan()",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 1861327216,
+      "index": "a5",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_compile",
@@ -199,16 +256,31 @@
       "seed": 4007,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "boundElements": [
-        { "id": "d4_compile_label", "type": "text" },
-        { "id": "d4_arrow_scan_compile", "type": "arrow" },
-        { "id": "d4_arrow_compile_kb", "type": "arrow" }
+        {
+          "id": "d4_compile_label",
+          "type": "text"
+        },
+        {
+          "id": "d4_arrow_scan_compile",
+          "type": "arrow"
+        },
+        {
+          "id": "d4_arrow_compile_kb",
+          "type": "arrow"
+        }
       ],
-      "updated": 1710000000000,
+      "updated": 1773578363788,
       "link": null,
       "locked": false,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 1705178512,
+      "index": "a6",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_compile_label",
@@ -233,14 +305,19 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578363788,
       "link": null,
       "locked": false,
       "containerId": "d4_compile",
       "originalText": "graph.compile()\nfresh, no checkpointer",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 1918692208,
+      "index": "a7",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_kb",
@@ -259,27 +336,48 @@
       "seed": 4009,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "boundElements": [
-        { "id": "d4_kb_label", "type": "text" },
-        { "id": "d4_arrow_compile_kb", "type": "arrow" },
-        { "id": "d4_arrow_kb_result", "type": "arrow" },
-        { "id": "d4_arrow_kb_mcp", "type": "arrow" },
-        { "id": "d4_arrow_kb_llm", "type": "arrow" }
+        {
+          "id": "d4_kb_label",
+          "type": "text"
+        },
+        {
+          "id": "d4_arrow_compile_kb",
+          "type": "arrow"
+        },
+        {
+          "id": "d4_arrow_kb_result",
+          "type": "arrow"
+        },
+        {
+          "id": "d4_arrow_kb_mcp",
+          "type": "arrow"
+        },
+        {
+          "id": "d4_arrow_kb_llm",
+          "type": "arrow"
+        }
       ],
-      "updated": 1710000000000,
+      "updated": 1773578413608,
       "link": null,
       "locked": false,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 4,
+      "versionNonce": 2080216432,
+      "index": "a8",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_kb_label",
       "type": "text",
-      "x": 220,
-      "y": 472,
-      "width": 160,
-      "height": 40,
-      "text": "knowledgebase_agent\nreused from agent.py",
+      "x": 229.6875,
+      "y": 467.5,
+      "width": 140.625,
+      "height": 45,
+      "text": "knowledgebase_agent\nreused from\nagnes_graph_agent.py",
       "fontSize": 12,
       "fontFamily": 3,
       "textAlign": "center",
@@ -295,20 +393,25 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578387095,
       "link": null,
       "locked": false,
       "containerId": "d4_kb",
-      "originalText": "knowledgebase_agent\nreused from agent.py",
+      "originalText": "knowledgebase_agent\nreused from agnes_graph_agent.py",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 18,
+      "versionNonce": 1451219312,
+      "index": "a9",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_mcp",
       "type": "rectangle",
-      "x": 500,
-      "y": 430,
+      "x": 709.5999755859375,
+      "y": 438.4000244140625,
       "width": 200,
       "height": 55,
       "strokeColor": "#00696b",
@@ -321,21 +424,33 @@
       "seed": 4011,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "boundElements": [
-        { "id": "d4_mcp_label", "type": "text" },
-        { "id": "d4_arrow_kb_mcp", "type": "arrow" }
+        {
+          "id": "d4_mcp_label",
+          "type": "text"
+        },
+        {
+          "id": "d4_arrow_kb_mcp",
+          "type": "arrow"
+        }
       ],
-      "updated": 1710000000000,
+      "updated": 1773578403796,
       "link": null,
       "locked": false,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 60,
+      "versionNonce": 1196493168,
+      "index": "aA",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_mcp_label",
       "type": "text",
-      "x": 530,
-      "y": 440,
+      "x": 739.5999755859375,
+      "y": 448.4000244140625,
       "width": 140,
       "height": 40,
       "text": "MCP Server\nknowledgebase tools",
@@ -354,20 +469,25 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578403796,
       "link": null,
       "locked": false,
       "containerId": "d4_mcp",
       "originalText": "MCP Server\nknowledgebase tools",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 60,
+      "versionNonce": 1833851760,
+      "index": "aB",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_llm",
       "type": "rectangle",
-      "x": 500,
-      "y": 505,
+      "x": 705.599853515625,
+      "y": 530.4000244140625,
       "width": 200,
       "height": 55,
       "strokeColor": "#2b579a",
@@ -380,21 +500,33 @@
       "seed": 4013,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "boundElements": [
-        { "id": "d4_llm_label", "type": "text" },
-        { "id": "d4_arrow_kb_llm", "type": "arrow" }
+        {
+          "id": "d4_llm_label",
+          "type": "text"
+        },
+        {
+          "id": "d4_arrow_kb_llm",
+          "type": "arrow"
+        }
       ],
-      "updated": 1710000000000,
+      "updated": 1773578413609,
       "link": null,
       "locked": false,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 60,
+      "versionNonce": 822758256,
+      "index": "aC",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_llm_label",
       "type": "text",
-      "x": 550,
-      "y": 520,
+      "x": 755.599853515625,
+      "y": 545.4000244140625,
       "width": 100,
       "height": 25,
       "text": "Azure OpenAI",
@@ -413,14 +545,19 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578400161,
       "link": null,
       "locked": false,
       "containerId": "d4_llm",
       "originalText": "Azure OpenAI",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 58,
+      "versionNonce": 827063152,
+      "index": "aD",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_result",
@@ -439,16 +576,31 @@
       "seed": 4015,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "boundElements": [
-        { "id": "d4_result_label", "type": "text" },
-        { "id": "d4_arrow_kb_result", "type": "arrow" },
-        { "id": "d4_arrow_result_csv", "type": "arrow" }
+        {
+          "id": "d4_result_label",
+          "type": "text"
+        },
+        {
+          "id": "d4_arrow_kb_result",
+          "type": "arrow"
+        },
+        {
+          "id": "d4_arrow_result_csv",
+          "type": "arrow"
+        }
       ],
-      "updated": 1710000000000,
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 284405136,
+      "index": "aE",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_result_label",
@@ -473,14 +625,19 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
       "containerId": "d4_result",
       "originalText": "ScanResult\nhas_coverage, matched_topics",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 1804841840,
+      "index": "aF",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_csv_out",
@@ -499,15 +656,27 @@
       "seed": 4017,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "boundElements": [
-        { "id": "d4_csv_out_label", "type": "text" },
-        { "id": "d4_arrow_result_csv", "type": "arrow" }
+        {
+          "id": "d4_csv_out_label",
+          "type": "text"
+        },
+        {
+          "id": "d4_arrow_result_csv",
+          "type": "arrow"
+        }
       ],
-      "updated": 1710000000000,
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 256342928,
+      "index": "aG",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_csv_out_label",
@@ -532,14 +701,19 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
       "containerId": "d4_csv_out",
       "originalText": "scan_results.csv\n_write_results_csv()",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 128697712,
+      "index": "aH",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_arrow_cli_csv",
@@ -558,17 +732,41 @@
       "seed": 4019,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
-      "boundElements": null,
-      "updated": 1710000000000,
+      "roundness": {
+        "type": 2
+      },
+      "boundElements": [],
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
-      "startBinding": { "elementId": "d4_cli", "focus": 0, "gap": 1 },
-      "endBinding": { "elementId": "d4_csv_in", "focus": 0, "gap": 1 },
+      "startBinding": {
+        "elementId": "d4_cli",
+        "focus": 0,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "d4_csv_in",
+        "focus": 0,
+        "gap": 1
+      },
       "startArrowhead": null,
       "endArrowhead": "arrow",
-      "points": [[0, 0], [0, 50]],
-      "isDeleted": false
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          50
+        ]
+      ],
+      "isDeleted": false,
+      "lastCommittedPoint": null,
+      "version": 2,
+      "versionNonce": 1844545936,
+      "index": "aI",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_arrow_cli_csv_label",
@@ -593,14 +791,19 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
       "containerId": null,
       "originalText": "read",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 1257346928,
+      "index": "aJ",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_arrow_csv_scan",
@@ -619,17 +822,41 @@
       "seed": 4021,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
-      "boundElements": null,
-      "updated": 1710000000000,
+      "roundness": {
+        "type": 2
+      },
+      "boundElements": [],
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
-      "startBinding": { "elementId": "d4_csv_in", "focus": 0, "gap": 1 },
-      "endBinding": { "elementId": "d4_scan", "focus": 0, "gap": 1 },
+      "startBinding": {
+        "elementId": "d4_csv_in",
+        "focus": 0,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "d4_scan",
+        "focus": 0,
+        "gap": 1
+      },
       "startArrowhead": null,
       "endArrowhead": "arrow",
-      "points": [[0, 0], [0, 50]],
-      "isDeleted": false
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          50
+        ]
+      ],
+      "isDeleted": false,
+      "lastCommittedPoint": null,
+      "version": 2,
+      "versionNonce": 1210701712,
+      "index": "aK",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_arrow_csv_scan_label",
@@ -654,14 +881,19 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
       "containerId": null,
       "originalText": "list[Incident]",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 162343280,
+      "index": "aL",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_arrow_scan_compile",
@@ -680,17 +912,41 @@
       "seed": 4023,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
-      "boundElements": null,
-      "updated": 1710000000000,
+      "roundness": {
+        "type": 2
+      },
+      "boundElements": [],
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
-      "startBinding": { "elementId": "d4_scan", "focus": 0, "gap": 1 },
-      "endBinding": { "elementId": "d4_compile", "focus": 0, "gap": 1 },
+      "startBinding": {
+        "elementId": "d4_scan",
+        "focus": 0,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "d4_compile",
+        "focus": 0,
+        "gap": 1
+      },
       "startArrowhead": null,
       "endArrowhead": "arrow",
-      "points": [[0, 0], [0, 50]],
-      "isDeleted": false
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          50
+        ]
+      ],
+      "isDeleted": false,
+      "lastCommittedPoint": null,
+      "version": 2,
+      "versionNonce": 304637328,
+      "index": "aM",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_arrow_scan_compile_label",
@@ -715,14 +971,19 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
       "containerId": null,
       "originalText": "for each incident",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 1327922032,
+      "index": "aN",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_arrow_compile_kb",
@@ -741,17 +1002,41 @@
       "seed": 4025,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
-      "boundElements": null,
-      "updated": 1710000000000,
+      "roundness": {
+        "type": 2
+      },
+      "boundElements": [],
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
-      "startBinding": { "elementId": "d4_compile", "focus": 0, "gap": 1 },
-      "endBinding": { "elementId": "d4_kb", "focus": 0, "gap": 1 },
+      "startBinding": {
+        "elementId": "d4_compile",
+        "focus": 0,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "d4_kb",
+        "focus": 0,
+        "gap": 1
+      },
       "startArrowhead": null,
       "endArrowhead": "arrow",
-      "points": [[0, 0], [0, 50]],
-      "isDeleted": false
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          50
+        ]
+      ],
+      "isDeleted": false,
+      "lastCommittedPoint": null,
+      "version": 2,
+      "versionNonce": 2032481168,
+      "index": "aO",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_arrow_compile_kb_label",
@@ -776,22 +1061,27 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
       "containerId": null,
       "originalText": "ainvoke\nactive_agent=knowledgebase_agent",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 2108001648,
+      "index": "aP",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_arrow_kb_mcp",
       "type": "arrow",
-      "x": 400,
-      "y": 475,
-      "width": 100,
-      "height": -15,
+      "x": 402.4490065510212,
+      "y": 488.0365719146411,
+      "width": 303.7885268692348,
+      "height": 23.412426163173393,
       "strokeColor": "#00696b",
       "backgroundColor": "transparent",
       "fillStyle": "solid",
@@ -802,23 +1092,47 @@
       "seed": 4027,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
-      "boundElements": null,
-      "updated": 1710000000000,
+      "roundness": {
+        "type": 2
+      },
+      "boundElements": [],
+      "updated": 1773578427791,
       "link": null,
       "locked": false,
-      "startBinding": { "elementId": "d4_kb", "focus": -0.5, "gap": 1 },
-      "endBinding": { "elementId": "d4_mcp", "focus": 0.5, "gap": 1 },
+      "startBinding": {
+        "elementId": "d4_kb",
+        "focus": 0.1573224667080634,
+        "gap": 2.4490065510212276
+      },
+      "endBinding": {
+        "elementId": "d4_mcp",
+        "focus": 0.26250123693071015,
+        "gap": 3.3624421656815002
+      },
       "startArrowhead": "arrow",
       "endArrowhead": "arrow",
-      "points": [[0, 0], [100, -15]],
-      "isDeleted": false
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          303.7885268692348,
+          -23.412426163173393
+        ]
+      ],
+      "isDeleted": false,
+      "lastCommittedPoint": null,
+      "version": 109,
+      "versionNonce": 2061960560,
+      "index": "aQ",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_arrow_kb_mcp_label",
       "type": "text",
-      "x": 420,
-      "y": 450,
+      "x": 502.4000244140625,
+      "y": 454.60003662109375,
       "width": 120,
       "height": 20,
       "text": "search_docs, read_page",
@@ -837,22 +1151,27 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578430798,
       "link": null,
       "locked": false,
       "containerId": null,
       "originalText": "search_docs, read_page",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 49,
+      "versionNonce": 399795568,
+      "index": "aR",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_arrow_kb_llm",
       "type": "arrow",
-      "x": 400,
-      "y": 505,
-      "width": 100,
-      "height": 25,
+      "x": 397.50116220991663,
+      "y": 494.2934206566987,
+      "width": 305.53617589783937,
+      "height": 64.60599942575755,
       "strokeColor": "#2b579a",
       "backgroundColor": "transparent",
       "fillStyle": "solid",
@@ -863,17 +1182,41 @@
       "seed": 4029,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
-      "boundElements": null,
-      "updated": 1710000000000,
+      "roundness": {
+        "type": 2
+      },
+      "boundElements": [],
+      "updated": 1773578419105,
       "link": null,
       "locked": false,
-      "startBinding": { "elementId": "d4_kb", "focus": 0.5, "gap": 1 },
-      "endBinding": { "elementId": "d4_llm", "focus": -0.5, "gap": 1 },
+      "startBinding": {
+        "elementId": "d4_kb",
+        "focus": -0.31915691848383937,
+        "gap": 2.498837790083371
+      },
+      "endBinding": {
+        "elementId": "d4_llm",
+        "focus": -0.4663646458658581,
+        "gap": 2.5625154078690002
+      },
       "startArrowhead": "arrow",
       "endArrowhead": "arrow",
-      "points": [[0, 0], [100, 25]],
-      "isDeleted": false
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          305.53617589783937,
+          64.60599942575755
+        ]
+      ],
+      "isDeleted": false,
+      "lastCommittedPoint": null,
+      "version": 301,
+      "versionNonce": 285884304,
+      "index": "aS",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_arrow_kb_llm_label",
@@ -898,14 +1241,19 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
       "containerId": null,
       "originalText": "LLM calls",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 299168112,
+      "index": "aT",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_arrow_kb_result",
@@ -924,17 +1272,41 @@
       "seed": 4031,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
-      "boundElements": null,
-      "updated": 1710000000000,
+      "roundness": {
+        "type": 2
+      },
+      "boundElements": [],
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
-      "startBinding": { "elementId": "d4_kb", "focus": 0, "gap": 1 },
-      "endBinding": { "elementId": "d4_result", "focus": 0, "gap": 1 },
+      "startBinding": {
+        "elementId": "d4_kb",
+        "focus": 0,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "d4_result",
+        "focus": 0,
+        "gap": 1
+      },
       "startArrowhead": null,
       "endArrowhead": "arrow",
-      "points": [[0, 0], [0, 50]],
-      "isDeleted": false
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          50
+        ]
+      ],
+      "isDeleted": false,
+      "lastCommittedPoint": null,
+      "version": 2,
+      "versionNonce": 1463885200,
+      "index": "aU",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_arrow_kb_result_label",
@@ -959,14 +1331,19 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
       "containerId": null,
       "originalText": "answer",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 253051760,
+      "index": "aV",
+      "strokeStyle": "solid",
+      "autoResize": true
     },
     {
       "id": "d4_arrow_result_csv",
@@ -985,17 +1362,41 @@
       "seed": 4033,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
-      "boundElements": null,
-      "updated": 1710000000000,
+      "roundness": {
+        "type": 2
+      },
+      "boundElements": [],
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
-      "startBinding": { "elementId": "d4_result", "focus": 0, "gap": 1 },
-      "endBinding": { "elementId": "d4_csv_out", "focus": 0, "gap": 1 },
+      "startBinding": {
+        "elementId": "d4_result",
+        "focus": 0,
+        "gap": 1
+      },
+      "endBinding": {
+        "elementId": "d4_csv_out",
+        "focus": 0,
+        "gap": 1
+      },
       "startArrowhead": null,
       "endArrowhead": "arrow",
-      "points": [[0, 0], [0, 50]],
-      "isDeleted": false
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          50
+        ]
+      ],
+      "isDeleted": false,
+      "lastCommittedPoint": null,
+      "version": 2,
+      "versionNonce": 174517136,
+      "index": "aW",
+      "strokeStyle": "solid"
     },
     {
       "id": "d4_arrow_result_csv_label",
@@ -1020,18 +1421,25 @@
       "groupIds": [],
       "frameId": null,
       "roundness": null,
-      "boundElements": null,
-      "updated": 1710000000000,
+      "boundElements": [],
+      "updated": 1773578363789,
       "link": null,
       "locked": false,
       "containerId": null,
       "originalText": "collect all",
       "lineHeight": 1.25,
-      "isDeleted": false
+      "isDeleted": false,
+      "version": 2,
+      "versionNonce": 1685804400,
+      "index": "aX",
+      "strokeStyle": "solid",
+      "autoResize": true
     }
   ],
   "appState": {
     "gridSize": 20,
+    "gridStep": 5,
+    "gridModeEnabled": false,
     "viewBackgroundColor": "#ffffff"
   },
   "files": {}
