@@ -1,0 +1,34 @@
+# Merge-ready manifest for the agent API layer.
+#
+# NOT directly executable: uv and pip only recognize the literal filename
+# pyproject.toml, so this file exists as documentation of exactly what to
+# merge into pyproject.toml when the API graduates from additive preview
+# to first-class citizen (the diff vs pyproject.toml: the two fastapi/
+# uvicorn dependencies and the agent-api console script).
+#
+# Until then, run the API without touching pyproject.toml via the PEP 723
+# inline metadata in cli_api.py:
+#     cd agent-client && uv run src/agent_client/cli_api.py
+
+[project]
+name = "agent-client"
+version = "0.1.0"
+description = "LangGraph ReAct agent for Access Governance, powered by AzureOpenAI and MCP"
+requires-python = ">=3.10"
+dependencies = [
+    "langchain-mcp-adapters>=0.2.0",
+    "langchain-openai>=0.3.0",
+    "langgraph>=0.4.0",
+    "python-dotenv>=1.0.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+agent-client = "agent_client.cli:main"
+scan-cli = "agent_client.scanner_cli:main"
+agent-api = "agent_client.cli_api:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
