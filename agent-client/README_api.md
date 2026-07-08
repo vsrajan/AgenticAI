@@ -78,7 +78,7 @@ API variables:
 |----------|---------|---------|
 | `AGENT_API_AUTH` | `static` | `static` = shared bearer token, `none` = no auth (local dev only) |
 | `AGENT_API_TOKEN` | unset | required in static mode; server refuses to start without it |
-| `AGENT_API_HOST` | `127.0.0.1` | bind address |
+| `AGENT_API_HOST` | `127.0.0.1` | bind address; the `.env_api` template sets `0.0.0.0` so remote web clients can connect |
 | `AGENT_API_PORT` | `8080` | port |
 | `AGENT_API_CORS_ORIGINS` | `*` | comma-separated origins browsers may call from; tighten for deployments |
 
