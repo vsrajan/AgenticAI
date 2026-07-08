@@ -23,12 +23,13 @@ right where it is used.
 5. [The service core: AgentService and AgentEvent](#5-the-service-core-agentservice-and-agentevent)
 6. [Authentication: how and why](#6-authentication-how-and-why)
 7. [The FastAPI app and its endpoints](#7-the-fastapi-app-and-its-endpoints)
-8. [Configuration -- one single .env file](#8-configuration----one-single-env-file)
-9. [Running the API server](#9-running-the-api-server)
-10. [Calling the API -- worked examples](#10-calling-the-api----worked-examples)
-11. [Testing](#11-testing)
-12. [The future: Azure Entra OAuth2](#12-the-future-azure-entra-oauth2)
-13. [What was deliberately not changed](#13-what-was-deliberately-not-changed)
+8. [Defining the server vs starting it](#8-defining-the-server-vs-starting-it)
+9. [Configuration -- one single .env file](#9-configuration----one-single-env-file)
+10. [Running the API server](#10-running-the-api-server)
+11. [Calling the API -- worked examples](#11-calling-the-api----worked-examples)
+12. [Testing](#12-testing)
+13. [The future: Azure Entra OAuth2](#13-the-future-azure-entra-oauth2)
+14. [What was deliberately not changed](#14-what-was-deliberately-not-changed)
 
 ---
 
@@ -326,7 +327,67 @@ Error behavior:
 - an unknown session id is NOT an error: with MemorySaver, any id simply
   starts an empty history. Session ids are opaque strings to the server.
 
-## 8. Configuration -- one single .env file
+## 8. Defining the server vs starting it
+
+A common point of confusion: which file IS the server? The answer is
+that no single file is -- the work is deliberately split between
+defining the server and starting it.
+
+**`agent_api.py` defines, but never starts.** It is a library module.
+`create_app()` is a factory function: calling it builds and returns a
+FastAPI app object -- a Python object in memory that describes the
+endpoints and how to handle them. At that point nothing is listening on
+any port. Importing the module, or even calling `create_app()`, starts
+no server.
+
+**`cli_api.py` starts, but defines nothing.** Despite the name, it is
+NOT a chat client and never sends a message to the agent (the
+interactive chat client is the existing `cli.py`, which talks to the
+LangGraph graph directly in-process -- no HTTP involved). `cli_api.py`
+is the launcher: "cli" in its name only means "the thing you invoke
+from the command line to start the server". Its `main()` contains the
+one line that actually starts serving:
+
+```python
+uvicorn.run(create_app(), host=host, port=port)
+```
+
+`uvicorn.run` is the moment a real network socket opens on the
+configured host and port and the process begins accepting HTTP
+requests. It blocks until you stop it with ctrl-c.
+
+**`agent-api` is only a name.** It is a console script declared in
+`pyproject_api.toml`:
+
+```toml
+[project.scripts]
+agent-api = "agent_client.cli_api:main"
+```
+
+When `uv sync` installs the project it generates a tiny wrapper
+executable, `.venv/bin/agent-api`, whose entire body is "import
+`cli_api`, call `main()`". It adds no behavior -- it is a launcher for
+the launcher, existing so you can type `uv run agent-api` instead of a
+file path.
+
+The full chain when you start the server:
+
+```
+uv run agent-api
+  -> .venv/bin/agent-api            (generated wrapper -- just a name)
+  -> cli_api.main()                 (load .env, read host/port)
+  -> agent_api.create_app()         (build the app object -- nothing listening yet)
+  -> uvicorn.run(app, ...)          (open the port, serve until ctrl-c)
+```
+
+Why the split matters: because `agent_api.py` never starts anything on
+import, the test suite can call `create_app()` directly, hand the app
+to FastAPI's `TestClient`, and exercise every endpoint with no port, no
+uvicorn, and no process management -- while injecting a fake agent
+instead of the real one (see section 12). If the module started the
+server at import time, none of that would be possible.
+
+## 9. Configuration -- one single .env file
 
 ALL configuration is read from one place: the gitignored `.env` file in
 `agent-client/` -- the same file the CLI already uses. The code reads
@@ -358,7 +419,7 @@ The four API-specific settings:
 | `AGENT_API_HOST` | `127.0.0.1` | bind address (`0.0.0.0` to accept other machines) |
 | `AGENT_API_PORT` | `8080` | port |
 
-## 9. Running the API server
+## 10. Running the API server
 
 ```bash
 # terminal 1 -- the MCP server, exactly as before
@@ -384,7 +445,7 @@ The server logs
 
 The existing CLI and scanner are unaffected and run exactly as before.
 
-## 10. Calling the API -- worked examples
+## 11. Calling the API -- worked examples
 
 ### With curl
 
@@ -460,7 +521,7 @@ with requests.post(
                 print()                           # data holds the full text
 ```
 
-## 11. Testing
+## 12. Testing
 
 The test suite (`tests_api/test_agent_api.py`, 18 tests) needs neither
 Azure OpenAI credentials nor a running MCP server. It builds a `FakeAgent`
@@ -481,7 +542,7 @@ uv run --with pytest --with fastapi --with uvicorn --with httpx \
   pytest tests_api/ -q
 ```
 
-## 12. The future: Azure Entra OAuth2
+## 13. The future: Azure Entra OAuth2
 
 The static token is a stopgap: one shared secret, no idea WHO is calling.
 The end goal is Azure Entra ID (formerly Azure AD): each user or app
@@ -505,7 +566,7 @@ clients already send. That is why the bearer scheme was chosen on day
 one. Once real identity exists, sessions can additionally be bound to
 `principal.subject` so callers only see their own conversations.
 
-## 13. What was deliberately not changed
+## 14. What was deliberately not changed
 
 - `agent.py`, `cli.py`, `scanner.py`, `scanner_cli.py`,
   `incident_sources.py`, `llm.py` -- untouched; the CLI works as before
