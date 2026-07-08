@@ -10,8 +10,8 @@ agent_api.py   -- AgentService core (event-stream wrapper around the
 auth_api.py    -- pluggable authentication (static bearer token now,
                   Azure Entra OAuth2 later)
 cli_api.py     -- server entry point (runs uvicorn)
-.env_api       -- complete framework + API configuration template
-                  (committed, placeholders only; superset of .env.example)
+.env_api       -- configuration TEMPLATE (never read by code); copy to
+                  the single .env file before starting
 pyproject_api.toml -- complete manifest for the API (superset of
                   pyproject.toml); activate by copying over pyproject.toml
 ```
@@ -22,7 +22,7 @@ untouched and work exactly as before.
 ## Run
 
 The MCP server must be running first (see the repository README). Then
-activate the API manifest and start the server:
+activate the API manifest and configuration, and start the server:
 
 ```bash
 cd agent-client
@@ -32,8 +32,9 @@ cd agent-client
 cp pyproject_api.toml pyproject.toml
 uv sync
 
-# set a token (or put AGENT_API_TOKEN in the gitignored .env)
-export AGENT_API_TOKEN=your-secret-token
+# create the single .env config from the template, then edit it with
+# real values (Azure key, AGENT_API_TOKEN, ...)
+cp .env_api .env
 
 uv run agent-api
 ```
@@ -43,18 +44,21 @@ To go back to the original manifest: `git checkout pyproject.toml`
 
 ## Configuration
 
-`.env_api` is the complete configuration template for running the whole
-framework through the API -- it contains every variable the agent needs
-(a superset of `.env.example`) plus the API-specific ones. It is
-committed with placeholders only; real values (the Azure key, the API
-token) go in the gitignored `.env` or the shell environment, which
-always take precedence.
+ALL configuration is read from the single gitignored `.env` file -- the
+same file the CLI uses. The code reads nothing else (no shell exports
+required, no second env file).
+
+`.env_api` is the template for that file: it lists every variable the
+whole framework needs (a superset of `.env.example`) plus the
+API-specific ones, with placeholder values. Copy it to `.env` (or copy
+the values you need into your existing `.env`) and fill in real values.
+The template is committed to git, so it never contains real secrets.
 
 Framework variables (same meaning as in `.env.example`):
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `AZURE_OPENAI_API_KEY` | -- | Azure OpenAI API key (secret -- set in `.env`) |
+| `AZURE_OPENAI_API_KEY` | -- | Azure OpenAI API key (secret) |
 | `AZURE_OPENAI_ENDPOINT` | -- | e.g. `https://<resource>.openai.azure.com/` |
 | `AZURE_OPENAI_DEPLOYMENT` | `gpt-4o` | deployment name |
 | `AZURE_OPENAI_API_VERSION` | `2024-12-01-preview` | API version |

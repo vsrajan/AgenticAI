@@ -14,13 +14,14 @@ working from the same environment):
 
 Restore the original manifest with: git checkout pyproject.toml
 
-Configuration: .env_api is the complete template for the whole framework
-(Azure OpenAI, agent behavior, MCP connection) plus the API settings:
+Configuration: everything is read from the single gitignored .env file
+(same file the CLI uses). Copy .env_api over it (or copy the values you
+need into it) before starting -- it is the complete template covering
+Azure OpenAI, agent behavior, MCP connection, and the API settings:
     AGENT_API_AUTH   -- static (default) or none
     AGENT_API_TOKEN  -- shared bearer token, required in static mode
     AGENT_API_HOST   -- bind address (default 127.0.0.1)
     AGENT_API_PORT   -- port (default 8080)
-Real secrets belong in the gitignored .env, which takes precedence.
 """
 
 import logging
@@ -30,12 +31,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# load the real (gitignored) .env first, then the committed .env_api
-# template -- load_dotenv never overrides variables that are already
-# set, so real values always win over template placeholders
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(_PROJECT_ROOT / ".env")
-load_dotenv(_PROJECT_ROOT / ".env_api")
+# all configuration comes from the single gitignored .env file
+# (project root = agent-client/), same as cli.py
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 # -- Logging --
 LOG_LEVEL = os.environ.get("AGENT_LOG_LEVEL", "INFO").upper()

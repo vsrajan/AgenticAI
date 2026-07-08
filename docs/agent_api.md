@@ -15,7 +15,7 @@ authentication. Everything described here lives in new files suffixed
 5. [The service core: AgentService and AgentEvent](#5-the-service-core-agentservice-and-agentevent)
 6. [Authentication: how and why](#6-authentication-how-and-why)
 7. [The FastAPI app and its endpoints](#7-the-fastapi-app-and-its-endpoints)
-8. [Configuration](#8-configuration)
+8. [Configuration -- one single .env file](#8-configuration----one-single-env-file)
 9. [Running the API server](#9-running-the-api-server)
 10. [Calling the API -- worked examples](#10-calling-the-api----worked-examples)
 11. [Testing](#11-testing)
@@ -82,7 +82,7 @@ All new, all in `agent-client/`:
 | `src/agent_client/agent_api.py` | The service core (`AgentService`, `AgentEvent`) and the FastAPI app with all endpoints |
 | `src/agent_client/auth_api.py` | Authentication: token checking, pluggable for the future |
 | `src/agent_client/cli_api.py` | The entry point that starts the web server |
-| `.env_api` | Complete configuration template (committed; placeholders only) |
+| `.env_api` | Configuration TEMPLATE -- never read by code; copy to the single `.env` file before starting |
 | `pyproject_api.toml` | Complete manifest for the API (superset of pyproject.toml); copy over pyproject.toml to activate |
 | `README_api.md` | Quick-reference for running the API |
 | `tests_api/test_agent_api.py` | 18 tests that run without Azure or the MCP server |
@@ -318,22 +318,30 @@ Error behavior:
 - an unknown session id is NOT an error: with MemorySaver, any id simply
   starts an empty history. Session ids are opaque strings to the server.
 
-## 8. Configuration
+## 8. Configuration -- one single .env file
 
-`cli_api.py` loads two env files from `agent-client/`, in this order:
+ALL configuration is read from one place: the gitignored `.env` file in
+`agent-client/` -- the same file the CLI already uses. The code reads
+nothing else; there is no second env file at runtime and no required
+shell exports.
 
-1. `.env` -- your real, gitignored secrets (Azure key, API token)
-2. `.env_api` -- the committed template with every knob and placeholder
-   values
+`.env_api` is only a TEMPLATE for that file. It is never read by the
+code. It lists every variable the whole framework needs -- Azure OpenAI
+settings, agent behavior (`AGENT_LOG_LEVEL`, `KEEP_LAST_N_MSGS`,
+`MAX_TOOL_CONTENT_LEN`), MCP connection (`MCP_TRANSPORT`,
+`MCP_SERVER_URL`, ...), and the API settings -- with placeholder values.
+Before starting the API, copy it to `.env` (or copy the values you need
+into your existing `.env`) and fill in real values:
 
-Order matters: `load_dotenv` never overwrites a variable that is already
-set, so real values from `.env` (or the shell) always beat template
-placeholders.
+```bash
+cd agent-client
+cp .env_api .env    # then edit .env with real values
+```
 
-`.env_api` is the complete reference -- Azure OpenAI settings, agent
-behavior (`AGENT_LOG_LEVEL`, `KEEP_LAST_N_MSGS`, `MAX_TOOL_CONTENT_LEN`),
-MCP connection (`MCP_TRANSPORT`, `MCP_SERVER_URL`, ...), and the four
-API settings:
+Because `.env_api` is committed to git it holds placeholders only; the
+real secrets live in your local `.env`, which git ignores.
+
+The four API-specific settings:
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
@@ -355,7 +363,10 @@ cd agent-client
 cp pyproject_api.toml pyproject.toml
 uv sync
 
-export AGENT_API_TOKEN=pick-something-secret
+# one-time per checkout: create the single .env from the template,
+# then edit it with real values (Azure key, AGENT_API_TOKEN, ...)
+cp .env_api .env
+
 uv run agent-api
 ```
 
