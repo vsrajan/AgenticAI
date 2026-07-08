@@ -10,6 +10,8 @@ agent_api.py   -- AgentService core (event-stream wrapper around the
 auth_api.py    -- pluggable authentication (static bearer token now,
                   Azure Entra OAuth2 later)
 cli_api.py     -- server entry point (runs uvicorn)
+webclient_api.html -- POC single-page web client (streaming); open it
+                  directly in a browser
 .env_api       -- configuration TEMPLATE (never read by code); copy to
                   the single .env file before starting
 pyproject_api.toml -- complete manifest for the API (superset of
@@ -78,6 +80,21 @@ API variables:
 | `AGENT_API_TOKEN` | unset | required in static mode; server refuses to start without it |
 | `AGENT_API_HOST` | `127.0.0.1` | bind address |
 | `AGENT_API_PORT` | `8080` | port |
+| `AGENT_API_CORS_ORIGINS` | `*` | comma-separated origins browsers may call from; tighten for deployments |
+
+## POC web client
+
+`webclient_api.html` is a self-contained single-page client using the
+streaming endpoint. With the API server running, open the file directly
+in a browser and pass the token in the url (or edit the constant at the
+top of its script):
+
+```
+file:///path/to/agent-client/webclient_api.html?token=your-secret-token
+```
+
+It creates a session on the first message, then streams answers
+token-by-token with live phase updates (Routing, Calling tools, ...).
 
 The MCP server process has its own settings (`MCP_DOCS_DIR`, `MCP_HOST`,
 `MCP_PORT`, `MCP_LOG_LEVEL`) read from `mcp-server/.env` -- see

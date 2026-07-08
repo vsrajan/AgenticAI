@@ -239,3 +239,20 @@ def test_stream_message_sse():
 def test_no_auth_mode_accepts_missing_header():
     client = make_client(authenticator=NoAuthAuthenticator())
     assert client.post("/sessions").status_code == 200
+
+
+def test_cors_preflight_allows_browser_clients():
+    # before a cross-origin POST with an Authorization header, browsers
+    # send an OPTIONS "preflight" request; the CORS middleware must
+    # answer it or the browser never sends the real request
+    client = make_client()
+    response = client.options(
+        "/sessions",
+        headers={
+            "Origin": "null",  # what a page opened from file:// sends
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "*"

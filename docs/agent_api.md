@@ -91,6 +91,7 @@ All new, all in `agent-client/`:
 | `src/agent_client/agent_api.py` | The service core (`AgentService`, `AgentEvent`) and the FastAPI app with all endpoints |
 | `src/agent_client/auth_api.py` | Authentication: token checking, pluggable for the future |
 | `src/agent_client/cli_api.py` | The entry point that starts the web server |
+| `webclient_api.html` | POC single-page web client (streaming) -- open directly in a browser |
 | `.env_api` | Configuration TEMPLATE -- never read by code; copy to the single `.env` file before starting |
 | `pyproject_api.toml` | Complete manifest for the API (superset of pyproject.toml); copy over pyproject.toml to activate |
 | `README_api.md` | Quick-reference for running the API |
@@ -520,6 +521,30 @@ with requests.post(
             elif event_type == "answer":
                 print()                           # data holds the full text
 ```
+
+### A browser client: webclient_api.html
+
+`agent-client/webclient_api.html` is a working single-page POC client
+for the streaming endpoint -- plain HTML and vanilla JavaScript in one
+file, no framework or build step. Open it directly in a browser while
+the API server is running and pass the token in the url:
+
+```
+file:///path/to/agent-client/webclient_api.html?token=your-secret-token
+```
+
+Two implementation details worth knowing (both commented in the file):
+
+- The browser's built-in SSE client (`EventSource`) only supports GET
+  requests, but our stream endpoint is a POST with a JSON body and an
+  Authorization header. So the page uses `fetch()` and reads the
+  response body chunk by chunk, splitting on blank lines to parse the
+  SSE format by hand (about 20 lines of code).
+- Browsers block a page on one origin (a local file) from reading
+  responses of an api on another origin (127.0.0.1:8080) unless the
+  api sends CORS headers. The API includes CORS middleware for this,
+  controlled by `AGENT_API_CORS_ORIGINS` (default `*` for local dev).
+  CORS is not authentication -- the bearer token is still required.
 
 ## 12. Testing
 

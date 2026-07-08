@@ -21,12 +21,14 @@ worked client examples, see docs/agent_api.md.
 
 import json
 import logging
+import os
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import AsyncIterator
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from langchain_core.messages import HumanMessage
@@ -212,6 +214,26 @@ def create_app(
         yield
 
     app = FastAPI(title="Access Governance Agent API", lifespan=lifespan)
+
+    # -- CORS --
+    # browsers refuse to let javascript on one origin (for example the
+    # POC page webclient_api.html opened as a local file) read responses
+    # from an api on another origin (http://127.0.0.1:8080) unless the
+    # api opts in by sending CORS headers. This middleware adds them.
+    # AGENT_API_CORS_ORIGINS is a comma-separated allowlist; the default
+    # * accepts any origin, which is fine for local development --
+    # tighten it to your real frontend's origin for deployments.
+    # Note CORS is not authentication: every request still needs the
+    # bearer token. CORS only controls which web pages a browser will
+    # let read our responses.
+    cors_origins = os.environ.get("AGENT_API_CORS_ORIGINS", "*")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[o.strip() for o in cors_origins.split(",")],
+        allow_methods=["*"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
     # app.state is a scratch area FastAPI provides for objects that
     # should live as long as the server; endpoints read them back from
     # there. None here means "build at startup" (see lifespan above);
