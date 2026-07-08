@@ -77,3 +77,32 @@ Key points:
 - **Fresh graph per incident** -- no shared conversation state between incidents
 - **Reuses agent.py** -- imports `build_graph` and `_get_mcp_server_config` directly
 - **Coverage heuristic** -- parses citations from the agent response to detect gaps
+
+---
+
+## 5. Agent API -- Stream and Ask Flows
+
+The HTTP API layer (`agent_api.py`, started by `cli_api.py` / `uv run
+agent-api`) wraps the agent so external clients can use it. The diagram
+shows the two request flows side by side, with the agent graph and MCP
+server collapsed into single blocks. For the full API guide see
+[agent_api.md](agent_api.md).
+
+> Source: [05_agent_api_flow.excalidraw](05_agent_api_flow.excalidraw)
+
+### The two flows
+
+| Step | Stream flow (green, for live UIs) | Ask flow (orange, for bots/scripts) |
+|---|---|---|
+| 1 | `POST /sessions/{id}/messages/stream` + Bearer token | `POST /sessions/{id}/messages` + Bearer token |
+| 2 | Auth gate validates the token (401 on failure) | Auth gate validates the token (401 on failure) |
+| 3 | Endpoint iterates `AgentService.stream()` | Endpoint awaits `AgentService.ask()` |
+| 4 | `stream()` runs the agent graph via `astream_events` | `ask()` consumes `stream()` internally (one shared code path) |
+| 5 | Graph events flow back as they happen | Only the final answer event is kept |
+| 6 | Client receives SSE events: `phase` / `token` / `answer` | Client receives one JSON response: `{"answer": ...}` |
+
+Key points:
+- **Both flows share one engine** -- `ask()` is a thin wrapper that drains `stream()`
+- **Auth gate on everything except /health** -- static bearer token, pluggable for Entra later
+- **Sessions come first** -- `POST /sessions` returns the session id both flows use
+- **Agent graph and MCP server unchanged** -- shown as single blocks; see diagrams 2 and 3 for their internals
