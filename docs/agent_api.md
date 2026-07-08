@@ -1,0 +1,490 @@
+# The Agent API -- a beginner-friendly guide
+
+This document explains the HTTP API layer added to the agent client: what
+was built, why each piece exists, and how it works -- written for a reader
+who knows some Python but has little experience with FastAPI, web APIs, or
+authentication. Everything described here lives in new files suffixed
+`_api`; no pre-existing file was changed.
+
+## Contents
+
+1. [Why an API?](#1-why-an-api)
+2. [The big picture](#2-the-big-picture)
+3. [What files were added](#3-what-files-were-added)
+4. [Concepts you need, explained from scratch](#4-concepts-you-need-explained-from-scratch)
+5. [The service core: AgentService and AgentEvent](#5-the-service-core-agentservice-and-agentevent)
+6. [Authentication: how and why](#6-authentication-how-and-why)
+7. [The FastAPI app and its endpoints](#7-the-fastapi-app-and-its-endpoints)
+8. [Configuration](#8-configuration)
+9. [Running the API server](#9-running-the-api-server)
+10. [Calling the API -- worked examples](#10-calling-the-api----worked-examples)
+11. [Testing](#11-testing)
+12. [The future: Azure Entra OAuth2](#12-the-future-azure-entra-oauth2)
+13. [What was deliberately not changed](#13-what-was-deliberately-not-changed)
+
+---
+
+## 1. Why an API?
+
+Before this change, the only way to talk to the agent was the interactive
+CLI (`uv run agent-client`). The agent logic and the terminal were welded
+together: the code that runs the LangGraph agent also printed tokens to
+the screen with `sys.stdout.write` and drew a spinner.
+
+That is fine for one person at a keyboard, but it cannot serve a web page,
+a Microsoft Teams bot, a Slack app, or another program. Those clients all
+speak HTTP. So the agent is now wrapped in a small web service:
+
+- any program that can make an HTTP request can use the agent
+- each frontend decides its own presentation (a web page might show a
+  "thinking..." indicator; a Teams bot just posts the final answer)
+- the agent core stays in one place -- new frontends need zero agent code
+
+## 2. The big picture
+
+```mermaid
+flowchart LR
+    subgraph clients [External clients]
+        WEB[Web UI]
+        TEAMS[Teams / Slack bot]
+        CURL[curl / scripts / other agents]
+    end
+
+    subgraph api [API server -- cli_api.py]
+        AUTH[auth_api.py<br/>bearer token check]
+        APP[agent_api.py<br/>FastAPI endpoints]
+        SVC[agent_api.py<br/>AgentService]
+    end
+
+    GRAPH[agent.py<br/>LangGraph graph -- unchanged]
+    MCP[MCP server -- unchanged]
+
+    WEB -->|HTTP + SSE| AUTH
+    TEAMS -->|HTTP| AUTH
+    CURL -->|HTTP| AUTH
+    AUTH --> APP
+    APP --> SVC
+    SVC --> GRAPH
+    GRAPH <--> MCP
+```
+
+A request flows left to right: a client sends an HTTP request with a
+token, the token is checked, the endpoint hands the message to the
+AgentService, which runs the existing LangGraph agent, which calls MCP
+tools as usual. The answer flows back as JSON or as a live event stream.
+
+## 3. What files were added
+
+All new, all in `agent-client/`:
+
+| File | Role |
+|------|------|
+| `src/agent_client/agent_api.py` | The service core (`AgentService`, `AgentEvent`) and the FastAPI app with all endpoints |
+| `src/agent_client/auth_api.py` | Authentication: token checking, pluggable for the future |
+| `src/agent_client/cli_api.py` | The entry point that starts the web server |
+| `.env_api` | Complete configuration template (committed; placeholders only) |
+| `pyproject_api.toml` | Merge-ready copy of pyproject.toml including the API additions |
+| `README_api.md` | Quick-reference for running the API |
+| `tests_api/test_agent_api.py` | 18 tests that run without Azure or the MCP server |
+
+The naming convention: where new behavior parallels an existing file, the
+new file takes the same name plus `_api` (`cli.py` -> `cli_api.py`,
+`pyproject.toml` -> `pyproject_api.toml`, `.env` -> `.env_api`).
+
+## 4. Concepts you need, explained from scratch
+
+### What is FastAPI?
+
+FastAPI is a Python library for building web APIs. You write ordinary
+Python functions and attach them to URLs with decorators:
+
+```python
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+```
+
+When an HTTP GET request arrives at `/health`, FastAPI calls this
+function and converts the returned dict to JSON automatically. The
+`async def` means the function can pause while waiting for slow things
+(the LLM, the MCP server) without blocking other requests.
+
+### What is uvicorn?
+
+FastAPI only describes the app; it does not listen on a network port
+itself. uvicorn is the web server that does the listening -- it accepts
+connections on a host/port and passes each request to the FastAPI app.
+`cli_api.py` boils down to one call: `uvicorn.run(create_app(), ...)`.
+
+### What is a "session" here?
+
+The agent keeps conversation history so follow-up questions work
+("what about the second one?"). The API models this with sessions: you
+create a session once, get back an id, and send every message of that
+conversation with the same id. Internally a session id is a LangGraph
+"thread id" -- the key under which the checkpointer stores the message
+history. Because the checkpointer is MemorySaver (plain process memory),
+restarting the server forgets all sessions. That is a known, accepted
+tradeoff for now; swapping in a persistent checkpointer later is a
+one-argument change in `AgentService.create`.
+
+### What is SSE (Server-Sent Events)?
+
+A normal HTTP response arrives all at once. But the agent produces its
+answer token by token, and a good UI wants to show words as they are
+generated (the "live typing" effect you see in the CLI).
+
+SSE is the simplest standard way to do that: the server keeps the HTTP
+response open and writes small text blocks as events happen. Each block
+looks like:
+
+```
+event: token
+data: {"data": "Hello"}
+
+```
+
+(the blank line marks the end of one event). The client reads events as
+they arrive instead of waiting for the whole response. Browsers, Python
+libraries, and even `curl -N` understand this format.
+
+### What is a bearer token?
+
+The simplest common way to protect an API. The client attaches a secret
+string to every request in a standard header:
+
+```
+Authorization: Bearer my-secret-token
+```
+
+"Bearer" literally means: whoever bears (carries) this token is allowed
+in. The server checks the token and rejects the request with status
+`401 Unauthorized` if it is wrong or missing. Because possession of the
+token IS the authentication, tokens must never be committed to git or
+written to logs.
+
+### What is PEP 723 (the odd comment block at the top of cli_api.py)?
+
+The API needs two extra libraries (fastapi, uvicorn) that the existing
+project does not declare -- and one constraint of this change was to not
+touch `pyproject.toml`. PEP 723 solves this: a Python script can declare
+its own dependencies in a specially formatted comment block:
+
+```python
+# /// script
+# dependencies = ["fastapi>=0.115", "uvicorn>=0.30", "agent-client"]
+# ///
+```
+
+When you run `uv run src/agent_client/cli_api.py`, uv reads that block,
+creates an isolated environment with those packages, and runs the script
+in it. Nothing is installed into the main project.
+
+## 5. The service core: AgentService and AgentEvent
+
+The heart of the design is separating "what the agent produces" from
+"how it is displayed". The CLI displays output by printing; a web UI
+displays it by updating a page; a bot posts a message. So the service
+core produces neutral events and lets each consumer render them.
+
+`AgentEvent` (in `agent_api.py`) is a tiny dataclass with two fields:
+
+| type | data | meaning |
+|------|------|---------|
+| `phase` | e.g. `"Routing"`, `"Calling tools"` | the graph moved to a new node -- what the CLI spinner used to show |
+| `token` | one text fragment | one streamed piece of the answer |
+| `answer` | the full answer text | always emitted last, so buffering clients can just take this one |
+| `error` | a safe message | something failed mid-stream |
+
+`AgentService` wraps the compiled LangGraph graph:
+
+- `AgentService.create()` -- an async factory that does the same startup
+  as the CLI: build the Azure OpenAI client, connect to the MCP server,
+  load the 12 tools, build and compile the graph. Called once when the
+  server starts, because connecting and indexing is slow.
+- `create_session()` -- returns a fresh uuid to use as a session id.
+- `stream(session_id, text)` -- runs one conversation turn and yields
+  AgentEvents as they happen. Internally it iterates the graph's
+  `astream_events` output exactly like the CLI loop in `agent.py` does;
+  the only difference is that it yields events instead of writing to the
+  terminal.
+- `ask(session_id, text)` -- convenience for non-streaming clients:
+  consumes `stream()` internally and returns just the final answer text.
+
+Importantly, `agent_api.py` imports `build_graph` and friends FROM
+`agent.py` -- the graph, the prompts, the specialists, and the routing
+logic are all shared, not copied. This mirrors how `scanner.py` already
+reuses the graph without modifying it.
+
+## 6. Authentication: how and why
+
+All auth code is in `auth_api.py`, about 100 lines.
+
+### The moving parts
+
+- `Principal` -- a dataclass describing WHO the caller is (`subject`,
+  plus a `claims` dict that stays empty for now). Today it is barely
+  used; it exists so that when real user identity arrives (see section
+  12), the rest of the code does not have to change shape.
+- `Authenticator` -- a Protocol (an interface): anything with an
+  `authenticate(token) -> Principal` method that raises `AuthError` on
+  bad input. The API endpoints depend only on this interface, never on
+  a concrete implementation. This is what makes auth "pluggable".
+- `StaticTokenAuthenticator` -- the implementation used today. Compares
+  the presented token to one shared secret.
+- `NoAuthAuthenticator` -- accepts everyone; exists only as an explicit
+  opt-out for local development.
+- `build_authenticator()` -- a factory that reads the `AGENT_API_AUTH`
+  environment variable and returns the right implementation.
+
+### AGENT_API_AUTH values
+
+| Value | Behavior |
+|-------|----------|
+| `static` (default) | Requires `Authorization: Bearer <token>` matching `AGENT_API_TOKEN`. If `AGENT_API_TOKEN` is not set, the server REFUSES TO START. |
+| `none` | No authentication. Local development only. |
+| `entra` | Reserved for Azure Entra OAuth2 -- currently rejected at startup. |
+| anything else | Startup error listing the valid options (a typo cannot silently disable auth). |
+
+### Three security details worth understanding
+
+**Constant-time comparison.** The token check uses
+`secrets.compare_digest(token, expected)` instead of `token == expected`.
+A naive `==` returns as soon as the first character differs, so comparing
+`"aXXX"` takes measurably less time than comparing `"secrXXX"` -- an
+attacker who measures response times can discover the token one character
+at a time. `compare_digest` always takes the same time regardless of
+where the difference is, closing that hole.
+
+**Fail closed.** If configuration is missing (static mode, no token set),
+the server raises an error at startup instead of running without auth.
+The safe behavior is the default; the unsafe behavior (`none`) requires
+an explicit, grep-able opt-in. This is also why the committed `.env_api`
+template leaves `AGENT_API_TOKEN` commented out -- shipping a default
+token like `change-me` would mean every deployment that forgot to change
+it is protected by a publicly known password.
+
+**Never log tokens.** Log lines mention subjects and session ids, never
+credential values.
+
+### How auth attaches to endpoints
+
+FastAPI has a feature called dependency injection: an endpoint can
+declare `principal: Principal = Depends(current_principal)` in its
+signature, and FastAPI runs `current_principal` before the endpoint.
+That function extracts the `Authorization: Bearer ...` header, asks the
+configured authenticator to validate it, and either returns a Principal
+(request proceeds) or raises HTTP `401` with a `WWW-Authenticate: Bearer`
+header (request rejected before the endpoint code ever runs). Every
+endpoint except `/health` declares this dependency -- `/health` stays
+open so monitoring probes work without credentials.
+
+## 7. The FastAPI app and its endpoints
+
+`create_app(service=None, authenticator=None)` builds the app. The two
+arguments exist for testing (tests inject fakes); in production both are
+`None` and a "lifespan" handler creates them at startup -- the
+authenticator from env config, the service by connecting to the MCP
+server. Lifespan is FastAPI's hook for run-once-at-startup work.
+
+| Method and path | Auth | Purpose |
+|-----------------|------|---------|
+| `GET /health` | no | liveness check; returns `{"status": "ok", "tools": 12}` |
+| `POST /sessions` | yes | create a conversation; returns `{"session_id": "..."}` |
+| `POST /sessions/{id}/messages` | yes | send a message, get `{"answer": "..."}` back in one response -- for bots and scripts |
+| `POST /sessions/{id}/messages/stream` | yes | send a message, receive an SSE stream of `phase`/`token`/`answer` events -- for live UIs |
+
+Why two message endpoints? A Teams or Slack bot cannot render a stream --
+it posts one complete message -- so forcing it to consume SSE would just
+push buffering work onto every bot author. Conversely a web UI without
+streaming feels frozen for the many seconds a tool-using answer takes.
+Offering both lets each client pick.
+
+Error behavior:
+
+- wrong or missing token -> `401` with a `WWW-Authenticate: Bearer` header
+- agent failure on the buffered endpoint -> `500` with a generic message
+  (the real traceback goes to the server log, not to the client)
+- agent failure mid-stream -> an `error` event inside the stream, because
+  the HTTP status line was already sent when streaming began
+- an unknown session id is NOT an error: with MemorySaver, any id simply
+  starts an empty history. Session ids are opaque strings to the server.
+
+## 8. Configuration
+
+`cli_api.py` loads two env files from `agent-client/`, in this order:
+
+1. `.env` -- your real, gitignored secrets (Azure key, API token)
+2. `.env_api` -- the committed template with every knob and placeholder
+   values
+
+Order matters: `load_dotenv` never overwrites a variable that is already
+set, so real values from `.env` (or the shell) always beat template
+placeholders.
+
+`.env_api` is the complete reference -- Azure OpenAI settings, agent
+behavior (`AGENT_LOG_LEVEL`, `KEEP_LAST_N_MSGS`, `MAX_TOOL_CONTENT_LEN`),
+MCP connection (`MCP_TRANSPORT`, `MCP_SERVER_URL`, ...), and the four
+API settings:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `AGENT_API_AUTH` | `static` | auth mode (see section 6) |
+| `AGENT_API_TOKEN` | unset | the shared secret for static mode |
+| `AGENT_API_HOST` | `127.0.0.1` | bind address (`0.0.0.0` to accept other machines) |
+| `AGENT_API_PORT` | `8080` | port |
+
+## 9. Running the API server
+
+```bash
+# terminal 1 -- the MCP server, exactly as before
+cd mcp-server && uv run mcp-docs-server
+
+# terminal 2 -- the API server
+cd agent-client
+export AGENT_API_TOKEN=pick-something-secret
+uv run src/agent_client/cli_api.py
+```
+
+The first run takes a moment while uv provisions fastapi and uvicorn
+(PEP 723, section 4). The server logs
+`Starting Access Governance Agent API on 127.0.0.1:8080` and then
+`Agent API ready (12 tools)` once the MCP connection is up.
+
+The existing CLI and scanner are unaffected and run exactly as before.
+
+## 10. Calling the API -- worked examples
+
+### With curl
+
+```bash
+TOKEN=pick-something-secret
+BASE=http://127.0.0.1:8080
+
+# 1. liveness (no token needed)
+curl $BASE/health
+
+# 2. create a session
+SID=$(curl -s -X POST $BASE/sessions \
+  -H "Authorization: Bearer $TOKEN" | python3 -c \
+  "import sys,json;print(json.load(sys.stdin)['session_id'])")
+
+# 3a. buffered -- one JSON answer
+curl -X POST $BASE/sessions/$SID/messages \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "How do I set up delegations?"}'
+
+# 3b. streaming -- events as they happen (-N disables curl buffering)
+curl -N -X POST $BASE/sessions/$SID/messages/stream \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What access do finance analysts have?"}'
+```
+
+### From Python (a minimal bot-style client)
+
+```python
+import requests
+
+BASE = "http://127.0.0.1:8080"
+HEADERS = {"Authorization": "Bearer pick-something-secret"}
+
+session_id = requests.post(f"{BASE}/sessions", headers=HEADERS).json()["session_id"]
+
+reply = requests.post(
+    f"{BASE}/sessions/{session_id}/messages",
+    headers=HEADERS,
+    json={"message": "How do I order an entitlement?"},
+)
+print(reply.json()["answer"])
+```
+
+Because both calls reuse `session_id`, a follow-up like
+`{"message": "and who approves it?"}` keeps the conversation context.
+
+### Reading the stream from Python
+
+```python
+import json
+import requests
+
+with requests.post(
+    f"{BASE}/sessions/{session_id}/messages/stream",
+    headers=HEADERS,
+    json={"message": "hello"},
+    stream=True,
+) as response:
+    event_type = None
+    for line in response.iter_lines(decode_unicode=True):
+        if line.startswith("event: "):
+            event_type = line.removeprefix("event: ")
+        elif line.startswith("data: "):
+            data = json.loads(line.removeprefix("data: "))["data"]
+            if event_type == "token":
+                print(data, end="", flush=True)   # live typing
+            elif event_type == "phase":
+                pass                              # could update a status bar
+            elif event_type == "answer":
+                print()                           # data holds the full text
+```
+
+## 11. Testing
+
+The test suite (`tests_api/test_agent_api.py`, 18 tests) needs neither
+Azure OpenAI credentials nor a running MCP server. It builds a `FakeAgent`
+that replays canned graph events, so the tests exercise the real
+AgentService event handling, the real endpoints, and the real auth code
+against predictable input:
+
+- event sequence: phase -> tokens -> answer; fallback when nothing streams
+- `ask()` returns the assembled answer
+- auth matrix: no header 401, wrong token 401, correct token 200,
+  `/health` open, `none` mode accepts all, static mode without a token
+  refuses startup
+- SSE wire format parses and ends with the `answer` event
+
+```bash
+cd agent-client
+uv run --with pytest --with fastapi --with uvicorn --with httpx \
+  pytest tests_api/ -q
+```
+
+## 12. The future: Azure Entra OAuth2
+
+The static token is a stopgap: one shared secret, no idea WHO is calling.
+The end goal is Azure Entra ID (formerly Azure AD): each user or app
+obtains a short-lived JWT access token from Microsoft, and the API
+validates it cryptographically.
+
+The design already reserves the slot. What changes when Entra lands:
+
+1. a new `EntraAuthenticator` class in `auth_api.py` implementing the
+   same `authenticate(token) -> Principal` interface. It will fetch
+   Microsoft's public signing keys (JWKS), verify the JWT signature,
+   issuer, audience, and expiry, and build a Principal whose `subject`
+   is the user's id and whose `claims` carry name/roles/etc.
+2. `build_authenticator()` grows an `entra` branch reading tenant id and
+   audience from env vars.
+3. a dependency on a JWT library (e.g. `pyjwt[crypto]`).
+
+What does NOT change: endpoints, clients, the header format. OAuth2
+access tokens travel in `Authorization: Bearer <jwt>` -- the exact header
+clients already send. That is why the bearer scheme was chosen on day
+one. Once real identity exists, sessions can additionally be bound to
+`principal.subject` so callers only see their own conversations.
+
+## 13. What was deliberately not changed
+
+- `agent.py`, `cli.py`, `scanner.py`, `scanner_cli.py`,
+  `incident_sources.py`, `llm.py` -- untouched; the CLI works as before
+- `pyproject.toml` -- untouched; `pyproject_api.toml` documents the exact
+  future merge (add fastapi + uvicorn, add the `agent-api` script)
+- `.env` handling and `CLAUDE.md` -- untouched
+- the entire `mcp-server/` package -- untouched
+
+Accepted tradeoff: the CLI keeps its own streaming loop in `agent.py`
+while the API has the event-based loop in `agent_api.py`. The two share
+the graph and all agent logic but render output separately. A later
+cleanup can port the CLI onto AgentService events and delete the
+duplication once the additive-only constraint is lifted.
