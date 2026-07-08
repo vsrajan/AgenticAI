@@ -10,8 +10,10 @@ agent_api.py   -- AgentService core (event-stream wrapper around the
 auth_api.py    -- pluggable authentication (static bearer token now,
                   Azure Entra OAuth2 later)
 cli_api.py     -- server entry point (PEP 723 script, runs uvicorn)
-.env_api       -- configuration template (committed, placeholders only)
-pyproject_api.toml -- merge-ready manifest; see the header comment
+.env_api       -- complete framework + API configuration template
+                  (committed, placeholders only; superset of .env.example)
+pyproject_api.toml -- complete merge-ready manifest (superset of
+                  pyproject.toml); see the header comment
 ```
 
 The existing CLI (`uv run agent-client`), scanner, and MCP server are
@@ -33,7 +35,32 @@ uv run src/agent_client/cli_api.py
 The PEP 723 header in cli_api.py makes uv provision fastapi and uvicorn
 in an isolated environment -- pyproject.toml is not modified.
 
-Configuration (all optional except the token):
+## Configuration
+
+`.env_api` is the complete configuration template for running the whole
+framework through the API -- it contains every variable the agent needs
+(a superset of `.env.example`) plus the API-specific ones. It is
+committed with placeholders only; real values (the Azure key, the API
+token) go in the gitignored `.env` or the shell environment, which
+always take precedence.
+
+Framework variables (same meaning as in `.env.example`):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `AZURE_OPENAI_API_KEY` | -- | Azure OpenAI API key (secret -- set in `.env`) |
+| `AZURE_OPENAI_ENDPOINT` | -- | e.g. `https://<resource>.openai.azure.com/` |
+| `AZURE_OPENAI_DEPLOYMENT` | `gpt-4o` | deployment name |
+| `AZURE_OPENAI_API_VERSION` | `2024-12-01-preview` | API version |
+| `AGENT_LOG_LEVEL` | `INFO` | agent logging level |
+| `KEEP_LAST_N_MSGS` | `20` | context window in messages (0 = unlimited) |
+| `MAX_TOOL_CONTENT_LEN` | `80000` | max characters per tool response (0 = unlimited) |
+| `MCP_SERVER_NAME` | `access-governance-docs` | must match the MCP server |
+| `MCP_TRANSPORT` | `sse` | `sse` or `stdio` |
+| `MCP_SERVER_URL` | `http://127.0.0.1:8000/sse` | SSE transport URL |
+| `MCP_SERVER_COMMAND` / `MCP_SERVER_ARGS` | unset | stdio transport command |
+
+API variables:
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
@@ -42,8 +69,10 @@ Configuration (all optional except the token):
 | `AGENT_API_HOST` | `127.0.0.1` | bind address |
 | `AGENT_API_PORT` | `8080` | port |
 
-The usual agent variables (`AZURE_OPENAI_*`, `MCP_SERVER_URL` /
-`MCP_TRANSPORT`) are read from `.env` exactly like the CLI.
+The MCP server process has its own settings (`MCP_DOCS_DIR`, `MCP_HOST`,
+`MCP_PORT`, `MCP_LOG_LEVEL`) read from `mcp-server/.env` -- see
+`mcp-server/.env.example`. They are listed as a commented reference
+section at the bottom of `.env_api`.
 
 ## Authentication
 

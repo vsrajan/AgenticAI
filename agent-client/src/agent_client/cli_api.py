@@ -18,11 +18,13 @@ environment without touching pyproject.toml:
 
     cd agent-client && uv run src/agent_client/cli_api.py
 
-Configuration (see .env_api for the template):
+Configuration: .env_api is the complete template for the whole framework
+(Azure OpenAI, agent behavior, MCP connection) plus the API settings:
     AGENT_API_AUTH   -- static (default) or none
     AGENT_API_TOKEN  -- shared bearer token, required in static mode
     AGENT_API_HOST   -- bind address (default 127.0.0.1)
     AGENT_API_PORT   -- port (default 8080)
+Real secrets belong in the gitignored .env, which takes precedence.
 """
 
 import logging
