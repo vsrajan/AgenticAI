@@ -11,6 +11,9 @@ Modes (selected via AGENT_API_AUTH):
   entra  -- reserved for the future Azure Entra JWT/JWKS validator
 
 Never log token values.
+
+For a beginner-oriented explanation of bearer tokens and this design,
+see docs/agent_api.md section 6.
 """
 
 import os
@@ -23,6 +26,9 @@ class AuthError(Exception):
     """Raised when a presented credential is missing or invalid."""
 
 
+# @dataclass auto-generates __init__, __repr__, and __eq__ from the
+# class attributes below, so Principal("alice") just works without
+# writing boilerplate.
 @dataclass
 class Principal:
     """The authenticated caller.
@@ -32,9 +38,18 @@ class Principal:
     so sessions can later be bound to a real user identity.
     """
     subject: str
+    # default_factory=dict gives each Principal its OWN empty dict.
+    # writing claims: dict = {} instead would share one dict between
+    # every instance -- a classic python pitfall with mutable defaults.
     claims: dict = field(default_factory=dict)
 
 
+# Protocol is python's way of describing an interface: any class that
+# has an authenticate(token) -> Principal method counts as an
+# Authenticator automatically -- no inheritance needed. The API layer
+# depends only on this interface, which is what makes auth "pluggable":
+# swapping StaticTokenAuthenticator for a future EntraAuthenticator
+# changes nothing in the endpoint code.
 class Authenticator(Protocol):
     """Validates a bearer token and returns the caller's Principal."""
 
@@ -52,7 +67,12 @@ class StaticTokenAuthenticator:
         self._expected = expected_token
 
     def authenticate(self, token: str) -> Principal:
-        # constant-time compare so the token can't be probed byte by byte
+        # secrets.compare_digest instead of == : a plain == returns as
+        # soon as the first character differs, so comparing a wrong
+        # token that starts with the right characters takes slightly
+        # longer -- an attacker measuring response times could discover
+        # the token one character at a time. compare_digest always
+        # takes the same time no matter where the difference is.
         if not token or not secrets.compare_digest(token, self._expected):
             raise AuthError("Invalid or missing bearer token.")
         return Principal(subject="static-client")

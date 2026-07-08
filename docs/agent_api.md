@@ -6,6 +6,14 @@ who knows some Python but has little experience with FastAPI, web APIs, or
 authentication. Everything described here lives in new files suffixed
 `_api`; no pre-existing file was changed.
 
+This guide and the source files are designed to be read together: this
+document covers the concepts and the why, while the code in
+`agent_api.py`, `auth_api.py`, `cli_api.py`, and
+`tests_api/test_agent_api.py` carries detailed inline comments
+explaining each non-obvious Python and FastAPI construct (dataclasses,
+protocols, async generators, dependency injection, lifespan, SSE)
+right where it is used.
+
 ## Contents
 
 1. [Why an API?](#1-why-an-api)

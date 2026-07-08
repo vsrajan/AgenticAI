@@ -41,7 +41,14 @@ def _node_start_event(node):
 
 
 class FakeAgent:
-    """Replays canned events; mimics the compiled graph's async surface."""
+    """Replays canned events; mimics the compiled graph's async surface.
+
+    AgentService only calls two methods on the real compiled graph
+    (astream_events and aget_state), so a stand-in with those two
+    methods is enough to test all the service and API code without an
+    LLM or MCP server. This is called duck typing: the object just has
+    to quack like a graph.
+    """
 
     def __init__(self, events, final_messages=None):
         self.events = events
@@ -142,6 +149,9 @@ def test_no_auth_accepts_anything():
     assert NoAuthAuthenticator().authenticate("").subject == "anonymous"
 
 
+# monkeypatch is a pytest fixture for temporarily changing env vars --
+# every change is automatically undone when the test ends, so tests
+# cannot leak configuration into each other
 def test_build_authenticator_static_requires_token(monkeypatch):
     monkeypatch.setenv("AGENT_API_AUTH", "static")
     monkeypatch.delenv("AGENT_API_TOKEN", raising=False)
@@ -168,6 +178,9 @@ AUTH = {"Authorization": "Bearer secret"}
 
 
 def make_client(service=None, authenticator=None):
+    # TestClient calls the FastAPI app directly in-process -- no real
+    # network socket, but the same request parsing, auth dependency,
+    # and response serialization as a live server
     if service is None:
         service = make_service(STREAMING_EVENTS)
     if authenticator is None:

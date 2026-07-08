@@ -14,6 +14,8 @@ working from the same environment):
 
 Restore the original manifest with: git checkout pyproject.toml
 
+For a full beginner-oriented guide to the API, see docs/agent_api.md.
+
 Configuration: everything is read from the single gitignored .env file
 (same file the CLI uses). Copy .env_api over it (or copy the values you
 need into it) before starting -- it is the complete template covering
@@ -49,6 +51,9 @@ logger = logging.getLogger("agent_client.cli_api")
 
 def main():
     """Entry point for the agent API server."""
+    # imports live inside main (same pattern as cli.py) so that the
+    # .env loading and logging setup at module level above have already
+    # run before any agent code executes
     import uvicorn
 
     from agent_client.agent_api import create_app
@@ -57,6 +62,11 @@ def main():
     port = int(os.environ.get("AGENT_API_PORT", "8080"))
 
     logger.info("Starting Access Governance Agent API on %s:%d", host, port)
+    # FastAPI only describes the app -- uvicorn is the actual web
+    # server. This call listens on host:port and hands every incoming
+    # HTTP request to the app; it blocks until the process is stopped
+    # (ctrl-c). Startup work (MCP connection, auth config) runs inside
+    # create_app's lifespan handler on the first lines of serving.
     uvicorn.run(create_app(), host=host, port=port)
 
 

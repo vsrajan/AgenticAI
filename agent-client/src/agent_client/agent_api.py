@@ -14,8 +14,9 @@ Endpoints:
 Auth: Authorization: Bearer <token> on everything except /health.
 See auth_api.py for the authenticator model.
 
-Run via cli_api.py:
-    cd agent-client && uv run src/agent_client/cli_api.py
+Started by cli_api.py (uv run agent-api). For a full walkthrough of
+the design, the concepts used here (FastAPI, SSE, bearer tokens), and
+worked client examples, see docs/agent_api.md.
 """
 
 import json
@@ -70,6 +71,11 @@ class AgentService:
         self._agent = agent
         self.tool_count = tool_count
 
+    # an async classmethod factory instead of doing this work in
+    # __init__: connecting to the MCP server requires await, and
+    # python does not allow __init__ to be async. So construction is
+    # two steps -- create() does the slow async setup, then calls the
+    # plain __init__ with the finished pieces.
     @classmethod
     async def create(cls, checkpointer=None) -> "AgentService":
         """Connect to the MCP server, load tools, build and compile the graph.
@@ -96,6 +102,10 @@ class AgentService:
     def _config(self, session_id: str) -> dict:
         return {"configurable": {"thread_id": session_id}, "recursion_limit": 50}
 
+    # async def + yield makes this an async generator: callers loop
+    # over it with "async for event in service.stream(...)" and receive
+    # each event the moment it is produced, instead of waiting for the
+    # whole answer. This is what lets the API stream tokens live.
     async def stream(self, session_id: str, user_input: str) -> AsyncIterator[AgentEvent]:
         """Run one turn and yield AgentEvents as they happen.
 
@@ -138,7 +148,11 @@ class AgentService:
         yield AgentEvent("answer", messages[-1].content if messages else "")
 
     async def ask(self, session_id: str, user_input: str) -> str:
-        """Run one turn and return the complete answer text (no streaming)."""
+        """Run one turn and return the complete answer text (no streaming).
+
+        Consumes stream() internally and keeps only the final answer
+        event, so both entry points share one code path.
+        """
         answer = ""
         async for event in self.stream(session_id, user_input):
             if event.type == "answer":
@@ -153,10 +167,21 @@ class AgentService:
 
 # -- FastAPI app --
 
+# a pydantic model describes the expected JSON request body. FastAPI
+# parses and validates incoming JSON against it automatically: a POST
+# body of {"message": "hi"} becomes MessageRequest(message="hi"), and
+# a body without "message" is rejected with a 422 error before our
+# endpoint code ever runs.
 class MessageRequest(BaseModel):
     message: str
 
 
+# HTTPBearer is a FastAPI helper that extracts the
+# "Authorization: Bearer <token>" header from a request.
+# auto_error=False means a MISSING header is passed to us as None
+# instead of being rejected immediately -- we want the configured
+# authenticator to make that call (none mode accepts missing headers,
+# static mode rejects them).
 _bearer = HTTPBearer(auto_error=False)
 
 
@@ -172,6 +197,11 @@ def create_app(
     MCP server.
     """
 
+    # lifespan is FastAPI's startup/shutdown hook: everything before
+    # the yield runs once when the server starts (before any request is
+    # accepted), everything after the yield would run at shutdown. The
+    # slow work -- reading auth config, connecting to the MCP server,
+    # building the graph -- happens here exactly once, not per request.
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         if app.state.authenticator is None:
@@ -182,9 +212,23 @@ def create_app(
         yield
 
     app = FastAPI(title="Access Governance Agent API", lifespan=lifespan)
+    # app.state is a scratch area FastAPI provides for objects that
+    # should live as long as the server; endpoints read them back from
+    # there. None here means "build at startup" (see lifespan above);
+    # tests pass ready-made fakes instead.
     app.state.service = service
     app.state.authenticator = authenticator
 
+    # This function is a FastAPI "dependency". Any endpoint that
+    # declares an argument like
+    #     principal: Principal = Depends(current_principal)
+    # gets this function run BEFORE its own body. If this function
+    # returns a value, the request proceeds and the endpoint receives
+    # that value; if it raises HTTPException, the client gets that
+    # error response and the endpoint body never runs. This is how one
+    # auth check protects every endpoint without repeating code.
+    # Depends(_bearer) chains the same mechanism one level down: FastAPI
+    # runs the HTTPBearer helper first and hands us its result here.
     async def current_principal(
         request: Request,
         credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
@@ -193,12 +237,20 @@ def create_app(
         try:
             return request.app.state.authenticator.authenticate(token)
         except AuthError:
+            # 401 = "who are you?" -- the standard status for missing or
+            # bad credentials. The WWW-Authenticate header tells clients
+            # which auth scheme this API expects.
             raise HTTPException(
                 status_code=401,
                 detail="Invalid or missing bearer token.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+    # @app.get / @app.post decorators register a function as the
+    # handler for one URL and HTTP method. Returning a dict makes
+    # FastAPI serialize it to JSON automatically.
+    # /health takes no Depends(current_principal), so it is the one
+    # endpoint that works without a token -- monitoring probes need it.
     @app.get("/health")
     async def health():
         service = app.state.service
@@ -210,6 +262,9 @@ def create_app(
         logger.info("Created session %s for %s", session_id, principal.subject)
         return {"session_id": session_id}
 
+    # {session_id} in the path is a variable: FastAPI matches the URL
+    # and passes the value as the session_id argument. The request
+    # body is parsed into MessageRequest (see above).
     @app.post("/sessions/{session_id}/messages")
     async def send_message(
         session_id: str,
@@ -220,6 +275,8 @@ def create_app(
         try:
             answer = await app.state.service.ask(session_id, request.message)
         except Exception:
+            # log the full traceback server-side but send the client a
+            # generic message -- internals never leak into responses
             logger.exception("Error processing message for session %s", session_id)
             raise HTTPException(status_code=500, detail="Error processing the message.")
         return {"answer": answer}
@@ -232,13 +289,25 @@ def create_app(
     ):
         """SSE stream of phase/token/answer events -- for live UIs."""
 
+        # sse() is an async generator producing Server-Sent Events, the
+        # standard format for pushing updates over one open HTTP
+        # response (see docs/agent_api.md section 4). Each event is two
+        # text lines plus a blank line as separator:
+        #     event: token
+        #     data: {"data": "Hello"}
+        #
+        # StreamingResponse sends each yielded string to the client
+        # immediately instead of collecting everything first -- that is
+        # the whole point: the client sees tokens as they are generated.
         async def sse() -> AsyncIterator[str]:
             try:
                 async for event in app.state.service.stream(session_id, request.message):
                     payload = json.dumps({"data": event.data})
                     yield f"event: {event.type}\ndata: {payload}\n\n"
             except Exception:
-                # the response has already started, so signal errors in-band
+                # too late for an HTTP error status -- the 200 header
+                # went out when streaming began. Signal failure in-band
+                # as an error event instead.
                 logger.exception("Error streaming message for session %s", session_id)
                 payload = json.dumps({"data": "Error processing the message."})
                 yield f"event: error\ndata: {payload}\n\n"
