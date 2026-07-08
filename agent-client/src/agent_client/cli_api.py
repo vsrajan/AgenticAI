@@ -1,22 +1,18 @@
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#     "fastapi>=0.115",
-#     "uvicorn>=0.30",
-#     "agent-client",
-# ]
-#
-# [tool.uv.sources]
-# agent-client = { path = "../..", editable = true }
-# ///
 """Command-line entry point for the agent API server.
 
 Mirrors cli.py's shape (load env -> configure logging -> run) but starts
-the HTTP API instead of the interactive loop. The PEP 723 block above
-lets uv provision fastapi/uvicorn plus this package in an isolated
-environment without touching pyproject.toml:
+the HTTP API instead of the interactive loop.
 
-    cd agent-client && uv run src/agent_client/cli_api.py
+To run the API, activate the API manifest first (pyproject_api.toml is
+a complete superset of pyproject.toml, so the CLI and scanner keep
+working from the same environment):
+
+    cd agent-client
+    cp pyproject_api.toml pyproject.toml
+    uv sync
+    uv run agent-api
+
+Restore the original manifest with: git checkout pyproject.toml
 
 Configuration: .env_api is the complete template for the whole framework
 (Azure OpenAI, agent behavior, MCP connection) plus the API settings:

@@ -9,11 +9,11 @@ agent_api.py   -- AgentService core (event-stream wrapper around the
                   LangGraph graph) + FastAPI app and endpoints
 auth_api.py    -- pluggable authentication (static bearer token now,
                   Azure Entra OAuth2 later)
-cli_api.py     -- server entry point (PEP 723 script, runs uvicorn)
+cli_api.py     -- server entry point (runs uvicorn)
 .env_api       -- complete framework + API configuration template
                   (committed, placeholders only; superset of .env.example)
-pyproject_api.toml -- complete merge-ready manifest (superset of
-                  pyproject.toml); see the header comment
+pyproject_api.toml -- complete manifest for the API (superset of
+                  pyproject.toml); activate by copying over pyproject.toml
 ```
 
 The existing CLI (`uv run agent-client`), scanner, and MCP server are
@@ -21,19 +21,25 @@ untouched and work exactly as before.
 
 ## Run
 
-The MCP server must be running first (see the repository README). Then:
+The MCP server must be running first (see the repository README). Then
+activate the API manifest and start the server:
 
 ```bash
 cd agent-client
 
+# activate the API manifest (a superset of pyproject.toml, so the CLI
+# and scanner keep working from the same environment)
+cp pyproject_api.toml pyproject.toml
+uv sync
+
 # set a token (or put AGENT_API_TOKEN in the gitignored .env)
 export AGENT_API_TOKEN=your-secret-token
 
-uv run src/agent_client/cli_api.py
+uv run agent-api
 ```
 
-The PEP 723 header in cli_api.py makes uv provision fastapi and uvicorn
-in an isolated environment -- pyproject.toml is not modified.
+To go back to the original manifest: `git checkout pyproject.toml`
+(and `uv sync` again).
 
 ## Configuration
 

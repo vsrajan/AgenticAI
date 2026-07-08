@@ -83,7 +83,7 @@ All new, all in `agent-client/`:
 | `src/agent_client/auth_api.py` | Authentication: token checking, pluggable for the future |
 | `src/agent_client/cli_api.py` | The entry point that starts the web server |
 | `.env_api` | Complete configuration template (committed; placeholders only) |
-| `pyproject_api.toml` | Merge-ready copy of pyproject.toml including the API additions |
+| `pyproject_api.toml` | Complete manifest for the API (superset of pyproject.toml); copy over pyproject.toml to activate |
 | `README_api.md` | Quick-reference for running the API |
 | `tests_api/test_agent_api.py` | 18 tests that run without Azure or the MCP server |
 
@@ -163,22 +163,30 @@ in. The server checks the token and rejects the request with status
 token IS the authentication, tokens must never be committed to git or
 written to logs.
 
-### What is PEP 723 (the odd comment block at the top of cli_api.py)?
+### Why pyproject_api.toml, and how do the API dependencies get installed?
 
 The API needs two extra libraries (fastapi, uvicorn) that the existing
 project does not declare -- and one constraint of this change was to not
-touch `pyproject.toml`. PEP 723 solves this: a Python script can declare
-its own dependencies in a specially formatted comment block:
+modify `pyproject.toml` in the repository. The catch: uv and pip only
+recognize the literal filename `pyproject.toml`; a file named
+`pyproject_api.toml` is never read by any tool.
 
-```python
-# /// script
-# dependencies = ["fastapi>=0.115", "uvicorn>=0.30", "agent-client"]
-# ///
+The solution is deliberately simple. `pyproject_api.toml` is a complete
+superset of `pyproject.toml` -- the same dependencies and console
+scripts, plus fastapi, uvicorn, and an `agent-api` entry point. When you
+want to run the API, you activate it by copying it over `pyproject.toml`
+and syncing:
+
+```bash
+cd agent-client
+cp pyproject_api.toml pyproject.toml
+uv sync
 ```
 
-When you run `uv run src/agent_client/cli_api.py`, uv reads that block,
-creates an isolated environment with those packages, and runs the script
-in it. Nothing is installed into the main project.
+Because it is a superset, the CLI (`uv run agent-client`) and the
+scanner (`uv run scan-cli`) keep working from the same environment.
+The repository copy of `pyproject.toml` stays untouched in git -- to go
+back, run `git checkout pyproject.toml` and `uv sync` again.
 
 ## 5. The service core: AgentService and AgentEvent
 
@@ -342,12 +350,16 @@ cd mcp-server && uv run mcp-docs-server
 
 # terminal 2 -- the API server
 cd agent-client
+
+# one-time per checkout: activate the API manifest (see section 4)
+cp pyproject_api.toml pyproject.toml
+uv sync
+
 export AGENT_API_TOKEN=pick-something-secret
-uv run src/agent_client/cli_api.py
+uv run agent-api
 ```
 
-The first run takes a moment while uv provisions fastapi and uvicorn
-(PEP 723, section 4). The server logs
+The server logs
 `Starting Access Governance Agent API on 127.0.0.1:8080` and then
 `Agent API ready (12 tools)` once the MCP connection is up.
 
@@ -478,8 +490,9 @@ one. Once real identity exists, sessions can additionally be bound to
 
 - `agent.py`, `cli.py`, `scanner.py`, `scanner_cli.py`,
   `incident_sources.py`, `llm.py` -- untouched; the CLI works as before
-- `pyproject.toml` -- untouched; `pyproject_api.toml` documents the exact
-  future merge (add fastapi + uvicorn, add the `agent-api` script)
+- `pyproject.toml` -- untouched in the repository; running the API means
+  locally copying `pyproject_api.toml` over it (section 4), and
+  `git checkout pyproject.toml` restores the original
 - `.env` handling and `CLAUDE.md` -- untouched
 - the entire `mcp-server/` package -- untouched
 

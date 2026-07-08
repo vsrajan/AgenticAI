@@ -1,14 +1,18 @@
-# Merge-ready manifest for the agent API layer.
+# Manifest for the agent API layer.
 #
-# NOT directly executable: uv and pip only recognize the literal filename
-# pyproject.toml, so this file exists as documentation of exactly what to
-# merge into pyproject.toml when the API graduates from additive preview
-# to first-class citizen (the diff vs pyproject.toml: the two fastapi/
-# uvicorn dependencies and the agent-api console script).
+# uv and pip only recognize the literal filename pyproject.toml, so to
+# run the API activate this manifest and sync:
+#     cd agent-client
+#     cp pyproject_api.toml pyproject.toml
+#     uv sync
+#     uv run agent-api
 #
-# Until then, run the API without touching pyproject.toml via the PEP 723
-# inline metadata in cli_api.py:
-#     cd agent-client && uv run src/agent_client/cli_api.py
+# This file is a complete superset of pyproject.toml -- same
+# dependencies and scripts plus fastapi/uvicorn and the agent-api entry
+# point -- so the CLI (agent-client) and scanner (scan-cli) keep working
+# from the same environment.
+#
+# Restore the original manifest with: git checkout pyproject.toml
 
 [project]
 name = "agent-client"
