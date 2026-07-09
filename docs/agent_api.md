@@ -95,7 +95,7 @@ All new, all in `agent-client/`:
 | `.env_api` | Configuration TEMPLATE -- never read by code; copy to the single `.env` file before starting |
 | `pyproject_api.toml` | Complete manifest for the API (superset of pyproject.toml); copy over pyproject.toml to activate |
 | `README_api.md` | Quick-reference for running the API |
-| `tests_api/test_agent_api.py` | 18 tests that run without Azure or the MCP server |
+| `tests_api/test_agent_api.py` | 19 tests that run without Azure or the MCP server |
 
 The naming convention: where new behavior parallels an existing file, the
 new file takes the same name plus `_api` (`cli.py` -> `cli_api.py`,
@@ -548,7 +548,7 @@ Two implementation details worth knowing (both commented in the file):
 
 ## 12. Testing
 
-The test suite (`tests_api/test_agent_api.py`, 18 tests) needs neither
+The test suite (`tests_api/test_agent_api.py`, 19 tests) needs neither
 Azure OpenAI credentials nor a running MCP server. It builds a `FakeAgent`
 that replays canned graph events, so the tests exercise the real
 AgentService event handling, the real endpoints, and the real auth code
