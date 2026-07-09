@@ -25,12 +25,13 @@ right where it is used.
 6. [Authentication: how and why](#6-authentication-how-and-why)
 7. [The FastAPI app and its endpoints](#7-the-fastapi-app-and-its-endpoints)
 8. [Defining the server vs starting it](#8-defining-the-server-vs-starting-it)
-9. [Configuration -- one single .env file](#9-configuration----one-single-env-file)
-10. [Running the API server](#10-running-the-api-server)
-11. [Calling the API -- worked examples](#11-calling-the-api----worked-examples)
-12. [Testing](#12-testing)
-13. [The future: Azure Entra OAuth2](#13-the-future-azure-entra-oauth2)
-14. [What was deliberately not changed](#14-what-was-deliberately-not-changed)
+9. [Session hygiene: bounded memory and one turn at a time](#9-session-hygiene-bounded-memory-and-one-turn-at-a-time)
+10. [Configuration -- one single .env file](#10-configuration----one-single-env-file)
+11. [Running the API server](#11-running-the-api-server)
+12. [Calling the API -- worked examples](#12-calling-the-api----worked-examples)
+13. [Testing](#13-testing)
+14. [The future: Azure Entra OAuth2](#14-the-future-azure-entra-oauth2)
+15. [What was deliberately not changed](#15-what-was-deliberately-not-changed)
 
 ---
 
@@ -257,7 +258,7 @@ All auth code is in `auth_api.py`, about 100 lines.
 - `Principal` -- a dataclass describing WHO the caller is (`subject`,
   plus a `claims` dict that stays empty for now). Today it is barely
   used; it exists so that when real user identity arrives (see section
-  12), the rest of the code does not have to change shape.
+  14), the rest of the code does not have to change shape.
 - `Authenticator` -- a Protocol (an interface): anything with an
   `authenticate(token) -> Principal` method that raises `AuthError` on
   bad input. The API endpoints depend only on this interface, never on
@@ -402,10 +403,116 @@ Why the split matters: because `agent_api.py` never starts anything on
 import, the test suite can call `create_app()` directly, hand the app
 to FastAPI's `TestClient`, and exercise every endpoint with no port, no
 uvicorn, and no process management -- while injecting a fake agent
-instead of the real one (see section 12). If the module started the
+instead of the real one (see section 13). If the module started the
 server at import time, none of that would be possible.
 
-## 9. Configuration -- one single .env file
+## 9. Session hygiene: bounded memory and one turn at a time
+
+The first API release had two deliberate gaps, found in a later code
+review and fixed together. Both fixes live in
+[`agent_api.py`](../agent-client/src/agent_client/agent_api.py); this
+section explains the problems and walks the code. (Line links are
+current as of this writing; the symbol names are the stable
+reference.)
+
+### Problem 1: server memory could grow forever
+
+Three things compounded:
+
+1. **Nothing was ever freed.** Conversation state lives in `MemorySaver`,
+   a dict inside the server process. Sessions were added on every
+   `POST /sessions` but never removed -- a session abandoned weeks ago
+   cost as much memory as an active one, until a restart threw
+   everything away. This was harmless in the CLI (one thread id, process
+   exits when you quit) but the API moved the same checkpointer into a
+   long-running multi-session process.
+2. **Each session grows faster than expected.** LangGraph saves a
+   checkpoint after every graph step (router, specialist, tools, ...),
+   and MemorySaver keeps all of them, each holding the full message
+   list at that moment. Storage per conversation grows roughly with the
+   square of its length -- and stored tool results are the untrimmed
+   originals, which can be tens of kilobytes each.
+3. **Clients controlled how many sessions existed.** Any string was
+   accepted as a session id -- `POST /sessions/anything/messages`
+   silently created state. The memory ceiling was set by clients, not
+   the server.
+
+### Problem 2: concurrent messages could corrupt a conversation
+
+Nothing stopped two simultaneous POSTs with the same session id. Both
+turns would write into the same LangGraph thread at once, interleaving
+their checkpoints -- most likely producing garbled history rather than
+a crash, which is worse because it is quiet.
+
+### The fix: a session registry inside AgentService
+
+One structure solves both problems. Every live session gets a
+[`_Session`](../agent-client/src/agent_client/agent_api.py#L71)
+bookkeeping entry holding two things: a `last_used` timestamp (taken
+from `time.monotonic()`, a steady clock that never jumps backwards)
+and an `asyncio.Lock`. The registry itself is a dict on
+[`AgentService`](../agent-client/src/agent_client/agent_api.py#L101),
+configured by two env vars read in `AgentService.create()`:
+`AGENT_API_SESSION_TTL_MINUTES` (default 60) and
+`AGENT_API_MAX_SESSIONS` (default 500).
+
+How each piece addresses the problems:
+
+- **Explicit sessions only.**
+  [`create_session()`](../agent-client/src/agent_client/agent_api.py#L146)
+  registers every id it mints, and
+  [`_require_session()`](../agent-client/src/agent_client/agent_api.py#L163)
+  raises `UnknownSessionError` for anything not in the registry --
+  which the endpoints translate to a `404` with a "create a new
+  session" hint. Ids can no longer be invented by clients (closes
+  problem 1, layer 3). The streaming endpoint
+  [checks before the response starts](../agent-client/src/agent_client/agent_api.py#L494)
+  via `has_session()`, because once streaming begins the HTTP status
+  line has already been sent and a 404 can no longer be delivered.
+- **TTL eviction.**
+  [`sweep_expired_sessions()`](../agent-client/src/agent_client/agent_api.py#L182)
+  evicts every session idle longer than the TTL;
+  [`sweep_loop()`](../agent-client/src/agent_client/agent_api.py#L193)
+  runs it once a minute as a background task that the app's
+  [lifespan handler](../agent-client/src/agent_client/agent_api.py#L363)
+  starts at boot and cancels at shutdown.
+- **Eviction actually frees the memory.**
+  [`_evict()`](../agent-client/src/agent_client/agent_api.py#L171)
+  removes the registry entry AND calls the checkpointer's
+  `delete_thread()` -- the second part is the one that matters, because
+  the checkpoints are where the megabytes live (problem 1, layers 1-2).
+- **LRU cap as a backstop.** When the registry is at
+  `AGENT_API_MAX_SESSIONS`,
+  [`create_session()`](../agent-client/src/agent_client/agent_api.py#L146)
+  evicts the least recently used session before minting a new id, so
+  even a client that leaks sessions cannot push memory past the cap.
+- **One turn at a time.**
+  [`stream()`](../agent-client/src/agent_client/agent_api.py#L210) runs
+  the whole turn inside
+  [`async with session.lock`](../agent-client/src/agent_client/agent_api.py#L229).
+  A second message on the same session waits for the first to finish
+  instead of interleaving writes (closes problem 2). Different sessions
+  are unaffected -- each has its own lock. The turn also refreshes
+  `last_used` when it completes, so a long-running answer never counts
+  as idleness.
+
+### What clients see
+
+- an unknown or expired session id -> `404 Unknown or expired session`
+- the POC web client handles this automatically: on a 404 it creates a
+  fresh session and retries the message once (conversation context is
+  gone, but the question still gets answered)
+- a second message sent while one is in flight simply takes longer --
+  it queues on the lock
+
+The behavior is covered by six dedicated tests in
+[`test_agent_api.py`](../agent-client/tests_api/test_agent_api.py):
+unknown-session rejection at both service and endpoint level, sweep
+eviction (asserting the checkpointer thread is deleted too), survival
+of active sessions, LRU cap order, and lock serialisation proven with
+a fake agent that counts overlapping turns.
+
+## 10. Configuration -- one single .env file
 
 ALL configuration is read from one place: the gitignored `.env` file in
 `agent-client/` -- the same file the CLI already uses. The code reads
@@ -440,7 +547,7 @@ The API-specific settings:
 | `AGENT_API_SESSION_TTL_MINUTES` | `60` | evict sessions idle longer than this |
 | `AGENT_API_MAX_SESSIONS` | `500` | hard cap; least recently used evicted when full |
 
-## 10. Running the API server
+## 11. Running the API server
 
 ```bash
 # terminal 1 -- the MCP server, exactly as before
@@ -463,7 +570,7 @@ The server logs
 
 The existing CLI and scanner are unaffected and run exactly as before.
 
-## 11. Calling the API -- worked examples
+## 12. Calling the API -- worked examples
 
 ### With curl
 
@@ -563,7 +670,7 @@ Two implementation details worth knowing (both commented in the file):
   controlled by `AGENT_API_CORS_ORIGINS` (default `*` for local dev).
   CORS is not authentication -- the bearer token is still required.
 
-## 12. Testing
+## 13. Testing
 
 The test suite (`tests_api/test_agent_api.py`, 28 tests) needs neither
 Azure OpenAI credentials nor a running MCP server. It builds a `FakeAgent`
@@ -583,7 +690,7 @@ cd agent-client
 uv run --with pytest --with httpx pytest tests_api/ -q
 ```
 
-## 13. The future: Azure Entra OAuth2
+## 14. The future: Azure Entra OAuth2
 
 The static token is a stopgap: one shared secret, no idea WHO is calling.
 The end goal is Azure Entra ID (formerly Azure AD): each user or app
@@ -607,7 +714,7 @@ clients already send. That is why the bearer scheme was chosen on day
 one. Once real identity exists, sessions can additionally be bound to
 `principal.subject` so callers only see their own conversations.
 
-## 14. What was deliberately not changed
+## 15. What was deliberately not changed
 
 - `agent.py`, `cli.py`, `scanner.py`, `scanner_cli.py`,
   `incident_sources.py`, `llm.py` -- untouched; the CLI works as before
