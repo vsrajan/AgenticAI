@@ -167,6 +167,32 @@ curl -N -X POST http://127.0.0.1:8080/sessions/3f2a.../messages/stream \
   -d '{"message": "What access do finance analysts have?"}'
 ```
 
+### GET /sessions/{id}/messages
+
+Conversation history for a session. By default returns the chat view --
+only what a chat window displays (user and assistant messages):
+
+```bash
+curl http://127.0.0.1:8080/sessions/3f2a.../messages \
+  -H "Authorization: Bearer $AGENT_API_TOKEN"
+# {"session_id": "3f2a...", "messages": [
+#   {"role": "user", "text": "How do I set up delegations?"},
+#   {"role": "assistant", "text": "..."}]}
+```
+
+Add `?raw=true` for debugging: every stored message with its type and
+any tool calls the agent made:
+
+```bash
+curl "http://127.0.0.1:8080/sessions/3f2a.../messages?raw=true" \
+  -H "Authorization: Bearer $AGENT_API_TOKEN"
+# {"session_id": "...", "messages": [
+#   {"type": "HumanMessage", "text": "..."},
+#   {"type": "AIMessage", "text": "", "tool_calls": ["search_docs"]},
+#   {"type": "ToolMessage", "text": "..."},
+#   {"type": "AIMessage", "text": "..."}]}
+```
+
 ## Tests
 
 ```bash

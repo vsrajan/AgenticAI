@@ -10,6 +10,7 @@ Endpoints:
   POST /sessions                       -> create a session id
   POST /sessions/{id}/messages         -> full answer as JSON (for bots)
   POST /sessions/{id}/messages/stream  -> SSE stream of phase/token/answer
+  GET  /sessions/{id}/messages         -> conversation history (raw=true for debug)
 
 Auth: Authorization: Bearer <token> on everything except /health.
 See auth_api.py for the authenticator model.
@@ -31,7 +32,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
@@ -162,9 +163,47 @@ class AgentService:
         return answer
 
     async def get_history(self, session_id: str) -> list:
-        """Return the full message history for a session."""
+        """Return the full raw message history for a session.
+
+        An unknown session id is not an error -- MemorySaver just has
+        no state for it, so the result is an empty list.
+        """
         state = await self._agent.aget_state(self._config(session_id))
         return state.values.get("messages", [])
+
+
+# -- History shaping --
+
+def _history_to_chat(messages: list) -> list[dict]:
+    """Reduce raw graph history to what a chat window displays.
+
+    The stored history contains everything the graph produced: tool
+    calls, tool results, and routing chatter. A chat client shows only
+    the human messages and the AI messages that were actual answers
+    (content present, no tool calls) -- the same filter the streaming
+    path applies when deciding which tokens to display.
+    """
+    chat = []
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            chat.append({"role": "user", "text": msg.content})
+        elif isinstance(msg, AIMessage) and msg.content and not msg.tool_calls:
+            chat.append({"role": "assistant", "text": msg.content})
+    return chat
+
+
+def _history_to_debug(messages: list) -> list[dict]:
+    """Dump every stored message for debugging: its class name, its
+    content, and the names of any tool calls it made."""
+    dump = []
+    for msg in messages:
+        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        entry = {"type": msg.__class__.__name__, "text": content}
+        tool_calls = getattr(msg, "tool_calls", None)
+        if tool_calls:
+            entry["tool_calls"] = [tc["name"] for tc in tool_calls]
+        dump.append(entry)
+    return dump
 
 
 # -- FastAPI app --
@@ -302,6 +341,26 @@ def create_app(
             logger.exception("Error processing message for session %s", session_id)
             raise HTTPException(status_code=500, detail="Error processing the message.")
         return {"answer": answer}
+
+    # a query parameter with a default (raw: bool = False) is optional:
+    # GET .../messages returns the chat view, GET .../messages?raw=true
+    # switches to the full debug dump
+    @app.get("/sessions/{session_id}/messages")
+    async def get_messages(
+        session_id: str,
+        raw: bool = False,
+        principal: Principal = Depends(current_principal),
+    ):
+        """Conversation history for a session.
+
+        Default: only what a chat window shows (user and assistant
+        messages) -- lets a reloaded web client repopulate its view.
+        raw=true: every stored message with its type and tool calls --
+        for debugging what the agent actually did.
+        """
+        messages = await app.state.service.get_history(session_id)
+        shaped = _history_to_debug(messages) if raw else _history_to_chat(messages)
+        return {"session_id": session_id, "messages": shaped}
 
     @app.post("/sessions/{session_id}/messages/stream")
     async def stream_message(

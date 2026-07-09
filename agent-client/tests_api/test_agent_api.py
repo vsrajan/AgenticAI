@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from agent_client.agent_api import AgentEvent, AgentService, create_app
 from agent_client.auth_api import (
@@ -239,6 +240,46 @@ def test_stream_message_sse():
 def test_no_auth_mode_accepts_missing_header():
     client = make_client(authenticator=NoAuthAuthenticator())
     assert client.post("/sessions").status_code == 200
+
+
+# a realistic slice of graph history: the user asks, the specialist
+# calls a tool (AIMessage with tool_calls, no visible content), the
+# tool answers (ToolMessage), then the specialist gives the final answer
+CHAT_HISTORY = [
+    HumanMessage(content="hi"),
+    AIMessage(content="", tool_calls=[
+        {"name": "search_docs", "args": {"query": "hi"}, "id": "t1"},
+    ]),
+    ToolMessage(content="doc snippet", tool_call_id="t1"),
+    AIMessage(content="final answer"),
+]
+
+
+def test_get_messages_returns_chat_view():
+    # the chat view hides tool calls and tool results -- only what a
+    # chat window would have displayed
+    client = make_client(service=make_service([], final_messages=CHAT_HISTORY))
+    response = client.get("/sessions/s1/messages", headers=AUTH)
+    assert response.status_code == 200
+    assert response.json()["messages"] == [
+        {"role": "user", "text": "hi"},
+        {"role": "assistant", "text": "final answer"},
+    ]
+
+
+def test_get_messages_raw_view_for_debugging():
+    client = make_client(service=make_service([], final_messages=CHAT_HISTORY))
+    response = client.get("/sessions/s1/messages?raw=true", headers=AUTH)
+    messages = response.json()["messages"]
+    assert [m["type"] for m in messages] == [
+        "HumanMessage", "AIMessage", "ToolMessage", "AIMessage",
+    ]
+    assert messages[1]["tool_calls"] == ["search_docs"]
+
+
+def test_get_messages_requires_auth():
+    client = make_client(service=make_service([], final_messages=CHAT_HISTORY))
+    assert client.get("/sessions/s1/messages").status_code == 401
 
 
 def test_cors_preflight_allows_browser_clients():

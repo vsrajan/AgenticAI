@@ -94,7 +94,7 @@ All new, all in `agent-client/`:
 | `src/agent_client/cli_api.py` | The entry point that starts the web server |
 | `webclient_api.html` | POC single-page web client (streaming) -- open directly in a browser |
 | `README_api.md` | Quick-reference for running the API |
-| `tests_api/test_agent_api.py` | 19 tests that run without Azure or the MCP server |
+| `tests_api/test_agent_api.py` | 22 tests that run without Azure or the MCP server |
 
 The naming convention: where new behavior parallels an existing file,
 the new file takes the same name plus `_api` (`cli.py` -> `cli_api.py`).
@@ -221,6 +221,9 @@ core produces neutral events and lets each consumer render them.
   terminal.
 - `ask(session_id, text)` -- convenience for non-streaming clients:
   consumes `stream()` internally and returns just the final answer text.
+- `get_history(session_id)` -- returns the session's raw stored message
+  list from the checkpointer; the history endpoint shapes it into the
+  chat or debug view.
 
 Importantly, `agent_api.py` imports `build_graph` and friends FROM
 `agent.py` -- the graph, the prompts, the specialists, and the routing
@@ -304,6 +307,7 @@ server. Lifespan is FastAPI's hook for run-once-at-startup work.
 | `POST /sessions` | yes | create a conversation; returns `{"session_id": "..."}` |
 | `POST /sessions/{id}/messages` | yes | send a message, get `{"answer": "..."}` back in one response -- for bots and scripts |
 | `POST /sessions/{id}/messages/stream` | yes | send a message, receive an SSE stream of `phase`/`token`/`answer` events -- for live UIs |
+| `GET /sessions/{id}/messages` | yes | conversation history: user/assistant chat view by default, `?raw=true` for the full debug dump (every stored message with types and tool calls) |
 
 Why two message endpoints? A Teams or Slack bot cannot render a stream --
 it posts one complete message -- so forcing it to consume SSE would just
@@ -539,7 +543,7 @@ Two implementation details worth knowing (both commented in the file):
 
 ## 12. Testing
 
-The test suite (`tests_api/test_agent_api.py`, 19 tests) needs neither
+The test suite (`tests_api/test_agent_api.py`, 22 tests) needs neither
 Azure OpenAI credentials nor a running MCP server. It builds a `FakeAgent`
 that replays canned graph events, so the tests exercise the real
 AgentService event handling, the real endpoints, and the real auth code
