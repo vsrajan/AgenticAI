@@ -1,8 +1,10 @@
 # Agent API
 
 HTTP API wrapping the Access Governance agent so external clients (web
-UI, Teams bot, Slack, another agent) can use it. Purely additive layer:
-no existing file was modified -- all API code lives in new `_api` files.
+UI, Teams bot, Slack, another agent) can use it. The API code lives in
+files suffixed `_api`; its dependencies and the `agent-api` script are
+part of the regular pyproject.toml, and its settings are part of the
+regular .env.example template.
 
 ```
 agent_api.py   -- AgentService core (event-stream wrapper around the
@@ -12,37 +14,25 @@ auth_api.py    -- pluggable authentication (static bearer token now,
 cli_api.py     -- server entry point (runs uvicorn)
 webclient_api.html -- POC single-page web client (streaming); open it
                   directly in a browser
-.env_api       -- configuration TEMPLATE (never read by code); copy to
-                  the single .env file before starting
-pyproject_api.toml -- complete manifest for the API (superset of
-                  pyproject.toml); activate by copying over pyproject.toml
 ```
 
-The existing CLI (`uv run agent-client`), scanner, and MCP server are
-untouched and work exactly as before.
+The existing CLI (`uv run agent-client`), scanner, and MCP server work
+exactly as before, from the same environment.
 
 ## Run
 
-The MCP server must be running first (see the repository README). Then
-activate the API manifest and configuration, and start the server:
+The MCP server must be running first (see the repository README). Then:
 
 ```bash
 cd agent-client
-
-# activate the API manifest (a superset of pyproject.toml, so the CLI
-# and scanner keep working from the same environment)
-cp pyproject_api.toml pyproject.toml
 uv sync
 
 # create the single .env config from the template, then edit it with
 # real values (Azure key, AGENT_API_TOKEN, ...)
-cp .env_api .env
+cp .env.example .env
 
 uv run agent-api
 ```
-
-To go back to the original manifest: `git checkout pyproject.toml`
-(and `uv sync` again).
 
 ## Configuration
 
@@ -50,11 +40,9 @@ ALL configuration is read from the single gitignored `.env` file -- the
 same file the CLI uses. The code reads nothing else (no shell exports
 required, no second env file).
 
-`.env_api` is the template for that file: it lists every variable the
-whole framework needs (a superset of `.env.example`) plus the
-API-specific ones, with placeholder values. Copy it to `.env` (or copy
-the values you need into your existing `.env`) and fill in real values.
-The template is committed to git, so it never contains real secrets.
+`.env.example` is the committed template for that file: it lists every
+variable the framework and the API need, with placeholder values. Copy
+it to `.env` and fill in real values; it never contains real secrets.
 
 Framework variables (same meaning as in `.env.example`):
 
@@ -78,7 +66,7 @@ API variables:
 |----------|---------|---------|
 | `AGENT_API_AUTH` | `static` | `static` = shared bearer token, `none` = no auth (local dev only) |
 | `AGENT_API_TOKEN` | unset | required in static mode; server refuses to start without it |
-| `AGENT_API_HOST` | `127.0.0.1` | bind address; the `.env_api` template sets `0.0.0.0` so remote web clients can connect |
+| `AGENT_API_HOST` | `127.0.0.1` | bind address; the `.env.example` template sets `0.0.0.0` so remote web clients can connect |
 | `AGENT_API_PORT` | `8080` | port |
 | `AGENT_API_CORS_ORIGINS` | `*` | comma-separated origins browsers may call from; tighten for deployments |
 
@@ -98,8 +86,7 @@ token-by-token with live phase updates (Routing, Calling tools, ...).
 
 The MCP server process has its own settings (`MCP_DOCS_DIR`, `MCP_HOST`,
 `MCP_PORT`, `MCP_LOG_LEVEL`) read from `mcp-server/.env` -- see
-`mcp-server/.env.example`. They are listed as a commented reference
-section at the bottom of `.env_api`.
+`mcp-server/.env.example`.
 
 ## Authentication
 
@@ -184,8 +171,7 @@ curl -N -X POST http://127.0.0.1:8080/sessions/3f2a.../messages/stream \
 
 ```bash
 cd agent-client
-uv run --with pytest --with fastapi --with uvicorn --with httpx \
-  pytest tests_api/ -q
+uv run --with pytest --with httpx pytest tests_api/ -q
 ```
 
 The tests use a fake agent (no Azure OpenAI or MCP server needed) and

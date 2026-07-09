@@ -8,11 +8,14 @@ dependencies = [
     "langchain-openai>=0.3.0",
     "langgraph>=0.4.0",
     "python-dotenv>=1.0.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
 ]
 
 [project.scripts]
 agent-client = "agent_client.cli:main"
 scan-cli = "agent_client.scanner_cli:main"
+agent-api = "agent_client.cli_api:main"
 
 [build-system]
 requires = ["hatchling"]

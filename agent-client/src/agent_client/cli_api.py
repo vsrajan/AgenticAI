@@ -3,27 +3,22 @@
 Mirrors cli.py's shape (load env -> configure logging -> run) but starts
 the HTTP API instead of the interactive loop.
 
-To run the API, activate the API manifest first (pyproject_api.toml is
-a complete superset of pyproject.toml, so the CLI and scanner keep
-working from the same environment):
+Run with:
 
     cd agent-client
-    cp pyproject_api.toml pyproject.toml
-    uv sync
     uv run agent-api
-
-Restore the original manifest with: git checkout pyproject.toml
 
 For a full beginner-oriented guide to the API, see docs/agent_api.md.
 
 Configuration: everything is read from the single gitignored .env file
-(same file the CLI uses). Copy .env_api over it (or copy the values you
-need into it) before starting -- it is the complete template covering
-Azure OpenAI, agent behavior, MCP connection, and the API settings:
-    AGENT_API_AUTH   -- static (default) or none
-    AGENT_API_TOKEN  -- shared bearer token, required in static mode
-    AGENT_API_HOST   -- bind address (default 127.0.0.1)
-    AGENT_API_PORT   -- port (default 8080)
+(same file the CLI uses). .env.example is the complete template
+covering Azure OpenAI, agent behavior, MCP connection, and the API
+settings:
+    AGENT_API_AUTH         -- static (default) or none
+    AGENT_API_TOKEN        -- shared bearer token, required in static mode
+    AGENT_API_HOST         -- bind address (default 127.0.0.1)
+    AGENT_API_PORT         -- port (default 8080)
+    AGENT_API_CORS_ORIGINS -- CORS allowlist for browser clients (default *)
 """
 
 import logging

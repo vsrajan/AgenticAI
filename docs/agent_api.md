@@ -3,8 +3,9 @@
 This document explains the HTTP API layer added to the agent client: what
 was built, why each piece exists, and how it works -- written for a reader
 who knows some Python but has little experience with FastAPI, web APIs, or
-authentication. Everything described here lives in new files suffixed
-`_api`; no pre-existing file was changed.
+authentication. The API code lives in files suffixed `_api`; its
+dependencies and settings are part of the regular `pyproject.toml` and
+`.env.example`.
 
 This guide and the source files are designed to be read together: this
 document covers the concepts and the why, while the code in
@@ -92,14 +93,14 @@ All new, all in `agent-client/`:
 | `src/agent_client/auth_api.py` | Authentication: token checking, pluggable for the future |
 | `src/agent_client/cli_api.py` | The entry point that starts the web server |
 | `webclient_api.html` | POC single-page web client (streaming) -- open directly in a browser |
-| `.env_api` | Configuration TEMPLATE -- never read by code; copy to the single `.env` file before starting |
-| `pyproject_api.toml` | Complete manifest for the API (superset of pyproject.toml); copy over pyproject.toml to activate |
 | `README_api.md` | Quick-reference for running the API |
 | `tests_api/test_agent_api.py` | 19 tests that run without Azure or the MCP server |
 
-The naming convention: where new behavior parallels an existing file, the
-new file takes the same name plus `_api` (`cli.py` -> `cli_api.py`,
-`pyproject.toml` -> `pyproject_api.toml`, `.env` -> `.env_api`).
+The naming convention: where new behavior parallels an existing file,
+the new file takes the same name plus `_api` (`cli.py` -> `cli_api.py`).
+The API's dependencies (fastapi, uvicorn), its `agent-api` console
+script, and its settings are part of the regular `pyproject.toml` and
+`.env.example` alongside everything else.
 
 ## 4. Concepts you need, explained from scratch
 
@@ -173,30 +174,22 @@ in. The server checks the token and rejects the request with status
 token IS the authentication, tokens must never be committed to git or
 written to logs.
 
-### Why pyproject_api.toml, and how do the API dependencies get installed?
+### How do the API dependencies get installed?
 
-The API needs two extra libraries (fastapi, uvicorn) that the existing
-project does not declare -- and one constraint of this change was to not
-modify `pyproject.toml` in the repository. The catch: uv and pip only
-recognize the literal filename `pyproject.toml`; a file named
-`pyproject_api.toml` is never read by any tool.
-
-The solution is deliberately simple. `pyproject_api.toml` is a complete
-superset of `pyproject.toml` -- the same dependencies and console
-scripts, plus fastapi, uvicorn, and an `agent-api` entry point. When you
-want to run the API, you activate it by copying it over `pyproject.toml`
-and syncing:
+The API needs two libraries beyond what the agent already used: fastapi
+and uvicorn. They are ordinary project dependencies in
+`agent-client/pyproject.toml`, and the `agent-api` command is declared
+there as a console script. So the standard
 
 ```bash
 cd agent-client
-cp pyproject_api.toml pyproject.toml
 uv sync
 ```
 
-Because it is a superset, the CLI (`uv run agent-client`) and the
-scanner (`uv run scan-cli`) keep working from the same environment.
-The repository copy of `pyproject.toml` stays untouched in git -- to go
-back, run `git checkout pyproject.toml` and `uv sync` again.
+installs everything -- agent, scanner, and API -- into one shared
+environment. (Historical note: the API originally shipped with a
+separate `pyproject_api.toml` manifest to avoid touching any existing
+file; that constraint has since been lifted and the manifest merged.)
 
 ## 5. The service core: AgentService and AgentEvent
 
@@ -277,10 +270,10 @@ where the difference is, closing that hole.
 **Fail closed.** If configuration is missing (static mode, no token set),
 the server raises an error at startup instead of running without auth.
 The safe behavior is the default; the unsafe behavior (`none`) requires
-an explicit, grep-able opt-in. This is also why the committed `.env_api`
-template leaves `AGENT_API_TOKEN` commented out -- shipping a default
-token like `change-me` would mean every deployment that forgot to change
-it is protected by a publicly known password.
+an explicit, grep-able opt-in. This is also why the committed
+`.env.example` template leaves `AGENT_API_TOKEN` commented out --
+shipping a default token like `change-me` would mean every deployment
+that forgot to change it is protected by a publicly known password.
 
 **Never log tokens.** Log lines mention subjects and session ids, never
 credential values.
@@ -358,7 +351,7 @@ configured host and port and the process begins accepting HTTP
 requests. It blocks until you stop it with ctrl-c.
 
 **`agent-api` is only a name.** It is a console script declared in
-`pyproject_api.toml`:
+`pyproject.toml`:
 
 ```toml
 [project.scripts]
@@ -395,9 +388,9 @@ ALL configuration is read from one place: the gitignored `.env` file in
 nothing else; there is no second env file at runtime and no required
 shell exports.
 
-`.env_api` is only a TEMPLATE for that file. It is never read by the
-code. It lists every variable the whole framework needs -- Azure OpenAI
-settings, agent behavior (`AGENT_LOG_LEVEL`, `KEEP_LAST_N_MSGS`,
+`.env.example` is the committed TEMPLATE for that file. It is never
+read by the code. It lists every variable the framework needs -- Azure
+OpenAI settings, agent behavior (`AGENT_LOG_LEVEL`, `KEEP_LAST_N_MSGS`,
 `MAX_TOOL_CONTENT_LEN`), MCP connection (`MCP_TRANSPORT`,
 `MCP_SERVER_URL`, ...), and the API settings -- with placeholder values.
 Before starting the API, copy it to `.env` (or copy the values you need
@@ -405,20 +398,21 @@ into your existing `.env`) and fill in real values:
 
 ```bash
 cd agent-client
-cp .env_api .env    # then edit .env with real values
+cp .env.example .env    # then edit .env with real values
 ```
 
-Because `.env_api` is committed to git it holds placeholders only; the
-real secrets live in your local `.env`, which git ignores.
+Because `.env.example` is committed to git it holds placeholders only;
+the real secrets live in your local `.env`, which git ignores.
 
-The four API-specific settings:
+The API-specific settings:
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `AGENT_API_AUTH` | `static` | auth mode (see section 6) |
 | `AGENT_API_TOKEN` | unset | the shared secret for static mode |
-| `AGENT_API_HOST` | `127.0.0.1` | bind address (`0.0.0.0` to accept other machines) |
+| `AGENT_API_HOST` | `127.0.0.1` | bind address; the template sets `0.0.0.0` so other machines can connect |
 | `AGENT_API_PORT` | `8080` | port |
+| `AGENT_API_CORS_ORIGINS` | `*` | which page origins browsers may call from |
 
 ## 10. Running the API server
 
@@ -428,14 +422,11 @@ cd mcp-server && uv run mcp-docs-server
 
 # terminal 2 -- the API server
 cd agent-client
-
-# one-time per checkout: activate the API manifest (see section 4)
-cp pyproject_api.toml pyproject.toml
 uv sync
 
 # one-time per checkout: create the single .env from the template,
 # then edit it with real values (Azure key, AGENT_API_TOKEN, ...)
-cp .env_api .env
+cp .env.example .env
 
 uv run agent-api
 ```
@@ -563,8 +554,7 @@ against predictable input:
 
 ```bash
 cd agent-client
-uv run --with pytest --with fastapi --with uvicorn --with httpx \
-  pytest tests_api/ -q
+uv run --with pytest --with httpx pytest tests_api/ -q
 ```
 
 ## 13. The future: Azure Entra OAuth2
@@ -595,14 +585,17 @@ one. Once real identity exists, sessions can additionally be bound to
 
 - `agent.py`, `cli.py`, `scanner.py`, `scanner_cli.py`,
   `incident_sources.py`, `llm.py` -- untouched; the CLI works as before
-- `pyproject.toml` -- untouched in the repository; running the API means
-  locally copying `pyproject_api.toml` over it (section 4), and
-  `git checkout pyproject.toml` restores the original
-- `.env` handling and `CLAUDE.md` -- untouched
 - the entire `mcp-server/` package -- untouched
 
-Accepted tradeoff: the CLI keeps its own streaming loop in `agent.py`
-while the API has the event-based loop in `agent_api.py`. The two share
-the graph and all agent logic but render output separately. A later
-cleanup can port the CLI onto AgentService events and delete the
-duplication once the additive-only constraint is lifted.
+The API was originally built fully additively (no existing file
+modified at all, with separate `pyproject_api.toml` and `.env_api`
+supersets). That constraint has since been partially lifted: the API's
+dependencies, its `agent-api` console script, and its settings now live
+in the regular `pyproject.toml` and `.env.example`, and CLAUDE.md
+documents the API layer.
+
+Remaining accepted tradeoff: the CLI keeps its own streaming loop in
+`agent.py` while the API has the event-based loop in `agent_api.py`.
+The two share the graph and all agent logic but render output
+separately. A later cleanup can port the CLI onto AgentService events
+and delete the duplication.
