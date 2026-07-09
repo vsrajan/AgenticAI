@@ -75,7 +75,7 @@ runs each through the knowledgebase agent, and writes a coverage report.
 Key points:
 - **No router involved** -- `active_agent="knowledgebase_agent"` bypasses routing
 - **Fresh graph per incident** -- no shared conversation state between incidents
-- **Reuses agent.py** -- imports `build_graph` and `_get_mcp_server_config` directly
+- **Reuses agnes_agent_graph.py** -- imports `build_graph` and `_get_mcp_server_config` directly
 - **Coverage heuristic** -- parses citations from the agent response to detect gaps
 
 ---

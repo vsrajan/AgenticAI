@@ -1,6 +1,6 @@
 """Batch scan engine -- runs each incident through the knowledgebase agent.
 
-Reuses the existing LangGraph graph from agent.py without modification.
+Reuses the existing LangGraph graph from agnes_agent_graph.py without modification.
 For each incident, compiles the graph fresh (no checkpointer) and invokes
 the knowledgebase_agent directly to search documentation for coverage.
 
@@ -31,11 +31,11 @@ from pathlib import Path
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-from agent_client.llm import get_llm
-from agent_client.agent import build_graph, _get_mcp_server_config
-from agent_client.incident_sources import Incident
+from ease_clients.utils.llm import get_llm
+from ease_clients.utils.agnes_agent_graph import build_graph, _get_mcp_server_config
+from ease_clients.utils.incident_sources import Incident
 
-logger = logging.getLogger("agent_client.scanner")
+logger = logging.getLogger("ease_clients.scanner")
 
 
 # -- Data classes --

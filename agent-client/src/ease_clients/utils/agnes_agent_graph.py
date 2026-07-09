@@ -38,9 +38,9 @@ from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 
 from dotenv import load_dotenv, find_dotenv
-from agent_client.llm import get_llm
+from ease_clients.utils.llm import get_llm
 
-logger = logging.getLogger("agent_client.agent")
+logger = logging.getLogger("ease_clients.agent")
 
 
 # -- Spinner --

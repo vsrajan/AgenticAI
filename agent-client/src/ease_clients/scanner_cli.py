@@ -29,8 +29,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[logging.StreamHandler(sys.stderr)],
 )
-logging.getLogger("agent_client").setLevel(LOG_LEVEL)
-logger = logging.getLogger("agent_client.scanner_cli")
+logging.getLogger("ease_clients").setLevel(LOG_LEVEL)
+logger = logging.getLogger("ease_clients.scanner_cli")
 
 
 def main():
@@ -67,14 +67,14 @@ def main():
         print(f"Error: file not found: {args.incidents_csv}", file=sys.stderr)
         sys.exit(1)
 
-    from agent_client.incident_sources import CsvIncidentSource
-    from agent_client.scanner import run_scan
+    from ease_clients.utils.incident_sources import CsvIncidentSource
+    from ease_clients.utils.scanner import run_scan
 
     # -- incident source --
     # CSV mode (default): reads incidents from a local CSV file.
     # to switch to ServiceNow, replace the two lines below with:
     #
-    #   from agent_client.incident_sources import ServiceNowIncidentSource
+    #   from ease_clients.utils.incident_sources import ServiceNowIncidentSource
     #   source = ServiceNowIncidentSource(
     #       instance_url=os.environ["SERVICENOW_URL"],
     #       username=os.environ["SERVICENOW_USER"],

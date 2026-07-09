@@ -248,7 +248,7 @@ graph TD
     CSV_IN -->|"list[Incident]"| SCAN
 
     SCAN -->|"for each incident"| COMPILE["graph.compile()<br/><small>fresh, no checkpointer</small>"]
-    COMPILE -->|"ainvoke<br/>active_agent=knowledgebase_agent"| KB["knowledgebase_agent<br/><small>reused from agent.py</small>"]
+    COMPILE -->|"ainvoke<br/>active_agent=knowledgebase_agent"| KB["knowledgebase_agent<br/><small>reused from agnes_agent_graph.py</small>"]
 
     KB <-->|"search_docs, read_page<br/>list_topics"| MCP["MCP Server<br/><small>knowledgebase tools</small>"]
     KB <-->|"LLM calls"| LLM["Azure OpenAI"]
@@ -270,5 +270,5 @@ graph TD
 Key points:
 - **No router involved** -- `active_agent="knowledgebase_agent"` bypasses routing
 - **Fresh graph per incident** -- no shared conversation state between incidents
-- **Reuses agent.py** -- imports `build_graph` and `_get_mcp_server_config` directly
+- **Reuses agnes_agent_graph.py** -- imports `build_graph` and `_get_mcp_server_config` directly
 - **Coverage heuristic** -- parses citations from the agent response to detect gaps

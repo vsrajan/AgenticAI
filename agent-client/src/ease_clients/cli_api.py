@@ -40,8 +40,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[logging.StreamHandler(sys.stderr)],
 )
-logging.getLogger("agent_client").setLevel(LOG_LEVEL)
-logger = logging.getLogger("agent_client.cli_api")
+logging.getLogger("ease_clients").setLevel(LOG_LEVEL)
+logger = logging.getLogger("ease_clients.cli_api")
 
 
 def main():
@@ -51,7 +51,7 @@ def main():
     # run before any agent code executes
     import uvicorn
 
-    from agent_client.agent_api import create_app
+    from ease_clients.agent_api import create_app
 
     host = os.environ.get("AGENT_API_HOST", "127.0.0.1")
     port = int(os.environ.get("AGENT_API_PORT", "8080"))

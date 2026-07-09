@@ -16,13 +16,13 @@ import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from agent_client.agent_api import (
+from ease_clients.agent_api import (
     AgentEvent,
     AgentService,
     UnknownSessionError,
     create_app,
 )
-from agent_client.auth_api import (
+from ease_clients.auth_api import (
     AuthError,
     NoAuthAuthenticator,
     StaticTokenAuthenticator,

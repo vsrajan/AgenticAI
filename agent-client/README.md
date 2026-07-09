@@ -145,10 +145,17 @@ agent-client/
 ├── .env.example                  # sample configuration
 ├── .env                          # your credentials (git-ignored)
 ├── src/
-│   └── agent_client/
+│   └── ease_clients/
 │       ├── __init__.py
 │       ├── cli.py                # CLI entry point & logging setup
-│       ├── llm.py                # get_llm() → AzureChatOpenAI
-│       └── agent.py              # LangGraph ReAct agent + MCP client
+│       ├── cli_api.py            # API server entry point
+│       ├── agent_api.py          # AgentService + FastAPI app
+│       ├── auth_api.py           # API bearer-token auth
+│       ├── scanner_cli.py        # batch scanner entry point
+│       └── utils/
+│           ├── llm.py                 # get_llm() → AzureChatOpenAI
+│           ├── agnes_agent_graph.py   # LangGraph agent graph + MCP client
+│           ├── scanner.py             # batch scan engine
+│           └── incident_sources.py    # incident data sources
 └── README.md
 ```

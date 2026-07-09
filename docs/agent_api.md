@@ -67,7 +67,7 @@ flowchart LR
         SVC[agent_api.py<br/>AgentService]
     end
 
-    GRAPH[agent.py<br/>LangGraph graph -- unchanged]
+    GRAPH[agnes_agent_graph.py<br/>LangGraph graph -- unchanged]
     MCP[MCP server -- unchanged]
 
     WEB -->|HTTP + SSE| AUTH
@@ -90,9 +90,9 @@ All new, all in `agent-client/`:
 
 | File | Role |
 |------|------|
-| `src/agent_client/agent_api.py` | The service core (`AgentService`, `AgentEvent`) and the FastAPI app with all endpoints |
-| `src/agent_client/auth_api.py` | Authentication: token checking, pluggable for the future |
-| `src/agent_client/cli_api.py` | The entry point that starts the web server |
+| `src/ease_clients/agent_api.py` | The service core (`AgentService`, `AgentEvent`) and the FastAPI app with all endpoints |
+| `src/ease_clients/auth_api.py` | Authentication: token checking, pluggable for the future |
+| `src/ease_clients/cli_api.py` | The entry point that starts the web server |
 | `webclient_api.html` | POC single-page web client (streaming) -- open directly in a browser |
 | `README_api.md` | Quick-reference for running the API |
 | `tests_api/test_agent_api.py` | 28 tests that run without Azure or the MCP server |
@@ -235,7 +235,7 @@ core produces neutral events and lets each consumer render them.
 - `create_session()` -- returns a fresh uuid to use as a session id.
 - `stream(session_id, text)` -- runs one conversation turn and yields
   AgentEvents as they happen. Internally it iterates the graph's
-  `astream_events` output exactly like the CLI loop in `agent.py` does;
+  `astream_events` output exactly like the CLI loop in `agnes_agent_graph.py` does;
   the only difference is that it yields events instead of writing to the
   terminal.
 - `ask(session_id, text)` -- convenience for non-streaming clients:
@@ -245,9 +245,9 @@ core produces neutral events and lets each consumer render them.
   chat or debug view.
 
 Importantly, `agent_api.py` imports `build_graph` and friends FROM
-`agent.py` -- the graph, the prompts, the specialists, and the routing
-logic are all shared, not copied. This mirrors how `scanner.py` already
-reuses the graph without modifying it.
+`utils/agnes_agent_graph.py` -- the graph, the prompts, the specialists,
+and the routing logic are all shared, not copied. This mirrors how
+`utils/scanner.py` already reuses the graph without modifying it.
 
 ## 6. Authentication: how and why
 
@@ -380,7 +380,7 @@ requests. It blocks until you stop it with ctrl-c.
 
 ```toml
 [project.scripts]
-agent-api = "agent_client.cli_api:main"
+agent-api = "ease_clients.cli_api:main"
 ```
 
 When `uv sync` installs the project it generates a tiny wrapper
@@ -410,7 +410,7 @@ server at import time, none of that would be possible.
 
 The first API release had two deliberate gaps, found in a later code
 review and fixed together. Both fixes live in
-[`agent_api.py`](../agent-client/src/agent_client/agent_api.py); this
+[`agent_api.py`](../agent-client/src/ease_clients/agent_api.py); this
 section explains the problems and walks the code. (Line links are
 current as of this writing; the symbol names are the stable
 reference.)
@@ -447,11 +447,11 @@ a crash, which is worse because it is quiet.
 ### The fix: a session registry inside AgentService
 
 One structure solves both problems. Every live session gets a
-[`_Session`](../agent-client/src/agent_client/agent_api.py#L71)
+[`_Session`](../agent-client/src/ease_clients/agent_api.py#L71)
 bookkeeping entry holding two things: a `last_used` timestamp (taken
 from `time.monotonic()`, a steady clock that never jumps backwards)
 and an `asyncio.Lock`. The registry itself is a dict on
-[`AgentService`](../agent-client/src/agent_client/agent_api.py#L101),
+[`AgentService`](../agent-client/src/ease_clients/agent_api.py#L101),
 configured by two env vars read in `AgentService.create()`:
 `AGENT_API_SESSION_TTL_MINUTES` (default 60) and
 `AGENT_API_MAX_SESSIONS` (default 500).
@@ -459,37 +459,37 @@ configured by two env vars read in `AgentService.create()`:
 How each piece addresses the problems:
 
 - **Explicit sessions only.**
-  [`create_session()`](../agent-client/src/agent_client/agent_api.py#L146)
+  [`create_session()`](../agent-client/src/ease_clients/agent_api.py#L146)
   registers every id it mints, and
-  [`_require_session()`](../agent-client/src/agent_client/agent_api.py#L163)
+  [`_require_session()`](../agent-client/src/ease_clients/agent_api.py#L163)
   raises `UnknownSessionError` for anything not in the registry --
   which the endpoints translate to a `404` with a "create a new
   session" hint. Ids can no longer be invented by clients (closes
   problem 1, layer 3). The streaming endpoint
-  [checks before the response starts](../agent-client/src/agent_client/agent_api.py#L494)
+  [checks before the response starts](../agent-client/src/ease_clients/agent_api.py#L494)
   via `has_session()`, because once streaming begins the HTTP status
   line has already been sent and a 404 can no longer be delivered.
 - **TTL eviction.**
-  [`sweep_expired_sessions()`](../agent-client/src/agent_client/agent_api.py#L182)
+  [`sweep_expired_sessions()`](../agent-client/src/ease_clients/agent_api.py#L182)
   evicts every session idle longer than the TTL;
-  [`sweep_loop()`](../agent-client/src/agent_client/agent_api.py#L193)
+  [`sweep_loop()`](../agent-client/src/ease_clients/agent_api.py#L193)
   runs it once a minute as a background task that the app's
-  [lifespan handler](../agent-client/src/agent_client/agent_api.py#L363)
+  [lifespan handler](../agent-client/src/ease_clients/agent_api.py#L363)
   starts at boot and cancels at shutdown.
 - **Eviction actually frees the memory.**
-  [`_evict()`](../agent-client/src/agent_client/agent_api.py#L171)
+  [`_evict()`](../agent-client/src/ease_clients/agent_api.py#L171)
   removes the registry entry AND calls the checkpointer's
   `delete_thread()` -- the second part is the one that matters, because
   the checkpoints are where the megabytes live (problem 1, layers 1-2).
 - **LRU cap as a backstop.** When the registry is at
   `AGENT_API_MAX_SESSIONS`,
-  [`create_session()`](../agent-client/src/agent_client/agent_api.py#L146)
+  [`create_session()`](../agent-client/src/ease_clients/agent_api.py#L146)
   evicts the least recently used session before minting a new id, so
   even a client that leaks sessions cannot push memory past the cap.
 - **One turn at a time.**
-  [`stream()`](../agent-client/src/agent_client/agent_api.py#L210) runs
+  [`stream()`](../agent-client/src/ease_clients/agent_api.py#L210) runs
   the whole turn inside
-  [`async with session.lock`](../agent-client/src/agent_client/agent_api.py#L229).
+  [`async with session.lock`](../agent-client/src/ease_clients/agent_api.py#L229).
   A second message on the same session waits for the first to finish
   instead of interleaving writes (closes problem 2). Different sessions
   are unaffected -- each has its own lock. The turn also refreshes
@@ -716,19 +716,23 @@ one. Once real identity exists, sessions can additionally be bound to
 
 ## 15. What was deliberately not changed
 
-- `agent.py`, `cli.py`, `scanner.py`, `scanner_cli.py`,
-  `incident_sources.py`, `llm.py` -- untouched; the CLI works as before
+- the agent logic itself: `utils/agnes_agent_graph.py` (formerly
+  `agent.py`), `cli.py`, `utils/scanner.py`, `scanner_cli.py`,
+  `utils/incident_sources.py`, `utils/llm.py` -- the API only imports
+  from them; the interactive CLI works as before
 - the entire `mcp-server/` package -- untouched
 
 The API was originally built fully additively (no existing file
 modified at all, with separate `pyproject_api.toml` and `.env_api`
-supersets). That constraint has since been partially lifted: the API's
-dependencies, its `agent-api` console script, and its settings now live
-in the regular `pyproject.toml` and `.env.example`, and CLAUDE.md
-documents the API layer.
+supersets). That constraint has since been lifted in stages: the API's
+dependencies, script, and settings moved into the regular
+`pyproject.toml` and `.env.example`, CLAUDE.md documents the API
+layer, and the whole package was later restructured from
+`src/agent_client` to `src/ease_clients` (with shared internals under
+`utils/`) to match the server deployment.
 
 Remaining accepted tradeoff: the CLI keeps its own streaming loop in
-`agent.py` while the API has the event-based loop in `agent_api.py`.
-The two share the graph and all agent logic but render output
-separately. A later cleanup can port the CLI onto AgentService events
-and delete the duplication.
+`agnes_agent_graph.py` while the API has the event-based loop in
+`agent_api.py`. The two share the graph and all agent logic but render
+output separately. A later cleanup can port the CLI onto AgentService
+events and delete the duplication.

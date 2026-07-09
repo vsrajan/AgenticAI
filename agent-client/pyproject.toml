@@ -13,10 +13,13 @@ dependencies = [
 ]
 
 [project.scripts]
-agent-client = "agent_client.cli:main"
-scan-cli = "agent_client.scanner_cli:main"
-agent-api = "agent_client.cli_api:main"
+agent-client = "ease_clients.cli:main"
+scan-cli = "ease_clients.scanner_cli:main"
+agent-api = "ease_clients.cli_api:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ease_clients"]

@@ -6,16 +6,18 @@ resource discovery, and entitlement management. Powered by Azure OpenAI (GPT-4o)
 ## Repository structure
 
 ```
-agent-client/src/agent_client/
-  agent.py            — LangGraph StateGraph (router + 3 specialists + handoff)
-  llm.py              — Azure OpenAI config
+agent-client/src/ease_clients/
   cli.py              — CLI entry point (interactive agent)
-  incident_sources.py — Incident dataclass + CSV/ServiceNow source classes
-  scanner.py          — Batch scan engine (reuses agent graph)
   scanner_cli.py      — CLI entry point (batch scanner)
   agent_api.py        — AgentService (event-stream wrapper) + FastAPI app (HTTP API)
   auth_api.py         — pluggable API auth (static bearer token now, Entra OAuth2 later)
   cli_api.py          — API server entry point (runs uvicorn)
+
+agent-client/src/ease_clients/utils/
+  agnes_agent_graph.py — LangGraph StateGraph (router + 3 specialists + handoff)
+  llm.py               — Azure OpenAI config
+  incident_sources.py  — Incident dataclass + CSV/ServiceNow source classes
+  scanner.py           — Batch scan engine (reuses agent graph)
 
 agent-client/
   webclient_api.html  — POC single-page web client for the API (SSE streaming)
@@ -127,6 +129,7 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 - Added session hygiene to the API: explicit sessions only (404 for unknown/expired ids), idle-TTL eviction via background sweeper + LRU cap (AGENT_API_SESSION_TTL_MINUTES / AGENT_API_MAX_SESSIONS), per-session lock serialising concurrent messages; web client auto-recreates expired sessions (tests_api now 28 tests)
 - Added beginner-oriented API guide (docs/agent_api.md) and Excalidraw API-flow diagram (docs/05_agent_api_flow.excalidraw)
 - Merged the API layer into the main manifests: fastapi/uvicorn deps + agent-api script in pyproject.toml, API settings in .env.example (the temporary pyproject_api.toml / .env_api supersets were removed)
+- Restructured the package to match the server deployment: agent_client -> ease_clients, shared internals moved to ease_clients/utils (llm.py, scanner.py, incident_sources.py, and agent.py renamed to agnes_agent_graph.py); entry points and loggers renamed accordingly
 
 ## General instructions
 
@@ -145,6 +148,6 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 
 ## To do
 
-- Port the interactive CLI onto AgentService events (agent.py still has its own streaming loop; agent_api.py has the event-based one -- converge them)
+- Port the interactive CLI onto AgentService events (agnes_agent_graph.py still has its own streaming loop; agent_api.py has the event-based one -- converge them)
 - Azure Entra OAuth2 authenticator (`entra` mode in auth_api.py -- JWT/JWKS validation; interface already reserved)
 - Replace the POC web client with a real web UI (HTTPS, login flow instead of token-in-url, tightened CORS)

@@ -3,7 +3,7 @@
 Wraps the existing LangGraph agent behind a transport-agnostic
 AgentService, then exposes it over HTTP so any external client (web UI,
 Teams bot, Slack, another agent) can use it. Everything is imported
-from agent.py -- that module is not modified.
+from utils/agnes_agent_graph.py -- that module is not modified.
 
 Endpoints:
   GET  /health                         -> liveness + tool count (no auth)
@@ -39,11 +39,11 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
-from agent_client.agent import _NODE_PHASES, _get_mcp_server_config, build_graph
-from agent_client.auth_api import AuthError, Authenticator, Principal, build_authenticator
-from agent_client.llm import get_llm
+from ease_clients.utils.agnes_agent_graph import _NODE_PHASES, _get_mcp_server_config, build_graph
+from ease_clients.auth_api import AuthError, Authenticator, Principal, build_authenticator
+from ease_clients.utils.llm import get_llm
 
-logger = logging.getLogger("agent_client.agent_api")
+logger = logging.getLogger("ease_clients.agent_api")
 
 
 # -- Events --
@@ -210,7 +210,7 @@ class AgentService:
     async def stream(self, session_id: str, user_input: str) -> AsyncIterator[AgentEvent]:
         """Run one turn and yield AgentEvents as they happen.
 
-        Same astream_events v2 handling as the CLI loop in agent.py, but
+        Same astream_events v2 handling as the CLI loop in agnes_agent_graph.py, but
         yields events instead of writing to stdout:
           on_chain_start on a known node -> phase event
           on_chat_model_stream content chunk without tool calls -> token event

@@ -21,13 +21,13 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[logging.StreamHandler(sys.stderr)],
 )
-logging.getLogger("agent_client").setLevel(LOG_LEVEL)
-logger = logging.getLogger("agent_client")
+logging.getLogger("ease_clients").setLevel(LOG_LEVEL)
+logger = logging.getLogger("ease_clients")
 
 
 def main():
     """Entry point invoked by ``agent-client`` console script."""
-    from agent_client.agent import run_agent_loop
+    from ease_clients.utils.agnes_agent_graph import run_agent_loop
 
     logger.info("Starting Access Governance Agent")
 

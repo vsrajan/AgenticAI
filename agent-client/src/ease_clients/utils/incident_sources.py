@@ -15,7 +15,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-logger = logging.getLogger("agent_client.incident_sources")
+logger = logging.getLogger("ease_clients.incident_sources")
 
 
 # -- Data classes --
