@@ -20,9 +20,11 @@ the design, the concepts used here (FastAPI, SSE, bearer tokens), and
 worked client examples, see docs/agent_api.md.
 """
 
+import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -62,17 +64,48 @@ class AgentEvent:
 
 # -- Service core --
 
+class UnknownSessionError(Exception):
+    """Raised when a session id was never created or has been evicted."""
+
+
+class _Session:
+    """Bookkeeping for one live session.
+
+    last_used drives TTL eviction (time.monotonic is a steady clock
+    that never jumps backwards, unlike wall-clock time). The lock
+    serialises turns: two concurrent messages on the same session
+    would otherwise interleave their writes into one LangGraph thread
+    and corrupt the conversation history.
+    """
+    __slots__ = ("last_used", "lock")
+
+    def __init__(self):
+        self.last_used = time.monotonic()
+        self.lock = asyncio.Lock()
+
+
 class AgentService:
     """Transport-agnostic wrapper around the compiled agent graph.
 
     Frontends consume stream() (token-level events) or ask() (buffered
     answer). Session ids map 1:1 onto LangGraph thread ids, so the
     checkpointer keeps per-session conversation history.
+
+    Sessions are explicit: only ids minted by create_session() are
+    accepted, and idle sessions are evicted after session_ttl_seconds
+    (their checkpointer state deleted) so memory cannot grow without
+    bound in a long-running server. max_sessions is a hard cap -- when
+    full, the least recently used session is evicted to make room.
     """
 
-    def __init__(self, agent, tool_count: int):
+    def __init__(self, agent, tool_count: int, checkpointer=None,
+                 session_ttl_seconds: float = 3600, max_sessions: int = 500):
         self._agent = agent
         self.tool_count = tool_count
+        self._checkpointer = checkpointer
+        self._session_ttl = session_ttl_seconds
+        self._max_sessions = max_sessions
+        self._sessions: dict[str, _Session] = {}
 
     # an async classmethod factory instead of doing this work in
     # __init__: connecting to the MCP server requires await, and
@@ -85,6 +118,10 @@ class AgentService:
 
         checkpointer defaults to MemorySaver -- sessions live in process
         memory and are lost on restart. Pass a persistent saver to change that.
+
+        Session hygiene config from env:
+            AGENT_API_SESSION_TTL_MINUTES -- evict sessions idle this long (default 60)
+            AGENT_API_MAX_SESSIONS        -- hard cap; LRU-evict when full (default 500)
         """
         llm = get_llm()
         mcp_config = _get_mcp_server_config()
@@ -94,13 +131,74 @@ class AgentService:
         tools = await client.get_tools()
         logger.info("Loaded %d MCP tools", len(tools))
 
+        ttl_minutes = float(os.environ.get("AGENT_API_SESSION_TTL_MINUTES", "60"))
+        max_sessions = int(os.environ.get("AGENT_API_MAX_SESSIONS", "500"))
+
+        checkpointer = checkpointer or MemorySaver()
         graph = build_graph(llm, tools)
-        agent = graph.compile(checkpointer=checkpointer or MemorySaver())
-        return cls(agent, len(tools))
+        agent = graph.compile(checkpointer=checkpointer)
+        return cls(agent, len(tools), checkpointer,
+                   session_ttl_seconds=ttl_minutes * 60,
+                   max_sessions=max_sessions)
+
+    # -- session lifecycle --
 
     def create_session(self) -> str:
-        """Return a new session id (used as the LangGraph thread id)."""
-        return uuid.uuid4().hex
+        """Mint and register a new session id (the LangGraph thread id).
+
+        When the registry is at max_sessions, the least recently used
+        session is evicted first so the cap holds.
+        """
+        while len(self._sessions) >= self._max_sessions:
+            lru_id = min(self._sessions, key=lambda s: self._sessions[s].last_used)
+            self._evict(lru_id, reason="max_sessions cap")
+        session_id = uuid.uuid4().hex
+        self._sessions[session_id] = _Session()
+        return session_id
+
+    def has_session(self, session_id: str) -> bool:
+        """True if the session exists (created and not yet evicted)."""
+        return session_id in self._sessions
+
+    def _require_session(self, session_id: str) -> _Session:
+        """Return the session's bookkeeping entry, refreshing its TTL clock."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise UnknownSessionError(session_id)
+        session.last_used = time.monotonic()
+        return session
+
+    def _evict(self, session_id: str, reason: str) -> None:
+        """Drop one session: registry entry plus its checkpointer state.
+
+        Deleting the checkpointer thread is what actually frees the
+        conversation memory -- the registry entry is only bookkeeping.
+        """
+        self._sessions.pop(session_id, None)
+        if self._checkpointer is not None and hasattr(self._checkpointer, "delete_thread"):
+            self._checkpointer.delete_thread(session_id)
+        logger.info("Evicted session %s (%s)", session_id, reason)
+
+    def sweep_expired_sessions(self) -> int:
+        """Evict every session idle longer than the TTL. Returns the count."""
+        now = time.monotonic()
+        expired = [
+            sid for sid, session in self._sessions.items()
+            if now - session.last_used > self._session_ttl
+        ]
+        for sid in expired:
+            self._evict(sid, reason="idle TTL")
+        return len(expired)
+
+    async def sweep_loop(self, interval_seconds: float = 60) -> None:
+        """Background task: sweep expired sessions periodically.
+
+        Started by the app's lifespan handler; runs until cancelled at
+        shutdown.
+        """
+        while True:
+            await asyncio.sleep(interval_seconds)
+            self.sweep_expired_sessions()
 
     def _config(self, session_id: str) -> dict:
         return {"configurable": {"thread_id": session_id}, "recursion_limit": 50}
@@ -117,38 +215,49 @@ class AgentService:
           on_chain_start on a known node -> phase event
           on_chat_model_stream content chunk without tool calls -> token event
           end of run -> one answer event with the full text
+
+        Raises UnknownSessionError for ids that were never created or
+        have been evicted.
         """
+        session = self._require_session(session_id)
         config = self._config(session_id)
         answer_parts: list[str] = []
 
-        async for event in self._agent.astream_events(
-            {"messages": [HumanMessage(content=user_input)]},
-            config,
-            version="v2",
-        ):
-            kind = event["event"]
+        # one turn at a time per session: a second message on the same
+        # session waits here until the first finishes, instead of both
+        # writing into the same thread's history concurrently
+        async with session.lock:
+            async for event in self._agent.astream_events(
+                {"messages": [HumanMessage(content=user_input)]},
+                config,
+                version="v2",
+            ):
+                kind = event["event"]
 
-            if kind == "on_chain_start":
-                node = event.get("metadata", {}).get("langgraph_node", "")
-                phase = _NODE_PHASES.get(node)
-                if phase:
-                    yield AgentEvent("phase", phase)
+                if kind == "on_chain_start":
+                    node = event.get("metadata", {}).get("langgraph_node", "")
+                    phase = _NODE_PHASES.get(node)
+                    if phase:
+                        yield AgentEvent("phase", phase)
 
-            if kind == "on_chat_model_stream":
-                chunk = event["data"]["chunk"]
-                # content chunks without tool_call_chunks are answer tokens
-                if chunk.content and not getattr(chunk, "tool_call_chunks", None):
-                    answer_parts.append(chunk.content)
-                    yield AgentEvent("token", chunk.content)
+                if kind == "on_chat_model_stream":
+                    chunk = event["data"]["chunk"]
+                    # content chunks without tool_call_chunks are answer tokens
+                    if chunk.content and not getattr(chunk, "tool_call_chunks", None):
+                        answer_parts.append(chunk.content)
+                        yield AgentEvent("token", chunk.content)
 
-        if answer_parts:
-            yield AgentEvent("answer", "".join(answer_parts))
-            return
+            # a long turn should not count against the idle TTL
+            session.last_used = time.monotonic()
 
-        # nothing streamed -- fall back to reading the final state
-        state = await self._agent.aget_state(config)
-        messages = state.values.get("messages", [])
-        yield AgentEvent("answer", messages[-1].content if messages else "")
+            if answer_parts:
+                yield AgentEvent("answer", "".join(answer_parts))
+                return
+
+            # nothing streamed -- fall back to reading the final state
+            state = await self._agent.aget_state(config)
+            messages = state.values.get("messages", [])
+            yield AgentEvent("answer", messages[-1].content if messages else "")
 
     async def ask(self, session_id: str, user_input: str) -> str:
         """Run one turn and return the complete answer text (no streaming).
@@ -165,9 +274,10 @@ class AgentService:
     async def get_history(self, session_id: str) -> list:
         """Return the full raw message history for a session.
 
-        An unknown session id is not an error -- MemorySaver just has
-        no state for it, so the result is an empty list.
+        Raises UnknownSessionError for ids that were never created or
+        have been evicted.
         """
+        self._require_session(session_id)
         state = await self._agent.aget_state(self._config(session_id))
         return state.values.get("messages", [])
 
@@ -249,8 +359,15 @@ def create_app(
             app.state.authenticator = build_authenticator()
         if app.state.service is None:
             app.state.service = await AgentService.create()
+        # background sweeper frees idle sessions; cancelled at shutdown
+        sweeper = asyncio.create_task(app.state.service.sweep_loop())
         logger.info("Agent API ready (%d tools)", app.state.service.tool_count)
         yield
+        sweeper.cancel()
+        try:
+            await sweeper
+        except asyncio.CancelledError:
+            pass
 
     app = FastAPI(title="Access Governance Agent API", lifespan=lifespan)
 
@@ -335,6 +452,11 @@ def create_app(
         """Buffered request/response -- for clients that can't stream (bots)."""
         try:
             answer = await app.state.service.ask(session_id, request.message)
+        except UnknownSessionError:
+            raise HTTPException(
+                status_code=404,
+                detail="Unknown or expired session. Create a new one with POST /sessions.",
+            )
         except Exception:
             # log the full traceback server-side but send the client a
             # generic message -- internals never leak into responses
@@ -358,7 +480,13 @@ def create_app(
         raw=true: every stored message with its type and tool calls --
         for debugging what the agent actually did.
         """
-        messages = await app.state.service.get_history(session_id)
+        try:
+            messages = await app.state.service.get_history(session_id)
+        except UnknownSessionError:
+            raise HTTPException(
+                status_code=404,
+                detail="Unknown or expired session. Create a new one with POST /sessions.",
+            )
         shaped = _history_to_debug(messages) if raw else _history_to_chat(messages)
         return {"session_id": session_id, "messages": shaped}
 
@@ -369,6 +497,14 @@ def create_app(
         principal: Principal = Depends(current_principal),
     ):
         """SSE stream of phase/token/answer events -- for live UIs."""
+        # validate the session BEFORE streaming starts: once the
+        # response body is open the status line is already sent, so a
+        # 404 can only be delivered here
+        if not app.state.service.has_session(session_id):
+            raise HTTPException(
+                status_code=404,
+                detail="Unknown or expired session. Create a new one with POST /sessions.",
+            )
 
         # sse() is an async generator producing Server-Sent Events, the
         # standard format for pushing updates over one open HTTP

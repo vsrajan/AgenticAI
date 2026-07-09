@@ -69,6 +69,8 @@ API variables:
 | `AGENT_API_HOST` | `127.0.0.1` | bind address; the `.env.example` template sets `0.0.0.0` so remote web clients can connect |
 | `AGENT_API_PORT` | `8080` | port |
 | `AGENT_API_CORS_ORIGINS` | `*` | comma-separated origins browsers may call from; tighten for deployments |
+| `AGENT_API_SESSION_TTL_MINUTES` | `60` | evict sessions idle longer than this (memory hygiene) |
+| `AGENT_API_MAX_SESSIONS` | `500` | hard cap on live sessions; least recently used is evicted when full |
 
 ## POC web client
 
@@ -120,7 +122,15 @@ curl http://127.0.0.1:8080/health
 
 Creates a conversation session. The id maps onto a LangGraph thread, so
 follow-up messages in the same session keep conversation history.
-Sessions live in process memory (MemorySaver) and are lost on restart.
+
+Session lifecycle: sessions live in process memory (MemorySaver) and
+are lost on restart. Only ids minted by this endpoint are accepted --
+any other id gets 404. Idle sessions are evicted after
+AGENT_API_SESSION_TTL_MINUTES (a request for an evicted session also
+gets 404 -- create a new session and continue), and when
+AGENT_API_MAX_SESSIONS is reached the least recently used session is
+evicted to make room. One message per session runs at a time; a second
+message on the same session waits for the first to finish.
 
 ```bash
 curl -X POST http://127.0.0.1:8080/sessions \

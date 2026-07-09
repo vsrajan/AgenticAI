@@ -94,7 +94,7 @@ All new, all in `agent-client/`:
 | `src/agent_client/cli_api.py` | The entry point that starts the web server |
 | `webclient_api.html` | POC single-page web client (streaming) -- open directly in a browser |
 | `README_api.md` | Quick-reference for running the API |
-| `tests_api/test_agent_api.py` | 22 tests that run without Azure or the MCP server |
+| `tests_api/test_agent_api.py` | 28 tests that run without Azure or the MCP server |
 
 The naming convention: where new behavior parallels an existing file,
 the new file takes the same name plus `_api` (`cli.py` -> `cli_api.py`).
@@ -138,6 +138,24 @@ history. Because the checkpointer is MemorySaver (plain process memory),
 restarting the server forgets all sessions. That is a known, accepted
 tradeoff for now; swapping in a persistent checkpointer later is a
 one-argument change in `AgentService.create`.
+
+Sessions have a lifecycle, because a long-running server would
+otherwise accumulate conversation state forever (LangGraph saves a
+checkpoint after every graph step, so a long conversation holds many
+snapshots -- memory per session grows fast):
+
+- only ids minted by `POST /sessions` are accepted; anything else is
+  404. Sessions are never created implicitly.
+- a session idle longer than `AGENT_API_SESSION_TTL_MINUTES` (default
+  60) is evicted by a background sweeper: its registry entry and its
+  checkpointer state are deleted. Requests for it get 404 -- the
+  client creates a fresh session and continues (the POC web client
+  does this automatically).
+- `AGENT_API_MAX_SESSIONS` (default 500) is a hard cap; when full, the
+  least recently used session is evicted to make room.
+- one message per session runs at a time: a per-session lock makes a
+  second concurrent message wait instead of letting two turns
+  interleave writes into the same history.
 
 ### What is SSE (Server-Sent Events)?
 
@@ -322,8 +340,10 @@ Error behavior:
   (the real traceback goes to the server log, not to the client)
 - agent failure mid-stream -> an `error` event inside the stream, because
   the HTTP status line was already sent when streaming began
-- an unknown session id is NOT an error: with MemorySaver, any id simply
-  starts an empty history. Session ids are opaque strings to the server.
+- an unknown or expired session id -> `404` with a hint to create a new
+  session. Only ids minted by `POST /sessions` are valid, and idle
+  sessions are evicted after the TTL (see "What is a session" in
+  section 4).
 
 ## 8. Defining the server vs starting it
 
@@ -417,6 +437,8 @@ The API-specific settings:
 | `AGENT_API_HOST` | `127.0.0.1` | bind address; the template sets `0.0.0.0` so other machines can connect |
 | `AGENT_API_PORT` | `8080` | port |
 | `AGENT_API_CORS_ORIGINS` | `*` | which page origins browsers may call from |
+| `AGENT_API_SESSION_TTL_MINUTES` | `60` | evict sessions idle longer than this |
+| `AGENT_API_MAX_SESSIONS` | `500` | hard cap; least recently used evicted when full |
 
 ## 10. Running the API server
 
@@ -543,7 +565,7 @@ Two implementation details worth knowing (both commented in the file):
 
 ## 12. Testing
 
-The test suite (`tests_api/test_agent_api.py`, 22 tests) needs neither
+The test suite (`tests_api/test_agent_api.py`, 28 tests) needs neither
 Azure OpenAI credentials nor a running MCP server. It builds a `FakeAgent`
 that replays canned graph events, so the tests exercise the real
 AgentService event handling, the real endpoints, and the real auth code

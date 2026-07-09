@@ -16,7 +16,12 @@ import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from agent_client.agent_api import AgentEvent, AgentService, create_app
+from agent_client.agent_api import (
+    AgentEvent,
+    AgentService,
+    UnknownSessionError,
+    create_app,
+)
 from agent_client.auth_api import (
     AuthError,
     NoAuthAuthenticator,
@@ -63,8 +68,18 @@ class FakeAgent:
         return SimpleNamespace(values={"messages": self.final_messages})
 
 
-def make_service(events, final_messages=None, tool_count=12):
-    return AgentService(FakeAgent(events, final_messages), tool_count)
+class FakeCheckpointer:
+    """Records delete_thread calls so eviction can be asserted."""
+
+    def __init__(self):
+        self.deleted = []
+
+    def delete_thread(self, thread_id):
+        self.deleted.append(thread_id)
+
+
+def make_service(events, final_messages=None, tool_count=12, **kwargs):
+    return AgentService(FakeAgent(events, final_messages), tool_count, **kwargs)
 
 
 STREAMING_EVENTS = [
@@ -79,9 +94,10 @@ STREAMING_EVENTS = [
 
 def test_stream_yields_phase_token_answer():
     service = make_service(STREAMING_EVENTS)
+    sid = service.create_session()
 
     async def collect():
-        return [e async for e in service.stream("s1", "hi")]
+        return [e async for e in service.stream(sid, "hi")]
 
     events = asyncio.run(collect())
     assert [e.type for e in events] == ["phase", "phase", "token", "token", "answer"]
@@ -101,9 +117,10 @@ def test_stream_ignores_unknown_nodes_and_tool_chunks():
         _chunk_event("ok"),
     ]
     service = make_service(events)
+    sid = service.create_session()
 
     async def collect():
-        return [e async for e in service.stream("s1", "hi")]
+        return [e async for e in service.stream(sid, "hi")]
 
     collected = asyncio.run(collect())
     assert [e.type for e in collected] == ["token", "answer"]
@@ -113,9 +130,10 @@ def test_stream_ignores_unknown_nodes_and_tool_chunks():
 def test_stream_falls_back_to_state_when_nothing_streamed():
     final = [SimpleNamespace(content="direct answer")]
     service = make_service([_node_start_event("router")], final_messages=final)
+    sid = service.create_session()
 
     async def collect():
-        return [e async for e in service.stream("s1", "hi")]
+        return [e async for e in service.stream(sid, "hi")]
 
     events = asyncio.run(collect())
     assert events[-1].type == "answer"
@@ -124,12 +142,88 @@ def test_stream_falls_back_to_state_when_nothing_streamed():
 
 def test_ask_returns_full_answer():
     service = make_service(STREAMING_EVENTS)
-    assert asyncio.run(service.ask("s1", "hi")) == "Hello world"
+    sid = service.create_session()
+    assert asyncio.run(service.ask(sid, "hi")) == "Hello world"
 
 
 def test_create_session_ids_are_unique():
     service = make_service([])
     assert service.create_session() != service.create_session()
+
+
+# -- Session lifecycle --
+
+def test_stream_rejects_unknown_session():
+    service = make_service(STREAMING_EVENTS)
+
+    async def run():
+        async for _ in service.stream("never-created", "hi"):
+            pass
+
+    with pytest.raises(UnknownSessionError):
+        asyncio.run(run())
+
+
+def test_idle_sessions_are_swept():
+    checkpointer = FakeCheckpointer()
+    service = make_service(
+        STREAMING_EVENTS, checkpointer=checkpointer, session_ttl_seconds=100,
+    )
+    sid = service.create_session()
+    # simulate idleness: push the last-used clock past the TTL
+    service._sessions[sid].last_used -= 101
+    assert service.sweep_expired_sessions() == 1
+    assert not service.has_session(sid)
+    # the checkpointer thread was deleted too -- that is what frees memory
+    assert checkpointer.deleted == [sid]
+
+
+def test_active_sessions_survive_the_sweep():
+    service = make_service(STREAMING_EVENTS, session_ttl_seconds=100)
+    sid = service.create_session()
+    assert service.sweep_expired_sessions() == 0
+    assert service.has_session(sid)
+
+
+def test_max_sessions_evicts_least_recently_used():
+    checkpointer = FakeCheckpointer()
+    service = make_service(STREAMING_EVENTS, checkpointer=checkpointer, max_sessions=2)
+    s1 = service.create_session()
+    s2 = service.create_session()
+    service._sessions[s1].last_used -= 10  # s1 is the oldest
+    s3 = service.create_session()  # cap reached -> evicts s1
+    assert not service.has_session(s1)
+    assert service.has_session(s2) and service.has_session(s3)
+    assert checkpointer.deleted == [s1]
+
+
+class SlowFakeAgent(FakeAgent):
+    """Tracks how many turns run at once, to prove the per-session lock."""
+
+    def __init__(self, events):
+        super().__init__(events)
+        self.active = 0
+        self.max_active = 0
+
+    async def astream_events(self, inputs, config, version):
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(0.02)  # give the other turn a chance to overlap
+        for event in self.events:
+            yield event
+        self.active -= 1
+
+
+def test_concurrent_turns_on_one_session_are_serialised():
+    agent = SlowFakeAgent(STREAMING_EVENTS)
+    service = AgentService(agent, 12)
+    sid = service.create_session()
+
+    async def run():
+        await asyncio.gather(service.ask(sid, "a"), service.ask(sid, "b"))
+
+    asyncio.run(run())
+    assert agent.max_active == 1  # the lock kept the turns sequential
 
 
 # -- Authenticators --
@@ -189,6 +283,11 @@ def make_client(service=None, authenticator=None):
     return TestClient(create_app(service=service, authenticator=authenticator))
 
 
+def new_session(client) -> str:
+    """Create a session through the API, as a real client would."""
+    return client.post("/sessions", headers=AUTH).json()["session_id"]
+
+
 def test_health_is_open():
     client = make_client()
     response = client.get("/health")
@@ -216,15 +315,25 @@ def test_create_session():
 
 def test_send_message_buffered():
     client = make_client()
-    response = client.post("/sessions/s1/messages", json={"message": "hi"}, headers=AUTH)
+    sid = new_session(client)
+    response = client.post(f"/sessions/{sid}/messages", json={"message": "hi"}, headers=AUTH)
     assert response.status_code == 200
     assert response.json() == {"answer": "Hello world"}
 
 
+def test_unknown_session_returns_404_everywhere():
+    client = make_client()
+    body = {"message": "hi"}
+    assert client.post("/sessions/nope/messages", json=body, headers=AUTH).status_code == 404
+    assert client.post("/sessions/nope/messages/stream", json=body, headers=AUTH).status_code == 404
+    assert client.get("/sessions/nope/messages", headers=AUTH).status_code == 404
+
+
 def test_stream_message_sse():
     client = make_client()
+    sid = new_session(client)
     with client.stream(
-        "POST", "/sessions/s1/messages/stream", json={"message": "hi"}, headers=AUTH
+        "POST", f"/sessions/{sid}/messages/stream", json={"message": "hi"}, headers=AUTH
     ) as response:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")
@@ -259,7 +368,8 @@ def test_get_messages_returns_chat_view():
     # the chat view hides tool calls and tool results -- only what a
     # chat window would have displayed
     client = make_client(service=make_service([], final_messages=CHAT_HISTORY))
-    response = client.get("/sessions/s1/messages", headers=AUTH)
+    sid = new_session(client)
+    response = client.get(f"/sessions/{sid}/messages", headers=AUTH)
     assert response.status_code == 200
     assert response.json()["messages"] == [
         {"role": "user", "text": "hi"},
@@ -269,7 +379,8 @@ def test_get_messages_returns_chat_view():
 
 def test_get_messages_raw_view_for_debugging():
     client = make_client(service=make_service([], final_messages=CHAT_HISTORY))
-    response = client.get("/sessions/s1/messages?raw=true", headers=AUTH)
+    sid = new_session(client)
+    response = client.get(f"/sessions/{sid}/messages?raw=true", headers=AUTH)
     messages = response.json()["messages"]
     assert [m["type"] for m in messages] == [
         "HumanMessage", "AIMessage", "ToolMessage", "AIMessage",

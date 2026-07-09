@@ -150,10 +150,10 @@ async function send() {
   const bubble = addMessage("assistant", "");
 
   try {
-    const sid = await ensureSession();
+    let sid = await ensureSession();
     statusEl.textContent = "Connecting...";
 
-    const resp = await fetch(
+    const post = () => fetch(
       API_BASE + "/sessions/" + sid + "/messages/stream",
       {
         method: "POST",
@@ -161,6 +161,16 @@ async function send() {
         body: JSON.stringify({ message: question }),
       },
     );
+
+    let resp = await post();
+    if (resp.status === 404) {
+      // the server evicts idle sessions (TTL) -- ours expired, so
+      // start a fresh one and retry once. Conversation context is
+      // gone, but the message still gets answered.
+      sessionId = null;
+      sid = await ensureSession();
+      resp = await post();
+    }
     if (!resp.ok) throw new Error("HTTP " + resp.status);
 
     await readSseStream(resp, (type, data) => {
