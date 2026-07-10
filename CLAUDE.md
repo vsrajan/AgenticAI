@@ -36,6 +36,7 @@ mcp-server/src/mcp_docs_server/
 docs/
   architecture.md — Mermaid architecture diagrams (high-level, agent graph, MCP tools)
   agent_api.md    — beginner-oriented guide to the HTTP API layer
+  entra_auth_guide.md — Entra ID implementation guide (client->agent + agent->MCP)
   architecture_excalidraw.md + 0*.excalidraw — Excalidraw diagrams (05 = API flows)
 ```
 
@@ -158,6 +159,6 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 ## To do
 
 - Port the interactive CLI onto AgentService events (agnes_agent_graph.py still has its own streaming loop; agent_api.py has the event-based one -- converge them)
-- Azure Entra OAuth2 authenticator (`entra` mode in auth_api.py -- JWT/JWKS validation; interface already reserved)
-- Entra-based auth for the MCP server: replace StaticTokenVerifier with a JWT/JWKS validator in the same TokenVerifier slot (mcp-server auth.py); agent identity from token claims, scopes mapped to tool groups for per-agent authorization
+- Azure Entra OAuth2 authenticator (`entra` mode in auth_api.py -- JWT/JWKS validation; interface already reserved). See docs/entra_auth_guide.md
+- Entra-based auth for the MCP server: replace StaticTokenVerifier with a JWT/JWKS validator in the same TokenVerifier slot (mcp-server auth.py); agent identity from token claims, scopes mapped to tool groups for per-agent authorization. See docs/entra_auth_guide.md
 - Replace the POC web client with a real web UI (HTTPS, login flow instead of token-in-url, tightened CORS)

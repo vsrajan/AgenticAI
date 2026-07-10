@@ -736,6 +736,10 @@ The end goal is Azure Entra ID (formerly Azure AD): each user or app
 obtains a short-lived JWT access token from Microsoft, and the API
 validates it cryptographically.
 
+A full implementation guide now exists -- concepts, design choices,
+portal setup, and code sketches for both this API and the agent-to-MCP
+leg: see [entra_auth_guide.md](entra_auth_guide.md).
+
 The design already reserves the slot. What changes when Entra lands:
 
 1. a new `EntraAuthenticator` class in `auth_api.py` implementing the
