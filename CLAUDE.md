@@ -29,6 +29,7 @@ agent-client/data/
 
 mcp-server/src/mcp_docs_server/
   server.py      — FastMCP server (12 tools over SSE/stdio)
+  auth.py        — per-agent bearer-token auth for HTTP transports (TokenVerifier)
   pdf_indexer.py — PDF → per-page BM25 index (DocIndex)
   csv_store.py   — CSV → in-memory DataFrame (CsvStore)
 
@@ -97,6 +98,12 @@ is the complete committed template (agent + API settings).
 
 MCP transport: SSE (default, set `MCP_SERVER_URL`) or stdio (set `MCP_SERVER_COMMAND` + `MCP_SERVER_ARGS`)
 
+MCP auth: the server requires a bearer token per agent on HTTP transports
+(`MCP_AUTH=static` fail-closed, `MCP_AUTH_TOKENS=name:token,...`; `none` to
+disable). The agent sends `MCP_SERVER_TOKEN` from its .env; the name is a
+server-side label used in tool-call audit logs (`caller=agnes`). stdio needs
+no auth. See mcp-server/README.md Authentication.
+
 API: bearer-token auth on all endpoints except /health (`AGENT_API_AUTH=static`
 with `AGENT_API_TOKEN`, fail-closed; `none` to disable for local dev). Endpoints:
 POST /sessions, POST /sessions/{id}/messages (buffered JSON), POST
@@ -127,7 +134,8 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 - Added API test suite (tests_api/, 22 tests) using a fake agent -- runs without Azure or MCP
 - Added GET /sessions/{id}/messages history endpoint -- chat view by default, raw=true debug dump (types + tool calls)
 - Added session hygiene to the API: explicit sessions only (404 for unknown/expired ids), idle-TTL eviction via background sweeper + LRU cap (AGENT_API_SESSION_TTL_MINUTES / AGENT_API_MAX_SESSIONS), per-session lock serialising concurrent messages; web client auto-recreates expired sessions. Eviction is lock-aware: in-flight sessions are never evicted (cap overshoots if everything is mid-turn)
-- Added graph execution log to the API (AGENT_API_STREAM_FILE, default agent_api_stream.txt): per-node output appended per turn, session-tagged, same format as the CLI's agent_stream.txt, reset on server start. tests_api now 34 tests
+- Added graph execution log to the API (AGENT_API_STREAM_FILE, default agent_api_stream.txt): per-node output appended per turn, session-tagged, same format as the CLI's agent_stream.txt, reset on server start
+- Added MCP server auth: per-agent static bearer tokens on HTTP transports via the MCP SDK's TokenVerifier hook (mcp-server auth.py; MCP_AUTH fail-closed, MCP_AUTH_TOKENS name:token pairs), caller identity in all 12 tool log lines, client sends MCP_SERVER_TOKEN from _get_mcp_server_config. mcp-server tests (13); tests_api now 36
 - Added beginner-oriented API guide (docs/agent_api.md) and Excalidraw API-flow diagram (docs/05_agent_api_flow.excalidraw)
 - Merged the API layer into the main manifests: fastapi/uvicorn deps + agent-api script in pyproject.toml, API settings in .env.example (the temporary pyproject_api.toml / .env_api supersets were removed)
 - Restructured the package to match the server deployment: agent_client -> ease_clients, shared internals moved to ease_clients/utils (llm.py, scanner.py, incident_sources.py, and agent.py renamed to agnes_agent_graph.py); entry points and loggers renamed accordingly

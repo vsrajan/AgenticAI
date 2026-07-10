@@ -109,6 +109,41 @@ cp .env.example .env
 | `MCP_HOST` | Bind address (SSE/HTTP only) | `127.0.0.1` |
 | `MCP_PORT` | Bind port (SSE/HTTP only) | `8000` |
 | `MCP_LOG_LEVEL` | Logging level | `INFO` |
+| `MCP_AUTH` | `static` (bearer tokens, fail-closed) or `none` (open; local dev only) | `static` |
+| `MCP_AUTH_TOKENS` | Comma-separated `name:token` pairs, one per agent deployment | unset (required in static mode) |
+
+## Authentication
+
+Agents connecting over HTTP transports (`sse` / `streamable-http`) must
+present a bearer token (`Authorization: Bearer <token>`). Tokens are
+configured as one `name:token` pair per agent deployment:
+
+```
+MCP_AUTH_TOKENS=agnes:tok_abc123,hr-bot:tok_xyz789
+```
+
+The name never travels over the wire -- clients send only the token,
+and the server derives the agent's identity by lookup (possession of
+the secret is the proof). The name appears in tool-call audit logs
+(`search_docs caller=agnes query=...`) and makes tokens revocable per
+agent: remove one pair without rotating the others.
+
+Fail-closed: with `MCP_AUTH=static` (the default) and no
+`MCP_AUTH_TOKENS`, the server refuses to start on an HTTP transport.
+Running open requires an explicit `MCP_AUTH=none`. The `stdio`
+transport has no HTTP layer, so auth does not apply there (the server
+runs as a child process of a caller who already has local access).
+
+On the agent side, set the deployment's token once in
+`agent-client/.env` as `MCP_SERVER_TOKEN` -- the CLI, scanner, and API
+all send it automatically.
+
+Tokens travel in cleartext over plain HTTP; for anything beyond a
+trusted network, terminate TLS in front of the server. The verifier
+plugs into the MCP SDK's `TokenVerifier` hook, which is the same slot
+a future OAuth2 / Entra JWT validator uses.
+
+Tests: `uv run --with pytest pytest tests/ -q`
 
 ## Adding Data
 

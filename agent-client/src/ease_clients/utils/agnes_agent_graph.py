@@ -817,21 +817,32 @@ def build_graph(llm, all_tools):
 def _get_mcp_server_config() -> dict:
     """Build MCP server connection config from env vars.
 
-    sse   -- needs MCP_SERVER_URL (e.g. http://host:8000/sse)
-    stdio -- needs MCP_SERVER_COMMAND + MCP_SERVER_ARGS
+    sse   -- needs MCP_SERVER_URL (e.g. http://host:8000/sse); when
+             MCP_SERVER_TOKEN is set it is sent as a bearer token so
+             the server can authenticate this agent deployment
+    stdio -- needs MCP_SERVER_COMMAND + MCP_SERVER_ARGS (no auth: the
+             server runs as a local child process)
     """
     server_name = os.environ.get("MCP_SERVER_NAME", "access-governance-docs")
     transport = os.environ.get("MCP_TRANSPORT", "sse").lower()
 
     if transport == "sse":
         url = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8000/sse")
-        logger.info("MCP server=%s transport=sse url=%s", server_name, url)
-        return {
-            server_name: {
-                "url": url,
-                "transport": "sse",
-            }
+        connection = {
+            "url": url,
+            "transport": "sse",
         }
+        # this deployment's MCP credential -- the server identifies the
+        # agent by which token it presents, so no name is sent here.
+        # Never log the token value.
+        token = os.environ.get("MCP_SERVER_TOKEN", "")
+        if token:
+            connection["headers"] = {"Authorization": f"Bearer {token}"}
+        logger.info(
+            "MCP server=%s transport=sse url=%s auth=%s",
+            server_name, url, "bearer" if token else "off",
+        )
+        return {server_name: connection}
 
     if transport == "stdio":
         command = os.environ.get("MCP_SERVER_COMMAND")

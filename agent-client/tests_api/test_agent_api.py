@@ -326,6 +326,28 @@ def test_stream_file_disabled_by_default():
     asyncio.run(service.ask(sid, "hi"))  # no file IO happens
 
 
+# -- MCP connection config --
+
+def test_mcp_config_attaches_bearer_token(monkeypatch):
+    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+
+    monkeypatch.setenv("MCP_TRANSPORT", "sse")
+    monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
+    monkeypatch.setenv("MCP_SERVER_TOKEN", "tok123")
+    connection = _get_mcp_server_config()["access-governance-docs"]
+    assert connection["headers"] == {"Authorization": "Bearer tok123"}
+
+
+def test_mcp_config_without_token_sends_no_headers(monkeypatch):
+    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+
+    monkeypatch.setenv("MCP_TRANSPORT", "sse")
+    monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
+    monkeypatch.delenv("MCP_SERVER_TOKEN", raising=False)
+    connection = _get_mcp_server_config()["access-governance-docs"]
+    assert "headers" not in connection
+
+
 # -- Authenticators --
 
 def test_static_token_accepts_correct_token():

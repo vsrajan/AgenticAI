@@ -30,8 +30,11 @@ import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
+from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 
+from mcp_docs_server.auth import build_token_verifier
 from mcp_docs_server.pdf_indexer import DocIndex
 from mcp_docs_server.csv_store import CsvStore
 
@@ -70,11 +73,42 @@ logger.info("Docs directory: %s", DOCS_DIR)
 logger.info("Server name: %s", MCP_SERVER_NAME)
 logger.info("Transport: %s (host=%s, port=%d)", MCP_TRANSPORT, MCP_HOST, MCP_PORT)
 
+# -- Authentication --
+# HTTP transports require a bearer token per agent (see auth.py).
+# stdio has no HTTP layer: the server is a child process of a caller
+# who already has local access, so auth does not apply there.
+_token_verifier = None
+if MCP_TRANSPORT in ("sse", "streamable-http"):
+    _token_verifier = build_token_verifier()  # fails closed without tokens
+elif os.environ.get("MCP_AUTH") or os.environ.get("MCP_AUTH_TOKENS"):
+    logger.info("MCP_AUTH is configured but transport=stdio has no HTTP layer -- auth not applied")
+
+# AuthSettings is OAuth resource-server metadata the SDK advertises to
+# clients; for static tokens the URLs are informational only
+_SERVER_URL = f"http://{MCP_HOST}:{MCP_PORT}"
+_auth_settings = (
+    AuthSettings(issuer_url=_SERVER_URL, resource_server_url=_SERVER_URL)
+    if _token_verifier else None
+)
+
+
+def _caller() -> str:
+    """Name of the authenticated agent, for audit log lines.
+
+    Reads the AccessToken the SDK stored for the current request;
+    anonymous when auth is disabled or on stdio.
+    """
+    access_token = get_access_token()
+    return access_token.client_id if access_token else "anonymous"
+
+
 mcp = FastMCP(
     MCP_SERVER_NAME,
     host=MCP_HOST,
     port=MCP_PORT,
     log_level=LOG_LEVEL,
+    token_verifier=_token_verifier,
+    auth=_auth_settings,
     instructions=(
         "This server provides documentation and data for an enterprise Access "
         "Governance application.\n\n"
@@ -109,7 +143,7 @@ def list_topics() -> dict:
     Call this first to understand what documentation is available.
     Returns a tree of topics mapped to document paths.
     """
-    logger.debug("list_topics called")
+    logger.debug("list_topics called by %s", _caller())
     return index.get_topic_tree()
 
 
@@ -127,7 +161,7 @@ def search_docs(query: str, max_results: int = 5) -> list[dict]:
                "delegation setup", "leaver process").
         max_results: Maximum number of results to return (default 5).
     """
-    logger.info("search_docs query=%r max_results=%d", query, max_results)
+    logger.info("search_docs caller=%s query=%r max_results=%d", _caller(), query, max_results)
     results = index.search(query, max_results)
     logger.info("search_docs returned %d results", len(results))
     return results
@@ -144,7 +178,7 @@ def read_page(page_path: str) -> dict:
     Args:
         page_path: Path to the document (e.g., "entitlements/ordering_faq.pdf").
     """
-    logger.info("read_page page_path=%r", page_path)
+    logger.info("read_page caller=%s page_path=%r", _caller(), page_path)
     result = index.read(page_path)
     if "error" in result:
         logger.warning("read_page not found: %s", page_path)
@@ -163,7 +197,7 @@ def list_datasets() -> dict:
     Call this to discover what structured data is available.
     Use the dataset name and column names with other CSV tools.
     """
-    logger.debug("list_datasets called")
+    logger.debug("list_datasets called by %s", _caller())
     return csv_store.list_datasets()
 
 
@@ -178,7 +212,7 @@ def search_dataset(dataset: str, query: str, max_results: int = 10) -> list[dict
         query: Free-text search query (e.g. "finance reporting read-only").
         max_results: Maximum number of rows to return (default 10).
     """
-    logger.info("search_dataset dataset=%r query=%r max_results=%d", dataset, query, max_results)
+    logger.info("search_dataset caller=%s dataset=%r query=%r max_results=%d", _caller(), dataset, query, max_results)
     results = csv_store.search(dataset, query, max_results)
     logger.info("search_dataset returned %d results", len(results))
     return results
@@ -200,7 +234,7 @@ def filter_dataset(dataset: str, filters: dict[str, str], max_results: int = 100
         filters: Column-value pairs to match, e.g. {"ou": "Finance", "location": "London"}.
         max_results: Maximum rows to return (default 100).
     """
-    logger.info("filter_dataset dataset=%r filters=%r max_results=%d", dataset, filters, max_results)
+    logger.info("filter_dataset caller=%s dataset=%r filters=%r max_results=%d", _caller(), dataset, filters, max_results)
     results = csv_store.filter_rows(dataset, max_results=max_results, **filters)
     logger.info("filter_dataset returned %d rows", len(results))
     return results
@@ -228,7 +262,7 @@ def filter_dataset_fuzzy(dataset: str, filters: dict[str, str], max_results: int
         filters: Column-regex pairs to match, e.g. {"JOBTITLE": "finance", "OU": "london"}.
         max_results: Maximum rows to return (default 100).
     """
-    logger.info("filter_dataset_fuzzy dataset=%r filters=%r max_results=%d", dataset, filters, max_results)
+    logger.info("filter_dataset_fuzzy caller=%s dataset=%r filters=%r max_results=%d", _caller(), dataset, filters, max_results)
     results = csv_store.filter_rows_fuzzy(dataset, max_results=max_results, **filters)
     logger.info("filter_dataset_fuzzy returned %d rows", len(results))
     return results
@@ -260,8 +294,8 @@ def count_by_column(
                instead of exact matching (default False).
     """
     logger.info(
-        "count_by_column dataset=%r column=%r filters=%r fuzzy=%r",
-        dataset, column, filters, fuzzy,
+        "count_by_column caller=%s dataset=%r column=%r filters=%r fuzzy=%r",
+        _caller(), dataset, column, filters, fuzzy,
     )
     criteria = filters or {}
     results = csv_store.count_by_column(dataset, column, fuzzy=fuzzy, **criteria)
@@ -280,7 +314,7 @@ def get_column_values(dataset: str, column: str) -> list[str] | dict:
         dataset: Name of the dataset (from list_datasets).
         column: Column name to get values for (from list_datasets).
     """
-    logger.info("get_column_values dataset=%r column=%r", dataset, column)
+    logger.info("get_column_values caller=%s dataset=%r column=%r", _caller(), dataset, column)
     return csv_store.get_distinct_values(dataset, column)
 
 
@@ -307,7 +341,7 @@ def get_request_attributes() -> dict:
     must be collected before calling raise_entitlement_request.
     Call this first so you know what information to gather from the user.
     """
-    logger.debug("get_request_attributes called")
+    logger.debug("get_request_attributes called by %s", _caller())
     return _load_request_config()
 
 
@@ -330,8 +364,8 @@ def raise_entitlement_request(
         end_date: Optional requested end date (YYYY-MM-DD). Empty for permanent access.
     """
     logger.info(
-        "raise_entitlement_request resource_id=%r justification=%r start_date=%r end_date=%r",
-        resource_id, justification, start_date, end_date,
+        "raise_entitlement_request caller=%s resource_id=%r justification=%r start_date=%r end_date=%r",
+        _caller(), resource_id, justification, start_date, end_date,
     )
 
     if not resource_id:
@@ -375,7 +409,7 @@ def get_quality_criteria() -> dict:
     constitutes a pass), importance level, and range (Asset or Access Right).
     The quality agent uses these criteria to evaluate resource metadata.
     """
-    logger.debug("get_quality_criteria called")
+    logger.debug("get_quality_criteria called by %s", _caller())
     return _load_quality_criteria()
 
 
