@@ -515,9 +515,32 @@ app token, you wanted OBO.
 The payoff of the whole arrangement: token B is the same KIND of
 token the browser SPA sends -- delegated user token, correct
 audience, `scp` contains `access_as_user`, `oid` identifies the
-human. `EntraAuthenticator` (section 2.5) validates both identically:
-signature against the tenant JWKS, `iss`, `aud`, `exp`, required
-scope. Zero Teams-specific code in the validator. The full chain:
+human. Side by side, for the same user (Priya) talking to the same
+API:
+
+| | Browser SPA token | Bot token B | Same or different? |
+|---|---|---|---|
+| `iss` (who minted it) | `login.microsoftonline.com/<tenant>/v2.0` | `login.microsoftonline.com/<tenant>/v2.0` | same -- both minted by your tenant |
+| `aud` (minted for whom) | Agent API client id | Agent API client id | same -- both FOR the API |
+| `scp` (delegated scope) | `access_as_user` | `access_as_user` | same -- user-delegated in both |
+| `oid` (which human) | Priya's object id | Priya's object id | same -- the SAME user identity |
+| `name`, `preferred_username` | Priya's | Priya's | same |
+| `roles` | absent | absent | same -- absent, because these are user tokens, not app tokens |
+| `exp` / lifetime | ~60-90 min | ~60-90 min | same |
+| signature | Entra's key | Entra's key | same -- validated against the same JWKS |
+| **`azp` (which app acted)** | **SPA client id** | **bot client id** | **DIFFERENT -- the only claim-level difference** |
+| how it was acquired | Auth Code + PKCE, user's browser talked to Entra directly | Teams SSO -> OBO exchange, the bot's server talked to Entra | different -- but acquisition history is NOT in the token |
+
+Read the table bottom-up and the design lesson falls out: the entire
+difference between "Priya via the web page" and "Priya via the Teams
+bot" collapses into one claim, `azp`. Everything the validator checks
+-- signature, `iss`, `aud`, `exp`, `scp` -- is identical, which is
+WHY `EntraAuthenticator` (section 2.5) needs zero Teams-specific
+code. And `azp` is exactly the claim the optional hardening in
+section 3.6 uses: the allowed-clients allowlist keys on it, and the
+audit log surfaces it.
+
+The full chain:
 
 ```
 user --> Teams client --(SSO: token A, aud=bot)--> bot
