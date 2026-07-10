@@ -37,6 +37,7 @@ docs/
   architecture.md — Mermaid architecture diagrams (high-level, agent graph, MCP tools)
   agent_api.md    — beginner-oriented guide to the HTTP API layer
   entra_auth_guide.md — Entra ID implementation guide (client->agent + agent->MCP)
+  PerformanceRecommendations.md — prod-scale performance analysis + prioritized plan
   architecture_excalidraw.md + 0*.excalidraw — Excalidraw diagrams (05 = API flows)
 ```
 
