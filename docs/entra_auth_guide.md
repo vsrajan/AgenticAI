@@ -29,8 +29,9 @@ The two legs are different problems and are treated separately:
 
 1. [Concepts, from scratch](#1-concepts-from-scratch)
 2. [Leg 1: Client to Agent API](#2-leg-1-client-to-agent-api)
-3. [Leg 2: Agent to MCP server](#3-leg-2-agent-to-mcp-server)
-4. [Rollout plan and checklist](#4-rollout-plan-and-checklist)
+3. [Bot authentication and validation, in depth](#3-bot-authentication-and-validation-in-depth)
+4. [Leg 2: Agent to MCP server](#4-leg-2-agent-to-mcp-server)
+5. [Rollout plan and checklist](#5-rollout-plan-and-checklist)
 
 ---
 
@@ -95,11 +96,28 @@ for leg 2 (an application acting as itself) carry `roles`.
 
 ### The flows we will use
 
+A common misconception to clear up front: the flow is NOT chosen by
+whether a human is present. It is chosen by **where the OAuth client
+code runs** and what that code is capable of:
+
+| Where does the OAuth client run? | Can it drive a browser redirect? | Flow |
+|---|---|---|
+| The user's own browser | yes | Authorization Code + PKCE |
+| A server, acting for a user who authenticated one hop upstream | no | On-Behalf-Of (token exchange), fed by Teams SSO |
+| A server, acting as itself (no user) | no | Client Credentials |
+
+Applied to our clients:
+
 | Flow | Used by | Human present? |
 |---|---|---|
 | Authorization Code + PKCE | browser web client | yes -- Microsoft sign-in page |
-| Teams SSO / On-Behalf-Of | Teams bot | yes -- Teams already knows the user |
+| Teams SSO / On-Behalf-Of | Teams bot | yes -- but the bot is a SERVER; see section 3 |
 | Client Credentials | agent daemon -> MCP | no -- secret proves app identity |
+
+The browser and the Teams bot pursue the same GOAL (a delegated user
+token reaching the Agent API) through different flows because their
+topology differs: the browser talks to the API directly, while the
+bot sits one hop away from the user. Section 3 unpacks this fully.
 
 You do not need to memorise the protocol internals: Microsoft's MSAL
 libraries (`msal-browser` for JavaScript, `msal` for Python) implement
@@ -342,16 +360,13 @@ the page must be served over **HTTPS** from a registered redirect URI
 becomes a real hosted page), and `AGENT_API_CORS_ORIGINS` should be
 tightened to exactly that origin.
 
-**Teams bot:** at the overview level, Teams already knows who the user
-is, so the bot uses **Teams SSO**: it requests a token for its own app
-registration via the Bot Framework's token service, then exchanges it
-for an Agent-API token using the **On-Behalf-Of (OBO) flow** (the bot
-is a confidential client with a secret, calling
-`acquire_token_on_behalf_of` in MSAL Python). The token that reaches
-the Agent API is a normal delegated user token -- same `scp`, same
-`oid`, so the API code above needs NOTHING extra for Teams. The bot
-registration needs the `access_as_user` permission on the API, and its
-manifest needs the `webApplicationInfo` section for SSO.
+**Teams bot:** the bot obtains a delegated user token through Teams
+SSO plus the On-Behalf-Of flow, and what reaches the Agent API is a
+normal delegated user token -- same `scp`, same `oid`, so the
+validator above needs NOTHING extra for Teams. Because the bot's
+topology (a server one hop away from the user) makes this the least
+obvious part of the design, it has its own full section: see
+section 3, "Bot authentication and validation, in depth".
 
 ### 2.7 Testing leg 1 without a tenant
 
@@ -368,9 +383,214 @@ manifest needs the `webApplicationInfo` section for SSO.
 
 ---
 
-## 3. Leg 2: Agent to MCP server
+## 3. Bot authentication and validation, in depth
 
-### 3.1 Design choices, walked through
+The browser client and the Teams bot pursue the same goal -- a
+delegated user token, minted by Entra, reaching the Agent API -- but
+they cannot use the same flow. This section explains why, walks the
+two-step mechanism the bot uses, and lists the changes (mostly
+optional hardening) on the agent side.
+
+### 3.1 Why the bot cannot use Auth Code + PKCE
+
+The hidden assumption to discard: that the flow is chosen by whether
+a human is present. It is chosen by **where the OAuth client code
+runs**.
+
+In the browser case, the code that acquires and spends the token runs
+on the user's machine, inside a browser. A browser can be redirected
+to `login.microsoftonline.com` and back -- which is the mechanical
+requirement of Authorization Code + PKCE. The SPA therefore gets a
+token for the Agent API directly. One hop.
+
+A Teams bot is different in a way that is easy to miss: **the bot
+does not run inside the user's Teams client.** It is a server-side
+service in your infrastructure. When the user types a message,
+Microsoft's Teams service relays it over HTTPS to the bot's endpoint.
+The entity that must call the Agent API is therefore a headless
+server that (a) has no browser it can redirect for a sign-in dance,
+and (b) receives the user's words second-hand, through Microsoft:
+
+```
+Browser case:  user's browser -----------------------------> Agent API
+               (the browser IS the OAuth client; one hop)
+
+Teams case:    user's Teams client --> Teams service --> YOUR bot --> Agent API
+               (the OAuth client is the bot server; the user's
+                identity must cross the middle hop somehow)
+```
+
+Getting the user's identity across that middle hop -- verifiably, not
+as a string the bot merely claims -- is what the two-step mechanism
+below solves.
+
+### 3.2 Step 1: Teams SSO -- getting a user token TO the bot
+
+Teams SSO is **not an OAuth flow**; it is Teams-platform plumbing.
+The user is already signed into Teams itself -- they completed a full
+interactive Entra sign-in when they logged into Teams, and Microsoft
+ran that flow, not you. Because the Teams client holds a live Entra
+session for the user, it can silently ask Entra for **token A**: a
+delegated user token whose audience is the BOT's own app registration
+(enabled by the `webApplicationInfo` section of the Teams app
+manifest). Token A carries the user's real claims -- `oid`, `name` --
+signed by Entra, and is delivered to the bot server through the Bot
+Framework's token machinery. No sign-in page appears because no new
+authentication happened; an existing session was reused. That is all
+"SSO" means here.
+
+Token A alone is useless for calling the Agent API: its `aud` is the
+bot, not the API. Presenting it to the API would (correctly) fail the
+audience check in `EntraAuthenticator`.
+
+### 3.3 Step 2: On-Behalf-Of -- exchanging token A for token B
+
+On-Behalf-Of (OBO) IS a real, standardised OAuth grant -- Microsoft's
+implementation of **OAuth 2.0 Token Exchange (RFC 8693)**, using
+`grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer`. It exists
+precisely for the multi-hop case: a middle-tier service needs to call
+a downstream API as the user who called it.
+
+The bot makes one call to Entra's token endpoint presenting TWO
+credentials at once:
+
+1. **token A** (the "assertion") -- Entra-signed proof that user X
+   delegated to this bot
+2. **its client secret** -- proof that the caller really is the bot
+   (this is where being a confidential client matters)
+
+Entra validates both, checks that the bot's registration holds the
+delegated `access_as_user` permission on the Agent API, and mints
+**token B**:
+
+| Claim in token B | Value |
+|---|---|
+| `aud` | the Agent API's client id |
+| `oid` | user X (the human) |
+| `scp` | `access_as_user` |
+| `azp` | the bot's client id (which app acted for the user) |
+
+In MSAL Python, the whole exchange is one call on the bot side:
+
+```python
+result = msal.ConfidentialClientApplication(
+    bot_client_id,
+    authority=f"https://login.microsoftonline.com/{tenant_id}",
+    client_credential=bot_secret,
+).acquire_token_on_behalf_of(
+    user_assertion=token_a,
+    scopes=["api://<api client id>/access_as_user"],
+)
+token_b = result["access_token"]
+```
+
+### 3.4 How a confidential client conveys user identity without forging it
+
+The question that makes or breaks understanding OBO: if the bot is a
+confidential client authenticating with a secret, how do USER details
+end up in the JWT it sends?
+
+**The bot never writes a single claim.** It trades one Entra-signed
+token for another Entra-signed token; ENTRA asserts the user claims
+in token B, having verified them from token A. The division of labour
+inside the exchange:
+
+- the client secret authenticates THE BOT
+- the assertion (token A) carries THE USER
+- token B truthfully records BOTH identities: `oid` = the human,
+  `azp` = which app acted for them
+
+A malicious or buggy bot cannot claim to be a different user, because
+it cannot forge token A -- it does not have Entra's signing key.
+
+Contrast with the anti-pattern this design exists to prevent: the bot
+calling the API with an app-only client-credentials token plus a
+`"user": "priya"` field in the request body. That is the bot
+SELF-ASSERTING user identity -- unverifiable and forgeable. If you
+ever find yourself passing a username in a request body alongside an
+app token, you wanted OBO.
+
+### 3.5 What the Agent API validates
+
+The payoff of the whole arrangement: token B is the same KIND of
+token the browser SPA sends -- delegated user token, correct
+audience, `scp` contains `access_as_user`, `oid` identifies the
+human. `EntraAuthenticator` (section 2.5) validates both identically:
+signature against the tenant JWKS, `iss`, `aud`, `exp`, required
+scope. Zero Teams-specific code in the validator. The full chain:
+
+```
+user --> Teams client --(SSO: token A, aud=bot)--> bot
+bot  --> Entra: OBO(assertion=token A + bot secret)
+Entra--> bot: token B (aud=API, oid=user, scp=access_as_user, azp=bot)
+bot  --> Agent API: Authorization: Bearer <token B>
+API  --> validate signature/iss/aud/exp/scp -> Principal(subject=user oid)
+```
+
+### 3.6 Agent-side code changes
+
+**Required for correctness: none.** That is the headline -- the leg-1
+work in section 2 already handles bot traffic, because token B is a
+standard delegated token. The items below are hardening and
+observability, all landing in existing hooks.
+
+**1. Optional: an allowed-clients allowlist (`azp` check).** Today any
+client application in the tenant that a user has consented to can
+mint tokens for the API's audience. If you want only YOUR clients
+(the SPA and the bot) to be accepted, check `azp` in
+`EntraAuthenticator.authenticate`, right after the scope check:
+
+```python
+# in __init__, from AGENT_API_ENTRA_ALLOWED_CLIENTS (comma-separated
+# client ids; empty = any client app in the tenant is acceptable):
+self._allowed_clients = set(allowed) if allowed else None
+
+# in authenticate(), after the scope check:
+if self._allowed_clients is not None:
+    if claims.get("azp") not in self._allowed_clients:
+        raise AuthError("Token presented by an unapproved client application.")
+```
+
+Config: `AGENT_API_ENTRA_ALLOWED_CLIENTS=<spa client id>,<bot client id>`.
+Recommendation: enable it -- it is two lines, and it turns "any app a
+user trusts" into "only apps YOU trust".
+
+**2. Optional: audit which app brought the user.** `azp` is already in
+`Principal.claims` -- surface it where sessions are created, in the
+existing log line in the `create_session` endpoint (`agent_api.py`):
+
+```python
+logger.info("Created session %s for %s via client %s",
+            session_id, principal.subject,
+            principal.claims.get("azp", "n/a"))
+```
+
+Log lines then distinguish "priya via the web client" from "priya via
+the Teams bot" -- useful when diagnosing which frontend misbehaves.
+
+**3. Usage pattern the bot should follow (no API change needed):**
+
+- bots cannot render a token stream, so the bot uses the buffered
+  endpoint `POST /sessions/{id}/messages` -- which exists for exactly
+  this reason
+- one API session per Teams conversation: the bot keeps a
+  conversation-id -> session-id map, and recreates the session on a
+  404 (TTL eviction), same as the web client does
+- session ownership (section 2.5) already isolates users correctly,
+  because each user's messages arrive under their own `oid` -- two
+  users in Teams never share a session even if the bot mixes up its
+  map, they just get a 404
+
+**4. Bot-side responsibilities (for completeness -- not agent code):**
+the Teams app manifest needs the `webApplicationInfo` section for
+SSO; the bot registration needs the delegated `access_as_user`
+permission on the API (admin-consented) plus its client secret; and
+the bot service calls `acquire_token_on_behalf_of` (section 3.3) and
+caches the result per user (MSAL's token cache handles renewal).
+
+## 4. Leg 2: Agent to MCP server
+
+### 4.1 Design choices, walked through
 
 **Choice 1: whose identity does the agent present?** Two options:
 
@@ -405,7 +625,7 @@ object, which httpx consults on every request -- so a tiny
 `httpx.Auth` subclass that asks MSAL for a token each time (MSAL
 caches it and silently renews near expiry) makes refresh automatic.
 
-### 3.2 What exists today (the hooks)
+### 4.2 What exists today (the hooks)
 
 | Hook | Where | What it gives us |
 |---|---|---|
@@ -416,7 +636,7 @@ caches it and silently renews near expiry) makes refresh automatic.
 | `auth: httpx.Auth` field | `SSEConnection` (client) | per-request token injection with refresh |
 | `_get_mcp_server_config()` | `agnes_agent_graph.py` | the single place all three entry points build the connection |
 
-### 3.3 Entra setup
+### 4.3 Entra setup
 
 1. **Register "Agnes MCP Server".** Expose an API (Application ID URI
    `api://<mcp client id>`). Under **App roles**: create roles with
@@ -430,7 +650,7 @@ caches it and silently renews near expiry) makes refresh automatic.
    permissions to Agnes MCP Server (the roles above), grant admin
    consent.
 
-### 3.4 Server-side changes (mcp-server)
+### 4.4 Server-side changes (mcp-server)
 
 **`auth.py` -- `EntraTokenVerifier`**, same JWT validation as leg 1
 but async (the protocol is async) and reading app-token claims:
@@ -485,7 +705,7 @@ on. (Design note: the MCP SDK's `AuthSettings.required_scopes` could
 enforce ONE scope globally, but per-group enforcement needs these
 in-tool checks -- that is why the helper exists.)
 
-### 3.5 Client-side changes (agent-client)
+### 4.5 Client-side changes (agent-client)
 
 A token provider using MSAL Python (`msal` -- new dependency), wired
 through the `httpx.Auth` hook:
@@ -533,7 +753,7 @@ Secret handling: the client secret goes in the gitignored `.env` only;
 on Azure, prefer a managed identity (`msal` supports it via
 `ManagedIdentityClient`) and delete the secret entirely.
 
-### 3.6 Testing leg 2
+### 4.6 Testing leg 2
 
 - `EntraTokenVerifier`: same offline pattern as leg 1 -- local RSA
   keypair, self-minted JWTs with good/bad `aud`/`iss`/`exp`/`roles`,
@@ -546,7 +766,7 @@ on Azure, prefer a managed identity (`msal` supports it via
 
 ---
 
-## 4. Rollout plan and checklist
+## 5. Rollout plan and checklist
 
 Order matters less than you would think, because every mode is a
 config switch and static/entra can differ per environment. Sensible
