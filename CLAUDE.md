@@ -159,4 +159,5 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 
 - Port the interactive CLI onto AgentService events (agnes_agent_graph.py still has its own streaming loop; agent_api.py has the event-based one -- converge them)
 - Azure Entra OAuth2 authenticator (`entra` mode in auth_api.py -- JWT/JWKS validation; interface already reserved)
+- Entra-based auth for the MCP server: replace StaticTokenVerifier with a JWT/JWKS validator in the same TokenVerifier slot (mcp-server auth.py); agent identity from token claims, scopes mapped to tool groups for per-agent authorization
 - Replace the POC web client with a real web UI (HTTPS, login flow instead of token-in-url, tightened CORS)
