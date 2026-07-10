@@ -5,8 +5,7 @@ Azure OpenAI credentials or MCP server are needed.
 
 Run:
     cd agent-client
-    uv run --with pytest --with fastapi --with uvicorn --with httpx \
-        pytest tests_api/ -q
+    uv run --with pytest --with httpx pytest tests_api/ -q
 """
 
 import asyncio
