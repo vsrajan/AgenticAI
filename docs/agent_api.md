@@ -95,7 +95,7 @@ All new, all in `agent-client/`:
 | `src/ease_clients/cli_api.py` | The entry point that starts the web server |
 | `webclient_api.html` | POC single-page web client (streaming) -- open directly in a browser |
 | `README_api.md` | Quick-reference for running the API |
-| `tests_api/test_agent_api.py` | 31 tests that run without Azure or the MCP server |
+| `tests_api/test_agent_api.py` | 34 tests that run without Azure or the MCP server |
 
 The naming convention: where new behavior parallels an existing file,
 the new file takes the same name plus `_api` (`cli.py` -> `cli_api.py`).
@@ -451,11 +451,11 @@ a crash, which is worse because it is quiet.
 ### The fix: a session registry inside AgentService
 
 One structure solves both problems. Every live session gets a
-[`_Session`](../agent-client/src/ease_clients/agent_api.py#L71)
+[`_Session`](../agent-client/src/ease_clients/agent_api.py#L77)
 bookkeeping entry holding two things: a `last_used` timestamp (taken
 from `time.monotonic()`, a steady clock that never jumps backwards)
 and an `asyncio.Lock`. The registry itself is a dict on
-[`AgentService`](../agent-client/src/ease_clients/agent_api.py#L101),
+[`AgentService`](../agent-client/src/ease_clients/agent_api.py#L107),
 configured by two env vars read in `AgentService.create()`:
 `AGENT_API_SESSION_TTL_MINUTES` (default 60) and
 `AGENT_API_MAX_SESSIONS` (default 500).
@@ -463,31 +463,31 @@ configured by two env vars read in `AgentService.create()`:
 How each piece addresses the problems:
 
 - **Explicit sessions only.**
-  [`create_session()`](../agent-client/src/ease_clients/agent_api.py#L146)
+  [`create_session()`](../agent-client/src/ease_clients/agent_api.py#L172)
   registers every id it mints, and
-  [`_require_session()`](../agent-client/src/ease_clients/agent_api.py#L176)
+  [`_require_session()`](../agent-client/src/ease_clients/agent_api.py#L202)
   raises `UnknownSessionError` for anything not in the registry --
   which the endpoints translate to a `404` with a "create a new
   session" hint. Ids can no longer be invented by clients (closes
   problem 1, layer 3). The streaming endpoint
-  [checks before the response starts](../agent-client/src/ease_clients/agent_api.py#L523)
+  [checks before the response starts](../agent-client/src/ease_clients/agent_api.py#L594)
   via `has_session()`, because once streaming begins the HTTP status
   line has already been sent and a 404 can no longer be delivered.
 - **TTL eviction.**
-  [`sweep_expired_sessions()`](../agent-client/src/ease_clients/agent_api.py#L195)
+  [`sweep_expired_sessions()`](../agent-client/src/ease_clients/agent_api.py#L221)
   evicts every session idle longer than the TTL;
-  [`sweep_loop()`](../agent-client/src/ease_clients/agent_api.py#L213)
+  [`sweep_loop()`](../agent-client/src/ease_clients/agent_api.py#L239)
   runs it once a minute as a background task that the app's
-  [lifespan handler](../agent-client/src/ease_clients/agent_api.py#L383)
+  [lifespan handler](../agent-client/src/ease_clients/agent_api.py#L454)
   starts at boot and cancels at shutdown.
 - **Eviction actually frees the memory.**
-  [`_evict()`](../agent-client/src/ease_clients/agent_api.py#L184)
+  [`_evict()`](../agent-client/src/ease_clients/agent_api.py#L210)
   removes the registry entry AND calls the checkpointer's
   `delete_thread()` -- the second part is the one that matters, because
   the checkpoints are where the megabytes live (problem 1, layers 1-2).
 - **LRU cap as a backstop.** When the registry is at
   `AGENT_API_MAX_SESSIONS`,
-  [`create_session()`](../agent-client/src/ease_clients/agent_api.py#L146)
+  [`create_session()`](../agent-client/src/ease_clients/agent_api.py#L172)
   evicts the least recently used session before minting a new id, so
   even a client that leaks sessions cannot push memory past the cap.
 - **Eviction is lock-aware.** Neither the sweeper nor the cap will
@@ -497,9 +497,9 @@ How each piece addresses the problems:
   `create_session()` allows a brief overshoot instead, and the sweeper
   catches up once turns finish.
 - **One turn at a time.**
-  [`stream()`](../agent-client/src/ease_clients/agent_api.py#L230) runs
+  [`stream()`](../agent-client/src/ease_clients/agent_api.py#L276) runs
   the whole turn inside
-  [`async with session.lock`](../agent-client/src/ease_clients/agent_api.py#L249).
+  [`async with session.lock`](../agent-client/src/ease_clients/agent_api.py#L298).
   A second message on the same session waits for the first to finish
   instead of interleaving writes (closes problem 2). Different sessions
   are unaffected -- each has its own lock. The turn also refreshes
@@ -556,6 +556,7 @@ The API-specific settings:
 | `AGENT_API_CORS_ORIGINS` | `*` | which page origins browsers may call from |
 | `AGENT_API_SESSION_TTL_MINUTES` | `60` | evict sessions idle longer than this |
 | `AGENT_API_MAX_SESSIONS` | `500` | hard cap; least recently used evicted when full |
+| `AGENT_API_STREAM_FILE` | `agent_api_stream.txt` | graph execution log for tail -f; empty disables |
 
 ## 11. Running the API server
 
@@ -579,6 +580,34 @@ The server logs
 `Agent API ready (12 tools)` once the MCP connection is up.
 
 The existing CLI and scanner are unaffected and run exactly as before.
+
+### Watching the graph work: the stream file
+
+The CLI has always written every graph node's output to
+`agent_stream.txt` so you can watch the agent think with `tail -f`.
+The API gives you the same visibility: as each node completes, its
+messages are appended to `agent_api_stream.txt` (configurable via
+`AGENT_API_STREAM_FILE`; empty disables) in the same format:
+
+```
+--- turn 14:02:31  session ab12cd34 ---
+
+[HumanMessage]  (node: input, session: ab12cd34)
+How do I set up delegations?
+
+[AIMessage]  (node: knowledgebase_agent, session: ab12cd34)
+  -> tool_call: search_docs({'query': 'delegation setup'})
+...
+```
+
+Because the API serves many sessions at once, every turn header and
+entry carries the session id -- turns within one session never
+interleave (the per-session lock guarantees that), but turns from
+different sessions can, so `grep "session: ab12cd34"` reconstructs one
+conversation. The file is reset each time the server starts, keeping
+its size bounded per uptime. For per-session inspection over HTTP
+instead of on the server's disk, use
+`GET /sessions/{id}/messages?raw=true` (section 7).
 
 ## 12. Calling the API -- worked examples
 
@@ -682,7 +711,7 @@ Two implementation details worth knowing (both commented in the file):
 
 ## 13. Testing
 
-The test suite (`tests_api/test_agent_api.py`, 31 tests) needs neither
+The test suite (`tests_api/test_agent_api.py`, 34 tests) needs neither
 Azure OpenAI credentials nor a running MCP server. It builds a `FakeAgent`
 that replays canned graph events, so the tests exercise the real
 AgentService event handling, the real endpoints, and the real auth code

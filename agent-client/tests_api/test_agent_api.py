@@ -45,6 +45,15 @@ def _node_start_event(node):
     return {"event": "on_chain_start", "metadata": {"langgraph_node": node}, "data": {}}
 
 
+def _node_end_event(node, messages):
+    """A chain end event carrying a completed node's output messages."""
+    return {
+        "event": "on_chain_end",
+        "metadata": {"langgraph_node": node},
+        "data": {"output": {"messages": messages}},
+    }
+
+
 class FakeAgent:
     """Replays canned events; mimics the compiled graph's async surface.
 
@@ -271,6 +280,50 @@ def test_concurrent_turns_on_one_session_are_serialised():
 
     asyncio.run(run())
     assert agent.max_active == 1  # the lock kept the turns sequential
+
+
+# -- Stream file (graph execution log) --
+
+def test_stream_file_logs_graph_execution(tmp_path):
+    stream_file = tmp_path / "stream.txt"
+    events = STREAMING_EVENTS + [
+        _node_end_event("knowledgebase_agent", [
+            AIMessage(content="", tool_calls=[
+                {"name": "search_docs", "args": {"query": "hi"}, "id": "t1"},
+            ]),
+            AIMessage(content="final answer"),
+        ]),
+    ]
+    service = make_service(events, stream_file=str(stream_file))
+    sid = service.create_session()
+    asyncio.run(service.ask(sid, "hello there"))
+
+    text = stream_file.read_text()
+    assert text.startswith("Agent API stream log")          # reset header
+    assert f"--- turn" in text and f"session {sid}" in text  # turn header
+    assert f"[HumanMessage]  (node: input, session: {sid})" in text
+    assert "hello there" in text
+    assert f"[AIMessage]  (node: knowledgebase_agent, session: {sid})" in text
+    assert "-> tool_call: search_docs(" in text
+    assert "final answer" in text
+
+
+def test_stream_file_reset_on_service_start(tmp_path):
+    stream_file = tmp_path / "stream.txt"
+    stream_file.write_text("leftover from a previous run\n")
+    make_service(STREAMING_EVENTS, stream_file=str(stream_file))
+    text = stream_file.read_text()
+    assert "leftover" not in text
+    assert text.startswith("Agent API stream log")
+
+
+def test_stream_file_disabled_by_default():
+    # direct construction (as tests and embedders do) defaults to no
+    # stream file; only AgentService.create() reads the env default
+    service = make_service(STREAMING_EVENTS)
+    assert service._stream_file == ""
+    sid = service.create_session()
+    asyncio.run(service.ask(sid, "hi"))  # no file IO happens
 
 
 # -- Authenticators --

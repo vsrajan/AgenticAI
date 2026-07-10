@@ -21,6 +21,7 @@ worked client examples, see docs/agent_api.md.
 """
 
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -39,7 +40,12 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
-from ease_clients.utils.agnes_agent_graph import _NODE_PHASES, _get_mcp_server_config, build_graph
+from ease_clients.utils.agnes_agent_graph import (
+    _NODE_PHASES,
+    _get_mcp_server_config,
+    _write_stream_entry,
+    build_graph,
+)
 from ease_clients.auth_api import AuthError, Authenticator, Principal, build_authenticator
 from ease_clients.utils.llm import get_llm
 
@@ -99,13 +105,28 @@ class AgentService:
     """
 
     def __init__(self, agent, tool_count: int, checkpointer=None,
-                 session_ttl_seconds: float = 3600, max_sessions: int = 500):
+                 session_ttl_seconds: float = 3600, max_sessions: int = 500,
+                 stream_file: str = ""):
         self._agent = agent
         self.tool_count = tool_count
         self._checkpointer = checkpointer
         self._session_ttl = session_ttl_seconds
         self._max_sessions = max_sessions
         self._sessions: dict[str, _Session] = {}
+        # stream_file mirrors the CLI's agent_stream.txt: every node's
+        # output is appended as it completes, so tail -f gives live
+        # visibility into graph execution. Empty string disables it.
+        self._stream_file = stream_file
+        if stream_file:
+            # reset per server run (same as the CLI does per session)
+            # so the file does not grow across restarts
+            try:
+                with open(stream_file, "w", encoding="utf-8") as fh:
+                    fh.write(f"Agent API stream log -- {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
+                    fh.write("=" * 60 + "\n")
+            except OSError:
+                logger.exception("Stream file %s is not writable; disabling stream log", stream_file)
+                self._stream_file = ""
 
     # an async classmethod factory instead of doing this work in
     # __init__: connecting to the MCP server requires await, and
@@ -122,6 +143,9 @@ class AgentService:
         Session hygiene config from env:
             AGENT_API_SESSION_TTL_MINUTES -- evict sessions idle this long (default 60)
             AGENT_API_MAX_SESSIONS        -- hard cap; LRU-evict when full (default 500)
+        Graph visibility:
+            AGENT_API_STREAM_FILE -- per-node execution log for tail -f
+                (default agent_api_stream.txt; empty string disables)
         """
         llm = get_llm()
         mcp_config = _get_mcp_server_config()
@@ -133,13 +157,15 @@ class AgentService:
 
         ttl_minutes = float(os.environ.get("AGENT_API_SESSION_TTL_MINUTES", "60"))
         max_sessions = int(os.environ.get("AGENT_API_MAX_SESSIONS", "500"))
+        stream_file = os.environ.get("AGENT_API_STREAM_FILE", "agent_api_stream.txt")
 
         checkpointer = checkpointer or MemorySaver()
         graph = build_graph(llm, tools)
         agent = graph.compile(checkpointer=checkpointer)
         return cls(agent, len(tools), checkpointer,
                    session_ttl_seconds=ttl_minutes * 60,
-                   max_sessions=max_sessions)
+                   max_sessions=max_sessions,
+                   stream_file=stream_file)
 
     # -- session lifecycle --
 
@@ -223,6 +249,26 @@ class AgentService:
     def _config(self, session_id: str) -> dict:
         return {"configurable": {"thread_id": session_id}, "recursion_limit": 50}
 
+    def _open_stream_file(self, session_id: str):
+        """Open the stream file for one turn and write the turn header.
+
+        Returns None when stream logging is disabled or the file cannot
+        be opened -- a logging failure must never break the turn itself.
+        The session id is part of the header (and of every entry) so
+        one conversation can be reconstructed with grep even when turns
+        from different sessions interleave in the file.
+        """
+        if not self._stream_file:
+            return None
+        try:
+            fh = open(self._stream_file, "a", encoding="utf-8")
+        except OSError:
+            logger.exception("Could not open stream file %s", self._stream_file)
+            return None
+        fh.write(f"\n--- turn {datetime.datetime.now():%H:%M:%S}  session {session_id} ---\n\n")
+        fh.flush()
+        return fh
+
     # async def + yield makes this an async generator: callers loop
     # over it with "async for event in service.stream(...)" and receive
     # each event the moment it is produced, instead of waiting for the
@@ -234,6 +280,7 @@ class AgentService:
         yields events instead of writing to stdout:
           on_chain_start on a known node -> phase event
           on_chat_model_stream content chunk without tool calls -> token event
+          on_chain_end -> node output appended to the stream file (when enabled)
           end of run -> one answer event with the full text
 
         Raises UnknownSessionError for ids that were never created or
@@ -242,42 +289,66 @@ class AgentService:
         session = self._require_session(session_id)
         config = self._config(session_id)
         answer_parts: list[str] = []
+        stream_fh = self._open_stream_file(session_id)
 
-        # one turn at a time per session: a second message on the same
-        # session waits here until the first finishes, instead of both
-        # writing into the same thread's history concurrently
-        async with session.lock:
-            async for event in self._agent.astream_events(
-                {"messages": [HumanMessage(content=user_input)]},
-                config,
-                version="v2",
-            ):
-                kind = event["event"]
+        try:
+            # one turn at a time per session: a second message on the same
+            # session waits here until the first finishes, instead of both
+            # writing into the same thread's history concurrently
+            async with session.lock:
+                if stream_fh:
+                    _write_stream_entry(
+                        stream_fh,
+                        HumanMessage(content=user_input),
+                        f"input, session: {session_id}",
+                    )
 
-                if kind == "on_chain_start":
-                    node = event.get("metadata", {}).get("langgraph_node", "")
-                    phase = _NODE_PHASES.get(node)
-                    if phase:
-                        yield AgentEvent("phase", phase)
+                async for event in self._agent.astream_events(
+                    {"messages": [HumanMessage(content=user_input)]},
+                    config,
+                    version="v2",
+                ):
+                    kind = event["event"]
 
-                if kind == "on_chat_model_stream":
-                    chunk = event["data"]["chunk"]
-                    # content chunks without tool_call_chunks are answer tokens
-                    if chunk.content and not getattr(chunk, "tool_call_chunks", None):
-                        answer_parts.append(chunk.content)
-                        yield AgentEvent("token", chunk.content)
+                    if kind == "on_chain_start":
+                        node = event.get("metadata", {}).get("langgraph_node", "")
+                        phase = _NODE_PHASES.get(node)
+                        if phase:
+                            yield AgentEvent("phase", phase)
 
-            # a long turn should not count against the idle TTL
-            session.last_used = time.monotonic()
+                    if kind == "on_chat_model_stream":
+                        chunk = event["data"]["chunk"]
+                        # content chunks without tool_call_chunks are answer tokens
+                        if chunk.content and not getattr(chunk, "tool_call_chunks", None):
+                            answer_parts.append(chunk.content)
+                            yield AgentEvent("token", chunk.content)
 
-            if answer_parts:
-                yield AgentEvent("answer", "".join(answer_parts))
-                return
+                    # log each completed node's output for tail -f, exactly
+                    # like the CLI loop does
+                    if kind == "on_chain_end" and stream_fh:
+                        node = event.get("metadata", {}).get("langgraph_node", "")
+                        if node:
+                            output = event.get("data", {}).get("output", {})
+                            msgs = output.get("messages", []) if isinstance(output, dict) else []
+                            for msg in msgs:
+                                _write_stream_entry(
+                                    stream_fh, msg, f"{node}, session: {session_id}"
+                                )
 
-            # nothing streamed -- fall back to reading the final state
-            state = await self._agent.aget_state(config)
-            messages = state.values.get("messages", [])
-            yield AgentEvent("answer", messages[-1].content if messages else "")
+                # a long turn should not count against the idle TTL
+                session.last_used = time.monotonic()
+
+                if answer_parts:
+                    yield AgentEvent("answer", "".join(answer_parts))
+                    return
+
+                # nothing streamed -- fall back to reading the final state
+                state = await self._agent.aget_state(config)
+                messages = state.values.get("messages", [])
+                yield AgentEvent("answer", messages[-1].content if messages else "")
+        finally:
+            if stream_fh:
+                stream_fh.close()
 
     async def ask(self, session_id: str, user_input: str) -> str:
         """Run one turn and return the complete answer text (no streaming).

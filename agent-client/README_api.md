@@ -71,6 +71,28 @@ API variables:
 | `AGENT_API_CORS_ORIGINS` | `*` | comma-separated origins browsers may call from; tighten for deployments |
 | `AGENT_API_SESSION_TTL_MINUTES` | `60` | evict sessions idle longer than this (memory hygiene) |
 | `AGENT_API_MAX_SESSIONS` | `500` | hard cap on live sessions; least recently used is evicted when full |
+| `AGENT_API_STREAM_FILE` | `agent_api_stream.txt` | graph execution log (per-node output, session-tagged); empty disables |
+
+## Watching the graph work
+
+The API writes every graph node's output to the stream file as it
+completes -- the same format as the CLI's `agent_stream.txt`. With the
+server running:
+
+```bash
+tail -f agent_api_stream.txt
+```
+
+Each turn starts with a header carrying the session id, and every entry
+is tagged with it, so one conversation can be reconstructed even when
+turns from different sessions interleave:
+
+```bash
+grep "session: 3f2a" agent_api_stream.txt
+```
+
+The file is reset on server start. For per-session inspection over HTTP
+instead, use `GET /sessions/{id}/messages?raw=true`.
 
 ## POC web client
 
