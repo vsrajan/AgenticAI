@@ -126,7 +126,7 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 - Added POC single-page web client (webclient_api.html) -- vanilla JS, fetch-based SSE parsing, session reuse
 - Added API test suite (tests_api/, 22 tests) using a fake agent -- runs without Azure or MCP
 - Added GET /sessions/{id}/messages history endpoint -- chat view by default, raw=true debug dump (types + tool calls)
-- Added session hygiene to the API: explicit sessions only (404 for unknown/expired ids), idle-TTL eviction via background sweeper + LRU cap (AGENT_API_SESSION_TTL_MINUTES / AGENT_API_MAX_SESSIONS), per-session lock serialising concurrent messages; web client auto-recreates expired sessions (tests_api now 28 tests)
+- Added session hygiene to the API: explicit sessions only (404 for unknown/expired ids), idle-TTL eviction via background sweeper + LRU cap (AGENT_API_SESSION_TTL_MINUTES / AGENT_API_MAX_SESSIONS), per-session lock serialising concurrent messages; web client auto-recreates expired sessions. Eviction is lock-aware: in-flight sessions are never evicted (cap overshoots if everything is mid-turn). tests_api now 31 tests
 - Added beginner-oriented API guide (docs/agent_api.md) and Excalidraw API-flow diagram (docs/05_agent_api_flow.excalidraw)
 - Merged the API layer into the main manifests: fastapi/uvicorn deps + agent-api script in pyproject.toml, API settings in .env.example (the temporary pyproject_api.toml / .env_api supersets were removed)
 - Restructured the package to match the server deployment: agent_client -> ease_clients, shared internals moved to ease_clients/utils (llm.py, scanner.py, incident_sources.py, and agent.py renamed to agnes_agent_graph.py); entry points and loggers renamed accordingly

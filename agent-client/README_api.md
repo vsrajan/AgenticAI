@@ -128,9 +128,11 @@ are lost on restart. Only ids minted by this endpoint are accepted --
 any other id gets 404. Idle sessions are evicted after
 AGENT_API_SESSION_TTL_MINUTES (a request for an evicted session also
 gets 404 -- create a new session and continue), and when
-AGENT_API_MAX_SESSIONS is reached the least recently used session is
-evicted to make room. One message per session runs at a time; a second
-message on the same session waits for the first to finish.
+AGENT_API_MAX_SESSIONS is reached the least recently used idle session
+is evicted to make room. A session whose turn is currently running is
+never evicted by either mechanism. One message per session runs at a
+time; a second message on the same session waits for the first to
+finish.
 
 ```bash
 curl -X POST http://127.0.0.1:8080/sessions \

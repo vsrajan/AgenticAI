@@ -95,7 +95,7 @@ All new, all in `agent-client/`:
 | `src/ease_clients/cli_api.py` | The entry point that starts the web server |
 | `webclient_api.html` | POC single-page web client (streaming) -- open directly in a browser |
 | `README_api.md` | Quick-reference for running the API |
-| `tests_api/test_agent_api.py` | 28 tests that run without Azure or the MCP server |
+| `tests_api/test_agent_api.py` | 31 tests that run without Azure or the MCP server |
 
 The naming convention: where new behavior parallels an existing file,
 the new file takes the same name plus `_api` (`cli.py` -> `cli_api.py`).
@@ -153,10 +153,14 @@ snapshots -- memory per session grows fast):
   client creates a fresh session and continues (the POC web client
   does this automatically).
 - `AGENT_API_MAX_SESSIONS` (default 500) is a hard cap; when full, the
-  least recently used session is evicted to make room.
+  least recently used IDLE session is evicted to make room.
 - one message per session runs at a time: a per-session lock makes a
   second concurrent message wait instead of letting two turns
   interleave writes into the same history.
+- a session whose turn is currently running is never evicted -- not by
+  the TTL sweeper and not by the cap. If every session is mid-turn when
+  the cap is hit, the cap briefly overshoots instead of deleting
+  history out from under a running turn.
 
 ### What is SSE (Server-Sent Events)?
 
@@ -461,23 +465,23 @@ How each piece addresses the problems:
 - **Explicit sessions only.**
   [`create_session()`](../agent-client/src/ease_clients/agent_api.py#L146)
   registers every id it mints, and
-  [`_require_session()`](../agent-client/src/ease_clients/agent_api.py#L163)
+  [`_require_session()`](../agent-client/src/ease_clients/agent_api.py#L176)
   raises `UnknownSessionError` for anything not in the registry --
   which the endpoints translate to a `404` with a "create a new
   session" hint. Ids can no longer be invented by clients (closes
   problem 1, layer 3). The streaming endpoint
-  [checks before the response starts](../agent-client/src/ease_clients/agent_api.py#L494)
+  [checks before the response starts](../agent-client/src/ease_clients/agent_api.py#L523)
   via `has_session()`, because once streaming begins the HTTP status
   line has already been sent and a 404 can no longer be delivered.
 - **TTL eviction.**
-  [`sweep_expired_sessions()`](../agent-client/src/ease_clients/agent_api.py#L182)
+  [`sweep_expired_sessions()`](../agent-client/src/ease_clients/agent_api.py#L195)
   evicts every session idle longer than the TTL;
-  [`sweep_loop()`](../agent-client/src/ease_clients/agent_api.py#L193)
+  [`sweep_loop()`](../agent-client/src/ease_clients/agent_api.py#L213)
   runs it once a minute as a background task that the app's
-  [lifespan handler](../agent-client/src/ease_clients/agent_api.py#L363)
+  [lifespan handler](../agent-client/src/ease_clients/agent_api.py#L383)
   starts at boot and cancels at shutdown.
 - **Eviction actually frees the memory.**
-  [`_evict()`](../agent-client/src/ease_clients/agent_api.py#L171)
+  [`_evict()`](../agent-client/src/ease_clients/agent_api.py#L184)
   removes the registry entry AND calls the checkpointer's
   `delete_thread()` -- the second part is the one that matters, because
   the checkpoints are where the megabytes live (problem 1, layers 1-2).
@@ -486,10 +490,16 @@ How each piece addresses the problems:
   [`create_session()`](../agent-client/src/ease_clients/agent_api.py#L146)
   evicts the least recently used session before minting a new id, so
   even a client that leaks sessions cannot push memory past the cap.
+- **Eviction is lock-aware.** Neither the sweeper nor the cap will
+  evict a session whose turn is currently running (its lock is held) --
+  deleting checkpointer state under a running graph would corrupt that
+  conversation. If the cap is hit while every session is mid-turn,
+  `create_session()` allows a brief overshoot instead, and the sweeper
+  catches up once turns finish.
 - **One turn at a time.**
-  [`stream()`](../agent-client/src/ease_clients/agent_api.py#L210) runs
+  [`stream()`](../agent-client/src/ease_clients/agent_api.py#L230) runs
   the whole turn inside
-  [`async with session.lock`](../agent-client/src/ease_clients/agent_api.py#L229).
+  [`async with session.lock`](../agent-client/src/ease_clients/agent_api.py#L249).
   A second message on the same session waits for the first to finish
   instead of interleaving writes (closes problem 2). Different sessions
   are unaffected -- each has its own lock. The turn also refreshes
@@ -672,7 +682,7 @@ Two implementation details worth knowing (both commented in the file):
 
 ## 13. Testing
 
-The test suite (`tests_api/test_agent_api.py`, 28 tests) needs neither
+The test suite (`tests_api/test_agent_api.py`, 31 tests) needs neither
 Azure OpenAI credentials nor a running MCP server. It builds a `FakeAgent`
 that replays canned graph events, so the tests exercise the real
 AgentService event handling, the real endpoints, and the real auth code

@@ -196,6 +196,54 @@ def test_max_sessions_evicts_least_recently_used():
     assert checkpointer.deleted == [s1]
 
 
+def test_cap_eviction_skips_in_flight_sessions():
+    checkpointer = FakeCheckpointer()
+    service = make_service(STREAMING_EVENTS, checkpointer=checkpointer, max_sessions=2)
+
+    async def run():
+        s1 = service.create_session()
+        s2 = service.create_session()
+        service._sessions[s1].last_used -= 10  # s1 is the LRU candidate...
+        await service._sessions[s1].lock.acquire()  # ...but its turn is running
+        s3 = service.create_session()  # cap full -> must evict the idle s2, not s1
+        assert service.has_session(s1) and service.has_session(s3)
+        assert not service.has_session(s2)
+        assert checkpointer.deleted == [s2]
+        service._sessions[s1].lock.release()
+
+    asyncio.run(run())
+
+
+def test_cap_overshoots_rather_than_evicting_running_turns():
+    checkpointer = FakeCheckpointer()
+    service = make_service(STREAMING_EVENTS, checkpointer=checkpointer, max_sessions=1)
+
+    async def run():
+        s1 = service.create_session()
+        await service._sessions[s1].lock.acquire()  # the only session is mid-turn
+        s2 = service.create_session()  # nothing idle to evict -> temporary overshoot
+        assert service.has_session(s1) and service.has_session(s2)
+        assert checkpointer.deleted == []
+        service._sessions[s1].lock.release()
+
+    asyncio.run(run())
+
+
+def test_sweep_skips_in_flight_sessions():
+    service = make_service(STREAMING_EVENTS, session_ttl_seconds=100)
+
+    async def run():
+        sid = service.create_session()
+        service._sessions[sid].last_used -= 200  # far past the TTL...
+        await service._sessions[sid].lock.acquire()  # ...but the turn is running
+        assert service.sweep_expired_sessions() == 0
+        assert service.has_session(sid)
+        service._sessions[sid].lock.release()
+        assert service.sweep_expired_sessions() == 1  # idle now -> swept
+
+    asyncio.run(run())
+
+
 class SlowFakeAgent(FakeAgent):
     """Tracks how many turns run at once, to prove the per-session lock."""
 

@@ -147,10 +147,23 @@ class AgentService:
         """Mint and register a new session id (the LangGraph thread id).
 
         When the registry is at max_sessions, the least recently used
-        session is evicted first so the cap holds.
+        IDLE session is evicted first so the cap holds. A session whose
+        turn is currently running (lock held) is never evicted -- if
+        every session is mid-turn, the cap briefly overshoots instead
+        of deleting history out from under a running turn.
         """
         while len(self._sessions) >= self._max_sessions:
-            lru_id = min(self._sessions, key=lambda s: self._sessions[s].last_used)
+            idle = [
+                sid for sid, session in self._sessions.items()
+                if not session.lock.locked()
+            ]
+            if not idle:
+                logger.warning(
+                    "max_sessions cap reached with every session mid-turn; "
+                    "allowing temporary overshoot"
+                )
+                break
+            lru_id = min(idle, key=lambda sid: self._sessions[sid].last_used)
             self._evict(lru_id, reason="max_sessions cap")
         session_id = uuid.uuid4().hex
         self._sessions[session_id] = _Session()
@@ -180,11 +193,18 @@ class AgentService:
         logger.info("Evicted session %s (%s)", session_id, reason)
 
     def sweep_expired_sessions(self) -> int:
-        """Evict every session idle longer than the TTL. Returns the count."""
+        """Evict every idle-beyond-TTL session. Returns the eviction count.
+
+        Sessions whose turn is currently running (lock held) are never
+        swept -- last_used only refreshes when a turn completes, so
+        without this check a turn outlasting the TTL would have its
+        history deleted mid-run.
+        """
         now = time.monotonic()
         expired = [
             sid for sid, session in self._sessions.items()
             if now - session.last_used > self._session_ttl
+            and not session.lock.locked()
         ]
         for sid in expired:
             self._evict(sid, reason="idle TTL")
