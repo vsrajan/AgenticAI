@@ -147,7 +147,7 @@ index = DocIndex(DOCS_DIR)
 logger.info("PDF index ready: %d documents", len(index._documents))
 
 csv_store = CsvStore(DOCS_DIR)
-logger.info("CSV store ready: %d datasets", len(csv_store._datasets))
+logger.info("Data store ready: %d datasets", len(csv_store.dataset_names))
 
 
 @mcp.tool()
