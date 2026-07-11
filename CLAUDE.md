@@ -163,3 +163,53 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 - Azure Entra OAuth2 authenticator (`entra` mode in auth_api.py -- JWT/JWKS validation; interface already reserved). See docs/entra_auth_guide.md
 - Entra-based auth for the MCP server: replace StaticTokenVerifier with a JWT/JWKS validator in the same TokenVerifier slot (mcp-server auth.py); agent identity from token claims, scopes mapped to tool groups for per-agent authorization. See docs/entra_auth_guide.md
 - Replace the POC web client with a real web UI (HTTPS, login flow instead of token-in-url, tightened CORS)
+- Prompt-caching-friendly prompt shape + provider-portable trimming (P1.3 in
+  `docs/PerformanceRecommendations.md`). Goal: stop paying full input-token
+  cost on the large STATIC prefix (specialist system prompt + the 12 tool
+  definitions) that is re-sent on every LLM call. Detailed analysis:
+  - The win is provider-agnostic. Every prompt-caching implementation keys off
+    a stable, unchanging prompt prefix. Azure OpenAI / GPT-4o / the GPT-5
+    family cache such prefixes AUTOMATICALLY (cache reads bill at roughly half
+    the input price); Anthropic (Claude) caches the same prefix but only when
+    it is marked EXPLICITLY. Either way the prefix must stay byte-stable across
+    turns.
+  - The one thing that breaks caching today: `_trim_messages` in
+    `agnes_agent_graph.py` (line ~499) slides a `messages[-KEEP_LAST_N:]`
+    window on EVERY call once a conversation grows past KEEP_LAST_N (env
+    `KEEP_LAST_N_MSGS`, default 20). A sliding window shifts the message list
+    from the top down, so the cached prefix stops matching and the discount is
+    lost on every long conversation. Fix -> chunked trimming with hysteresis:
+    let history grow to a high-water mark (~KEEP_LAST_N + 12), cut back to
+    KEEP_LAST_N in one step, and stay append-only between trims. The prefix
+    then changes only at the rare trim points, not every turn.
+  - Three-part change when this is picked up:
+    1. Hysteresis trimming in `agnes_agent_graph.py` (replaces the per-call
+       slide above).
+    2. Cached-token visibility: fold cache hit/write counts into the existing
+       per-node timing logs. Read them from LangChain's NORMALIZED
+       `usage_metadata.input_token_details` (`cache_read` / `cache_creation`),
+       NOT the raw OpenAI-only field `prompt_tokens_details.cached_tokens`. The
+       normalized field is populated from whichever provider is active, so the
+       instrumentation survives a model swap unchanged.
+    3. Prompt-shape guardrail (docs + a code comment): keep static content
+       (system prompt, tool defs) first and volatile content (user turns) last.
+       This is what makes automatic caching hit AND what makes an explicit
+       Anthropic breakpoint worth placing.
+  - Model portability (the reason to build it this way now): switching the
+    model under the hood stays a ONE-SEAM change. `get_llm()` in
+    `ease_clients/utils/llm.py` is the only place that knows the provider:
+    - Azure / OpenAI / GPT-5 branch -> return the model as-is; automatic prefix
+      caching needs no extra code.
+    - Anthropic branch (future) -> return `ChatAnthropic` and attach
+      `cache_control={"type": "ephemeral"}` breakpoints to the static prefix
+      (system prompt + tools). Anthropic specifics for later: up to 4
+      breakpoints, rendered tools -> system -> messages; minimum cacheable
+      prefix ~1024-4096 tokens (model dependent); cache writes bill at 1.25x
+      (5-min TTL) or 2x (1-hour TTL), reads at ~0.1x; verify via
+      `usage.cache_read_input_tokens` / `cache_creation_input_tokens`.
+    The graph, specialists, prompts, and trimming never learn which provider is
+    active -- breakpoint placement stays confined to `get_llm()`.
+  - Net: parts 1 and 3 help every provider and are a precondition for Anthropic
+    caching; part 2 is portable if written against `usage_metadata`; only the
+    breakpoint placement is provider-specific, and it lives entirely inside
+    `get_llm()`.
