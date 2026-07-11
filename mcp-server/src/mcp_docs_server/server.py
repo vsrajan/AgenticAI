@@ -191,10 +191,11 @@ def list_topics() -> dict:
 def search_docs(query: str, max_results: int = 5) -> list[dict]:
     """Search the documentation for a query.
 
-    Uses full-text search to find the most relevant documents.
-    Returns matching snippets with page paths that can be passed to read_page.
-    Each result includes the source PDF page_path and total_pages count.
-    Snippets contain [Page N] markers indicating the PDF page of the content.
+    Full-text search at PAGE level: each result names the specific
+    page that matched (page_path + page number + a snippet from that
+    page). Pass page_path and the page number to read_page -- reading
+    just the hit page (or a small range around it) is much cheaper
+    than reading the whole document.
 
     Args:
         query: The search query (e.g., "how to order entitlements",
@@ -209,18 +210,25 @@ def search_docs(query: str, max_results: int = 5) -> list[dict]:
 
 @mcp.tool()
 @_timed
-def read_page(page_path: str) -> dict:
-    """Read the full text content of a documentation page.
+def read_page(page_path: str, pages: str = "") -> dict:
+    """Read a documentation document -- whole, or just selected pages.
 
-    Use a page_path from list_topics or search_docs results.
-    Content includes [Page N] markers for each PDF page so you can cite
-    the exact page number (e.g. "Source: ordering_faq.pdf, Page 3").
+    Use a page_path from list_topics or search_docs results. PREFER
+    passing the page(s) a search hit pointed at (pages="3", or a small
+    range like pages="2-4" for surrounding context) -- it returns a
+    fraction of the text and answers arrive faster. Omit pages only
+    when you genuinely need the entire document.
+
+    Content includes [Page N] markers so you can cite the exact page
+    (e.g. "Source: ordering_faq.pdf, Page 3").
 
     Args:
         page_path: Path to the document (e.g., "entitlements/ordering_faq.pdf").
+        pages: Optional selection: "3" for one page, "2-5" for a range,
+               empty for the full document.
     """
-    logger.info("read_page caller=%s page_path=%r", _caller(), page_path)
-    result = index.read(page_path)
+    logger.info("read_page caller=%s page_path=%r pages=%r", _caller(), page_path, pages)
+    result = index.read(page_path, pages)
     if "error" in result:
         logger.warning("read_page not found: %s", page_path)
     return result
