@@ -233,6 +233,10 @@ not a performance factor on any path.
 
 **P1.1 Page-level PDF indexing and retrieval.**
 
+> **STATUS: IMPLEMENTED** (branch `P1.1`) -- see [P1.1.md](P1.1.md);
+> measured 40.4x smaller tool results for single-page reads on a
+> 40-page document, 13.5x for a 3-page range.
+
 - Index per PAGE (or ~1-2k-token chunk) instead of per document. The
   extraction already produces per-page text with [Page N] markers --
   the change is to keep pages as separate index entries instead of
