@@ -41,14 +41,21 @@ def _chunk_event(text):
 
 
 def _node_start_event(node):
-    """A chain start event for a graph node."""
-    return {"event": "on_chain_start", "metadata": {"langgraph_node": node}, "data": {}}
+    """A chain start event for a graph node.
+
+    name == the node name marks the node's own runnable (child
+    runnables inherit the metadata but carry their own name), which is
+    what the per-node timing keys on.
+    """
+    return {"event": "on_chain_start", "name": node,
+            "metadata": {"langgraph_node": node}, "data": {}}
 
 
 def _node_end_event(node, messages):
     """A chain end event carrying a completed node's output messages."""
     return {
         "event": "on_chain_end",
+        "name": node,
         "metadata": {"langgraph_node": node},
         "data": {"output": {"messages": messages}},
     }
@@ -303,9 +310,12 @@ def test_stream_file_logs_graph_execution(tmp_path):
     assert f"--- turn" in text and f"session {sid}" in text  # turn header
     assert f"[HumanMessage]  (node: input, session: {sid})" in text
     assert "hello there" in text
-    assert f"[AIMessage]  (node: knowledgebase_agent, session: {sid})" in text
+    # the end event is paired with its start, so the entry carries a duration
+    assert f"[AIMessage]  (node: knowledgebase_agent, session: {sid}, took=" in text
     assert "-> tool_call: search_docs(" in text
     assert "final answer" in text
+    # per-turn summary with the agent-vs-tools split
+    assert "--- turn done in" in text and "agent nodes" in text
 
 
 def test_stream_file_reset_on_service_start(tmp_path):
