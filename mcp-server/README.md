@@ -114,6 +114,30 @@ cp .env.example .env
 | `MCP_AUTH` | `static` (bearer tokens, fail-closed) or `none` (open; local dev only) | `static` |
 | `MCP_AUTH_TOKENS` | Comma-separated `name:token` pairs, one per agent deployment | unset (required in static mode) |
 
+## Data layer
+
+CSV datasets are served from an embedded **DuckDB** database rather
+than in-process Python structures, so filters and counts stay in the
+low milliseconds at millions of rows (measured: 25 ms for a filtered
+group-by over 5M rows) and memory stays bounded (columnar storage on
+disk; ~100 MB resident for a 5M-row dataset).
+
+- The database persists to `MCP_DB_PATH` (default:
+  `<docs dir>/.mcp_data.duckdb`). Warm starts skip ingestion entirely;
+  CSVs are re-ingested only when they change (fingerprint check).
+  Deleting the file is always safe -- it is rebuilt from source.
+- A background sweeper re-checks the source every
+  `MCP_DATA_REFRESH_MINUTES` (default 15; 0 disables). Reloads are
+  atomic: queries running during a reload see the old data until the
+  commit. `list_datasets` reports `synced_at`.
+- Full-text search (`search_dataset`) is size-gated: datasets larger
+  than `MCP_SEARCH_MAX_ROWS` (default 50000) get no BM25 index and the
+  tool returns guidance to use the filter/count tools instead.
+- Ingestion is pluggable (`data_sources.py`): `CsvDataSource` today; a
+  documented `DatabaseSource` stub reserves the production path where
+  rows come from Azure SQL / Postgres via batch sync -- see
+  `docs/P0.md` section 11 for the runbook.
+
 ## Authentication
 
 Agents connecting over HTTP transports (`sse` / `streamable-http`) must
