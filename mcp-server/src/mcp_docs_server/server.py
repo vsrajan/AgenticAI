@@ -22,10 +22,12 @@ Run with:
     uv run mcp-docs-server
 """
 
+import functools
 import json
 import logging
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -115,6 +117,28 @@ def _caller() -> str:
     return access_token.client_id if access_token else "anonymous"
 
 
+def _timed(fn):
+    """Log every tool call's duration with the calling agent.
+
+    Applied under @mcp.tool() on every tool. functools.wraps keeps the
+    original name/docstring, and inspect.signature follows __wrapped__,
+    so FastMCP still derives the tool schema from the real function.
+    These log lines are the per-tool half of the P0 instrumentation --
+    the agent side logs per-node and per-turn durations.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            logger.info(
+                "%s caller=%s took=%.1fms",
+                fn.__name__, _caller(), (time.perf_counter() - start) * 1000,
+            )
+    return wrapper
+
+
 mcp = FastMCP(
     MCP_SERVER_NAME,
     host=MCP_HOST,
@@ -151,6 +175,7 @@ logger.info("Data store ready: %d datasets", len(csv_store.dataset_names))
 
 
 @mcp.tool()
+@_timed
 def list_topics() -> dict:
     """List all available documentation topics and their pages.
 
@@ -162,6 +187,7 @@ def list_topics() -> dict:
 
 
 @mcp.tool()
+@_timed
 def search_docs(query: str, max_results: int = 5) -> list[dict]:
     """Search the documentation for a query.
 
@@ -182,6 +208,7 @@ def search_docs(query: str, max_results: int = 5) -> list[dict]:
 
 
 @mcp.tool()
+@_timed
 def read_page(page_path: str) -> dict:
     """Read the full text content of a documentation page.
 
@@ -205,6 +232,7 @@ def read_page(page_path: str) -> dict:
 
 
 @mcp.tool()
+@_timed
 def list_datasets() -> dict:
     """List all available CSV datasets, their columns, and row counts.
 
@@ -216,6 +244,7 @@ def list_datasets() -> dict:
 
 
 @mcp.tool()
+@_timed
 def search_dataset(dataset: str, query: str, max_results: int = 10) -> list[dict]:
     """Full-text search across all columns of a CSV dataset.
 
@@ -233,6 +262,7 @@ def search_dataset(dataset: str, query: str, max_results: int = 10) -> list[dict
 
 
 @mcp.tool()
+@_timed
 def filter_dataset(dataset: str, filters: dict[str, str], max_results: int = 100) -> list[dict]:
     """Filter rows in a CSV dataset by exact column values (case-insensitive).
 
@@ -255,6 +285,7 @@ def filter_dataset(dataset: str, filters: dict[str, str], max_results: int = 100
 
 
 @mcp.tool()
+@_timed
 def filter_dataset_fuzzy(dataset: str, filters: dict[str, str], max_results: int = 100) -> list[dict]:
     """Filter rows in a CSV dataset using regex pattern matching (case-insensitive).
 
@@ -283,6 +314,7 @@ def filter_dataset_fuzzy(dataset: str, filters: dict[str, str], max_results: int
 
 
 @mcp.tool()
+@_timed
 def count_by_column(
     dataset: str, column: str, filters: dict[str, str] | None = None,
     fuzzy: bool = False,
@@ -318,6 +350,7 @@ def count_by_column(
 
 
 @mcp.tool()
+@_timed
 def get_column_values(dataset: str, column: str) -> list[str] | dict:
     """List all distinct values in a column of a CSV dataset.
 
@@ -348,6 +381,7 @@ def _load_request_config() -> dict:
 
 
 @mcp.tool()
+@_timed
 def get_request_attributes() -> dict:
     """Get the attributes required to raise an entitlement request.
 
@@ -360,6 +394,7 @@ def get_request_attributes() -> dict:
 
 
 @mcp.tool()
+@_timed
 def raise_entitlement_request(
     resource_id: str,
     justification: str,
@@ -416,6 +451,7 @@ def _load_quality_criteria() -> dict:
 
 
 @mcp.tool()
+@_timed
 def get_quality_criteria() -> dict:
     """Get the data quality criteria checklist for resource evaluation.
 
