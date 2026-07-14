@@ -288,17 +288,16 @@ not a performance factor on any path.
 ### P3 -- scale-out ceiling (when concurrent users grow)
 
 **P3.1 Externalize session state to unlock horizontal scaling.**
+**[IMPLEMENTED -- see docs/P3.1.md, branch P3.1]**
 
-- Swap MemorySaver for a persistent LangGraph checkpointer (Postgres
-  and SQLite savers exist; Redis in the ecosystem). AgentService
-  already takes the checkpointer as a constructor parameter -- that
-  seam was built for this.
-- The session REGISTRY (owner, last_used, lock) must move too: table
-  or Redis keys for ownership/TTL; per-session locking becomes a
-  distributed concern (advisory lock, or sticky routing by session id
-  at the load balancer, which is simpler and usually sufficient).
-- Until this is done: run exactly ONE uvicorn worker. Document it as
-  a constraint everywhere deployment is described.
+- Done as designed, all three pieces behind one REDIS_URL seam:
+  checkpoints via a custom plain-Redis RedisSaver (no modules -> any
+  Azure Cache tier), registry via hash + server-side EXPIRE + LRU
+  zset, per-session turn locks as SET NX PX distributed locks. Unset
+  REDIS_URL keeps the previous single-instance in-process behavior.
+  Measured on real redis 7.0: +2.6ms checkpointing overhead per turn.
+- Replicas > 1 are now allowed WITH Redis configured; without it the
+  single-instance constraint still applies.
 
 **P3.2 Bound per-conversation checkpoint growth.**
 

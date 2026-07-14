@@ -106,12 +106,16 @@ class AgentService:
 
     def __init__(self, agent, tool_count: int, checkpointer=None,
                  session_ttl_seconds: float = 3600, max_sessions: int = 500,
-                 stream_file: str = ""):
+                 stream_file: str = "", store=None):
         self._agent = agent
         self.tool_count = tool_count
         self._checkpointer = checkpointer
         self._session_ttl = session_ttl_seconds
         self._max_sessions = max_sessions
+        # store is the Redis session registry (redis_state.py) when
+        # REDIS_URL is set; None keeps every in-process code path below
+        # exactly as it was (the CLI, scanner, and tests never see Redis)
+        self._store = store
         self._sessions: dict[str, _Session] = {}
         # stream_file mirrors the CLI's agent_stream.txt: every node's
         # output is appended as it completes, so tail -f gives live
@@ -137,12 +141,20 @@ class AgentService:
     async def create(cls, checkpointer=None) -> "AgentService":
         """Connect to the MCP server, load tools, build and compile the graph.
 
-        checkpointer defaults to MemorySaver -- sessions live in process
-        memory and are lost on restart. Pass a persistent saver to change that.
+        Session state (P3.1): with REDIS_URL set, sessions, locks, and
+        conversation checkpoints live in Redis -- they survive restarts
+        and are shared by every agent-api instance pointing at the same
+        Redis (required to run more than one instance). Without it,
+        everything lives in process memory (MemorySaver) exactly as
+        before: sessions are lost on restart and the server must stay a
+        single instance. An explicitly passed checkpointer wins either
+        way (tests use this).
 
         Session hygiene config from env:
             AGENT_API_SESSION_TTL_MINUTES -- evict sessions idle this long (default 60)
             AGENT_API_MAX_SESSIONS        -- hard cap; LRU-evict when full (default 500)
+            REDIS_URL                     -- e.g. redis://localhost:6379/0; see docs/P3.1.md
+            AGENT_API_LOCK_TIMEOUT_SECONDS -- Redis turn-lock TTL (default 300)
         Graph visibility:
             AGENT_API_STREAM_FILE -- per-node execution log for tail -f
                 (default agent_api_stream.txt; empty string disables)
@@ -159,13 +171,24 @@ class AgentService:
         max_sessions = int(os.environ.get("AGENT_API_MAX_SESSIONS", "500"))
         stream_file = os.environ.get("AGENT_API_STREAM_FILE", "agent_api_stream.txt")
 
+        store = None
+        redis_url = os.environ.get("REDIS_URL", "")
+        if redis_url and checkpointer is None:
+            # fails fast when Redis is unreachable -- see build_redis_state
+            from ease_clients.redis_state import build_redis_state
+
+            lock_timeout = float(os.environ.get("AGENT_API_LOCK_TIMEOUT_SECONDS", "300"))
+            store, checkpointer = await build_redis_state(
+                redis_url, ttl_minutes * 60, max_sessions, lock_timeout,
+            )
         checkpointer = checkpointer or MemorySaver()
         graph = build_graph(llm, tools)
         agent = graph.compile(checkpointer=checkpointer)
         return cls(agent, len(tools), checkpointer,
                    session_ttl_seconds=ttl_minutes * 60,
                    max_sessions=max_sessions,
-                   stream_file=stream_file)
+                   stream_file=stream_file,
+                   store=store)
 
     # -- session lifecycle --
 
@@ -198,6 +221,32 @@ class AgentService:
     def has_session(self, session_id: str) -> bool:
         """True if the session exists (created and not yet evicted)."""
         return session_id in self._sessions
+
+    # -- async variants used by the endpoints --
+    # In Redis mode every registry operation is a network call and must
+    # be awaited; in-memory mode they just call the sync methods above,
+    # which stay exactly as they were (and keep working for tests and
+    # any embedder that constructs AgentService directly).
+
+    async def acreate_session(self) -> str:
+        if self._store is not None:
+            return await self._store.create_session()
+        return self.create_session()
+
+    async def ahas_session(self, session_id: str) -> bool:
+        if self._store is not None:
+            return await self._store.has_session(session_id)
+        return self.has_session(session_id)
+
+    async def _arequire_session(self, session_id: str) -> None:
+        """Validate the session and refresh its TTL clock (both modes)."""
+        if self._store is not None:
+            try:
+                await self._store.require(session_id)
+            except KeyError:
+                raise UnknownSessionError(session_id)
+        else:
+            self._require_session(session_id)
 
     def _require_session(self, session_id: str) -> _Session:
         """Return the session's bookkeeping entry, refreshing its TTL clock."""
@@ -240,8 +289,11 @@ class AgentService:
         """Background task: sweep expired sessions periodically.
 
         Started by the app's lifespan handler; runs until cancelled at
-        shutdown.
+        shutdown. In Redis mode there is nothing to do -- every key
+        carries an EXPIRE, so the idle TTL enforces itself server-side.
         """
+        if self._store is not None:
+            return
         while True:
             await asyncio.sleep(interval_seconds)
             self.sweep_expired_sessions()
@@ -291,7 +343,16 @@ class AgentService:
         Raises UnknownSessionError for ids that were never created or
         have been evicted.
         """
-        session = self._require_session(session_id)
+        if self._store is not None:
+            # Redis mode: validate + TTL-refresh in Redis, and take the
+            # DISTRIBUTED turn lock -- one turn at a time per session
+            # even when the two turns land on different instances
+            await self._arequire_session(session_id)
+            session = None
+            turn_lock = self._store.lock(session_id)
+        else:
+            session = self._require_session(session_id)
+            turn_lock = session.lock
         config = self._config(session_id)
         answer_parts: list[str] = []
         stream_fh = self._open_stream_file(session_id)
@@ -307,7 +368,7 @@ class AgentService:
             # one turn at a time per session: a second message on the same
             # session waits here until the first finishes, instead of both
             # writing into the same thread's history concurrently
-            async with session.lock:
+            async with turn_lock:
                 if stream_fh:
                     _write_stream_entry(
                         stream_fh,
@@ -371,7 +432,10 @@ class AgentService:
                     stream_fh.flush()
 
                 # a long turn should not count against the idle TTL
-                session.last_used = time.monotonic()
+                if self._store is not None:
+                    await self._store.touch(session_id)
+                else:
+                    session.last_used = time.monotonic()
 
                 if answer_parts:
                     yield AgentEvent("answer", "".join(answer_parts))
@@ -403,7 +467,7 @@ class AgentService:
         Raises UnknownSessionError for ids that were never created or
         have been evicted.
         """
-        self._require_session(session_id)
+        await self._arequire_session(session_id)
         state = await self._agent.aget_state(self._config(session_id))
         return state.values.get("messages", [])
 
@@ -558,11 +622,24 @@ def create_app(
     @app.get("/health")
     async def health():
         service = app.state.service
+        # in Redis mode an instance that cannot reach Redis cannot serve
+        # any session -- report 503 so an orchestrator's readiness probe
+        # takes it out of rotation (see docs/P3.1.md section 12)
+        if service is not None and service._store is not None:
+            try:
+                await service._store.ping()
+            except Exception:
+                logger.exception("Health check: session store unreachable")
+                raise HTTPException(
+                    status_code=503, detail="Session store unreachable.",
+                )
+            return {"status": "ok", "tools": service.tool_count,
+                    "session_store": "redis"}
         return {"status": "ok", "tools": service.tool_count if service else 0}
 
     @app.post("/sessions")
     async def create_session(principal: Principal = Depends(current_principal)):
-        session_id = app.state.service.create_session()
+        session_id = await app.state.service.acreate_session()
         logger.info("Created session %s for %s", session_id, principal.subject)
         return {"session_id": session_id}
 
@@ -626,7 +703,7 @@ def create_app(
         # validate the session BEFORE streaming starts: once the
         # response body is open the status line is already sent, so a
         # 404 can only be delivered here
-        if not app.state.service.has_session(session_id):
+        if not await app.state.service.ahas_session(session_id):
             raise HTTPException(
                 status_code=404,
                 detail="Unknown or expired session. Create a new one with POST /sessions.",

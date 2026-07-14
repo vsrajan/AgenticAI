@@ -32,6 +32,7 @@ right where it is used.
 13. [Testing](#13-testing)
 14. [The future: Azure Entra OAuth2](#14-the-future-azure-entra-oauth2)
 15. [What was deliberately not changed](#15-what-was-deliberately-not-changed)
+16. [Sessions in Redis -- running more than one API instance](#16-sessions-in-redis----running-more-than-one-api-instance)
 
 ---
 
@@ -779,3 +780,46 @@ Remaining accepted tradeoff: the CLI keeps its own streaming loop in
 `agent_api.py`. The two share the graph and all agent logic but render
 output separately. A later cleanup can port the CLI onto AgentService
 events and delete the duplication.
+
+## 16. Sessions in Redis -- running more than one API instance
+
+Everything in section 9 (session hygiene) describes state held INSIDE
+the server process: the sessions dict, the per-session asyncio locks,
+and the MemorySaver conversation history. That design has two hard
+consequences: a restart wipes every session, and a second API instance
+behind a load balancer would have its own private sessions -- a client
+routed to the wrong instance gets a 404 for a session that "exists".
+
+P3.1 (see docs/P3.1.md for the full plan and design decisions) makes
+the process stateless-enough to scale: set `REDIS_URL` in .env and all
+three pieces of state move into a Redis server that every instance
+shares:
+
+| In-process (default) | Redis mode (`REDIS_URL` set) |
+|---|---|
+| sessions dict + TTL sweeper task | one Redis hash per session with server-side EXPIRE (no sweeper) |
+| `asyncio.Lock` per session | distributed lock (`SET NX PX`) -- one turn at a time per session ACROSS instances |
+| MemorySaver checkpoints | RedisSaver (redis_state.py) -- plain-Redis LangGraph checkpointer, no modules needed |
+
+What changes for clients: nothing in the API contract. What changes
+operationally:
+
+- sessions survive restarts (until their idle TTL);
+- any instance serves any session, so the load balancer needs no
+  sticky routing;
+- `/health` additionally pings Redis and returns 503 when it is
+  unreachable, so an orchestrator's readiness probe stops routing to
+  a broken instance;
+- with `REDIS_URL` set but Redis down, the server REFUSES to start
+  (fail-closed, like the auth layer): silently falling back to
+  in-process state would corrupt sessions the moment a second
+  instance runs.
+
+The one forbidden combination is replicas > 1 WITHOUT Redis -- each
+replica would then hold private sessions behind one load balancer.
+Rollback from Redis mode is therefore: unset `REDIS_URL` AND scale to
+a single instance in the same action.
+
+The code lives in `redis_state.py`; `agent_api.py` only branches on
+"is a store configured" (`AgentService._store`) -- with `REDIS_URL`
+unset, every code path in this document behaves exactly as written.

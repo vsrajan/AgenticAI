@@ -12,6 +12,7 @@ agent-client/src/ease_clients/
   agent_api.py        — AgentService (event-stream wrapper) + FastAPI app (HTTP API)
   auth_api.py         — pluggable API auth (static bearer token now, Entra OAuth2 later)
   cli_api.py          — API server entry point (runs uvicorn)
+  redis_state.py      — Redis session state (P3.1): RedisSaver checkpointer + registry/locks
 
 agent-client/src/ease_clients/utils/
   agnes_agent_graph.py — LangGraph StateGraph (router + 3 specialists + handoff)
@@ -123,6 +124,13 @@ POST /sessions, POST /sessions/{id}/messages (buffered JSON), POST
 explicit (404 for unknown/expired ids), TTL-evicted, LRU-capped, and locked
 to one message at a time. See `docs/agent_api.md` for the full guide.
 
+API session state: in-process by default (single instance only, lost on
+restart). Set `REDIS_URL` to move sessions, turn locks, and conversation
+checkpoints into a shared Redis so multiple API instances can serve one
+session pool (plain Redis, no modules; fail-fast when unreachable;
+`AGENT_API_LOCK_TIMEOUT_SECONDS` bounds the distributed turn lock). See
+`docs/P3.1.md` and docs/agent_api.md section 16.
+
 ## Development
 
 Branch: `claude/mcp-html-docs-server-S9jg9`
@@ -160,6 +168,7 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 - Added LangGraph tutorial (docs/langgraph.md, companion to async.md): part 1 builds StateGraph concepts with 7 standalone runnable samples needing no Azure/MCP (state + partial updates, the messages reducer, conditional edges, the tool-loop cycle, checkpointer/thread_id sessions, astream, astream_events with GenericFakeChatModel producing real token events offline) -- all verified; part 2 walks build_graph line by line (AgentState's two merge behaviors, node factories incl. the never-executed routing/handoff tool trick, the tool split, every edge mapped to its design decision, supersteps/checkpoints, and the event-emission model: metadata.langgraph_node inheritance vs the event name filter the P0 timing keys on)
 - Added PDF/BM25 tutorial (docs/bm25.md, third volume after async.md and langgraph.md): part 1 builds the concepts with 5 standalone runnable samples in the mcp-server env (PDF-as-drawing-instructions + blank-page numbering, the regex tokenizer and the no-stemming lexical gap, hand-rolled TF-IDF, BM25's saturation and length-normalization fixes shown empirically, and the whole-doc-vs-page granularity demo that motivates P1.1) -- all verified; part 2 walks pdf_indexer.py (extraction, the parallel corpus/_index_keys lists, the density-window snippet, fuzzy path resolution, page-range reads with LLM-facing structured errors) and closes on the scale story + the lexical boundary that vector.md's hybrid design addresses
 - Added parquet/DuckDB/MCP-tools tutorial (docs/duckdb.md, fourth volume): part 1 builds the data-side concepts with 6 standalone runnable samples in the mcp-server env (embedded file-backed DuckDB, querying parquet in place, Spark part-file globs + the COLUMNS(*)::VARCHAR cast, atomic CREATE OR REPLACE swaps gated by mtime/size fingerprints, the two SQL-safety rules for LLM-supplied input, and a minimal FastMCP tool with an error-message-as-instruction) -- all verified; part 2 walks data_sources.py (the DataSource split, ParquetDataSource hardening), csv_store.py (threads-not-asyncio concurrency, cursor-per-call, the LIMIT max+1 truncation trick, the size-gated BM25 sidecar), and server.py (docstrings as prompt engineering, _caller audit identity, the _timed half of the P0 instrumentation), closing on the measured P0 numbers
+- Implemented P3.1 Redis session state (docs/P3.1.md, branch P3.1, now stacked on P1.1): with REDIS_URL set, AgentService moves its three in-process state pieces into shared Redis -- conversation checkpoints via a custom plain-Redis RedisSaver (mirrors InMemorySaver's storage model; no RedisJSON/RediSearch modules, so any Azure Cache tier works), the session registry (hash + server-side EXPIRE replaces the sweeper, LRU zset keeps the cap with the lock-aware skip rule), and the per-session turn lock (SET NX PX distributed lock, AGENT_API_LOCK_TIMEOUT_SECONDS). Unset REDIS_URL = previous in-process behavior byte-for-byte; REDIS_URL set but unreachable = fail-fast startup; /health pings Redis (503 when down) for readiness probes. Validated on real plain redis 7.0: restart survival, cross-instance lock exclusion, +2.6ms per-turn overhead. tests_api now 61 (fakeredis[lua], no server in CI)
 
 ## General instructions
 
