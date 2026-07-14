@@ -28,6 +28,7 @@ consumes. Tune the topology once; keep tuning the token axis.
 8. [Deployment hygiene](#8-deployment-hygiene)
 9. [What AKS deliberately does not solve](#9-what-aks-deliberately-does-not-solve)
 10. [Rollout order](#10-rollout-order)
+11. [AKS terms used in this document](#11-aks-terms-used-in-this-document)
 
 ---
 
@@ -246,3 +247,146 @@ agent replicas beyond 3.
 4. Point DatabaseSource at the production database (P0 section 11).
 5. Load-test to the quota ceiling; only then revisit replica counts,
    PTU, and P1.3.
+
+## 11. AKS terms used in this document
+
+Plain-English definitions of every Kubernetes/AKS term this analysis
+relies on, each tied to how THIS deployment uses it. Assumes you know
+what AKS is at a high level (a managed Kubernetes cluster: Azure runs
+the control plane, you run workloads on node VMs) but not the
+individual building blocks.
+
+**Pod.** The smallest deployable unit: one or more containers that
+start, stop, and share a network address together. Here every pod
+holds exactly one container (one agent-api process or one mcp-server
+process). Pods are DISPOSABLE by design -- Kubernetes kills and
+replaces them freely -- which is exactly why P3.1 had to move session
+state out of the process before the agent could run as more than one
+pod.
+
+**Deployment.** The object that says "keep N identical pods of this
+image running". Kubernetes continuously reconciles reality against
+that number: a pod dies, a replacement starts. A Deployment also owns
+the ROLLING UPDATE mechanic -- on a new image it starts new pods,
+waits for them to become Ready, then retires old ones, so there is no
+moment with zero pods serving.
+
+**Replicas.** The N above -- how many copies of the pod the
+Deployment maintains. "agent-api replicas 2-3" means two to three
+identical agent processes serving traffic at once. Before P3.1 this
+number had to be 1; now the replicas share sessions through Redis.
+
+**Namespace.** A named compartment inside one cluster -- a folder for
+related objects. Both Deployments, the services, the secrets, and the
+policies here live in one namespace, which scopes naming, RBAC
+permissions, and NetworkPolicies, and keeps this stack isolated from
+whatever else the firm runs on the same cluster.
+
+**Service / ClusterIP.** Pods get new IPs every time they restart, so
+you never call a pod directly. A Service is a stable virtual name +
+IP that load-balances over whatever pods currently match it.
+ClusterIP is the internal-only flavor: reachable from inside the
+cluster, invisible from outside. The MCP server sits behind a
+ClusterIP service -- agent pods call one stable DNS name and the
+service spreads calls across mcp pods; nothing outside the cluster
+can reach it at all.
+
+**Ingress.** The front door for HTTP traffic from outside: one
+component (an ingress controller, e.g. NGINX) that terminates TLS and
+routes URLs to services. It is also a REVERSE PROXY, which is why its
+buffering/timeout behavior matters so much for our SSE streaming
+route -- a proxy that buffers responses would hold back tokens the
+agent already emitted.
+
+**Probe.** A periodic health check the kubelet runs against each pod.
+Three kinds, and the distinction is load-bearing here:
+- READINESS: "may this pod receive traffic right now?" Failing it
+  removes the pod from its Service's rotation but does NOT restart
+  it. Our /health (which pings Redis) is a readiness probe: a pod
+  that lost Redis must stop receiving requests, but restarting it
+  would not help.
+- LIVENESS: "is this process alive at all, or wedged?" Failing it
+  RESTARTS the pod. This must NOT depend on Redis -- a Redis blip
+  would restart the whole tier for nothing -- hence the tcpSocket
+  check instead.
+- STARTUP: "has the pod finished booting?" Suppresses the other two
+  probes until it passes. The MCP pod uses this window for its ~10 s
+  DuckDB cold ingest so it is not marked broken while loading.
+
+**HPA (Horizontal Pod Autoscaler).** Watches a metric (CPU by
+default) and adjusts a Deployment's replica count between a min and
+max. "mcp-server HPA 2->6 at 70% CPU" means: never fewer than 2 pods,
+add pods when average CPU crosses 70%, up to 6, remove them when load
+falls. The STABILIZATION WINDOW is a built-in delay before acting, so
+short spikes do not cause pod churn. Horizontal = more pods (what we
+do); vertical = bigger pods.
+
+**KEDA.** An add-on autoscaler that can scale on metrics other than
+CPU/memory -- queue depth, requests per second, custom numbers.
+Mentioned because agent turns are I/O-bound waits: an agent pod
+handling 30 concurrent turns shows almost no CPU, so a CPU HPA would
+never scale it. If the agent tier ever autoscales, it scales on
+in-flight turns via something like KEDA.
+
+**emptyDir.** A scratch volume created empty when a pod starts and
+DELETED when that pod dies -- node-local disk with pod lifetime.
+Right for the MCP DuckDB file precisely because that file is a cache:
+losing it costs one 10 s re-ingest, and per-pod isolation avoids any
+shared-file locking questions. The opposite choice would be a
+PersistentVolume (survives pods; needed only for data you cannot
+rebuild -- nothing in this stack qualifies).
+
+**Secret / ConfigMap.** Both hold configuration that pods mount as
+env vars or files; a Secret is for sensitive values and is access-
+controlled accordingly, a ConfigMap is for everything else. Rule used
+here: MCP_PORT is ConfigMap material; AGENT_API_TOKEN,
+MCP_AUTH_TOKENS, and REDIS_URL (it embeds the cache access key) are
+Secrets, always.
+
+**Key Vault CSI driver.** The bridge that mounts Azure Key Vault
+entries into pods as if they were Kubernetes Secrets. The actual
+secret material stays managed (rotated, audited) in Key Vault;
+Kubernetes only ever sees a projection of it. This is how all three
+tokens and the Redis URL reach the pods.
+
+**Workload identity.** Gives a pod its own Microsoft Entra identity,
+so it can call Azure services (Azure OpenAI, later Redis) by proving
+WHO IT IS instead of presenting an API key from config. No key to
+store, leak, or rotate. Listed as the follow-up that retires
+AZURE_OPENAI_API_KEY; it is the same Entra direction as the rest of
+the auth roadmap.
+
+**NetworkPolicy.** A firewall rule for pod-to-pod traffic. By default
+any pod can talk to any pod in the cluster; our policy says "only
+agent-api pods may reach mcp-server pods on port 8000". Defense in
+depth in front of the MCP bearer-token auth.
+
+**Pod anti-affinity / topology spread.** Scheduling hints: "do not
+put both replicas of this Deployment on the same node / in the same
+availability zone." Without it, two agent replicas can land on one VM
+and a single node failure takes the whole tier down -- exactly what
+having two replicas was meant to prevent.
+
+**PDB (PodDisruptionBudget).** A floor on availability during
+VOLUNTARY disruptions (node drains, cluster upgrades -- routine on
+managed AKS): "at least 1 pod of this Deployment must stay up."
+Without a PDB, an unlucky upgrade can evict every replica at once.
+
+**terminationGracePeriodSeconds / preStop.** What happens when
+Kubernetes wants a pod gone (deploys, scale-down, drains): it sends
+SIGTERM, waits up to the grace period, then force-kills. A preStop
+hook runs just before SIGTERM. We set the grace period ~300 s (the
+lock timeout) so an in-flight agent turn -- LLM calls included -- can
+finish and release its Redis lock instead of dying mid-turn.
+
+**Rolling deploy.** The Deployment update mechanic from above, named:
+new pods up, wait Ready, old pods down, in waves. The P3.1 payoff
+restated: because sessions now live in Redis, a rolling deploy of the
+agent tier loses only the turns in flight during the swap -- the
+conversations themselves survive.
+
+**VNet injection / private endpoint.** Two Azure networking patterns
+for keeping traffic to managed services (Azure Cache, Azure OpenAI)
+on private network paths instead of public internet routes. Fewer
+hops and no public exposure -- worth a few ms per call and required
+posture in most enterprises.
