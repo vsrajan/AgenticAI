@@ -63,15 +63,28 @@ DOCS_DIR = os.environ.get(
     str(Path(__file__).resolve().parents[2] / "docs"),
 )
 
-# Transport configuration
-MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio")
+# Transport configuration. streamable-http is the recommended HTTP
+# transport (one /mcp endpoint, works behind load balancers); sse is
+# the legacy HTTP transport, kept for rollback; stdio is the local
+# child-process default. Hyphen and underscore spellings both accepted.
+MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio").lower().replace("_", "-")
 MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.environ.get("MCP_PORT", "8000"))
 MCP_SERVER_NAME = os.environ.get("MCP_SERVER_NAME", "access-governance-docs")
 
+# Stateless streamable-http: every request is self-contained, so any
+# server replica can answer it -- required for running more than one
+# copy behind a load balancer (e.g. Kubernetes). Costs one extra
+# initialize round-trip per tool call; ignored by sse and stdio.
+MCP_STATELESS_HTTP = os.environ.get("MCP_STATELESS_HTTP", "true").lower() in ("1", "true", "yes")
+
 logger.info("Docs directory: %s", DOCS_DIR)
 logger.info("Server name: %s", MCP_SERVER_NAME)
-logger.info("Transport: %s (host=%s, port=%d)", MCP_TRANSPORT, MCP_HOST, MCP_PORT)
+logger.info(
+    "Transport: %s (host=%s, port=%d, stateless=%s)",
+    MCP_TRANSPORT, MCP_HOST, MCP_PORT,
+    MCP_STATELESS_HTTP if MCP_TRANSPORT == "streamable-http" else "n/a",
+)
 
 # -- Authentication --
 # HTTP transports require a bearer token per agent (see auth.py).
@@ -109,6 +122,7 @@ mcp = FastMCP(
     log_level=LOG_LEVEL,
     token_verifier=_token_verifier,
     auth=_auth_settings,
+    stateless_http=MCP_STATELESS_HTTP,
     instructions=(
         "This server provides documentation and data for an enterprise Access "
         "Governance application.\n\n"

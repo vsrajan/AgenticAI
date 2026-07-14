@@ -28,7 +28,7 @@ agent-client/data/
   Incidents.csv       — Sample ServiceNow-style incident data (12 incidents)
 
 mcp-server/src/mcp_docs_server/
-  server.py      — FastMCP server (12 tools over SSE/stdio)
+  server.py      — FastMCP server (12 tools over streamable-http/sse/stdio)
   auth.py        — per-agent bearer-token auth for HTTP transports (TokenVerifier)
   pdf_indexer.py — PDF → per-page BM25 index (DocIndex)
   csv_store.py   — CSV → in-memory DataFrame (CsvStore)
@@ -98,7 +98,10 @@ Required env vars: `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENA
 All config is read from the single gitignored `agent-client/.env`; `.env.example`
 is the complete committed template (agent + API settings).
 
-MCP transport: SSE (default, set `MCP_SERVER_URL`) or stdio (set `MCP_SERVER_COMMAND` + `MCP_SERVER_ARGS`)
+MCP transport: streamable-http (default, set `MCP_SERVER_URL` to the /mcp
+endpoint; stateless mode via `MCP_STATELESS_HTTP=true` so replicas can sit
+behind a load balancer), sse (legacy HTTP, kept for rollback), or stdio (set
+`MCP_SERVER_COMMAND` + `MCP_SERVER_ARGS`). See docs/streamable-http.md.
 
 MCP auth: the server requires a bearer token per agent on HTTP transports
 (`MCP_AUTH=static` fail-closed, `MCP_AUTH_TOKENS=name:token,...`; `none` to
@@ -141,6 +144,7 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 - Added beginner-oriented API guide (docs/agent_api.md) and Excalidraw API-flow diagram (docs/05_agent_api_flow.excalidraw)
 - Merged the API layer into the main manifests: fastapi/uvicorn deps + agent-api script in pyproject.toml, API settings in .env.example (the temporary pyproject_api.toml / .env_api supersets were removed)
 - Restructured the package to match the server deployment: agent_client -> ease_clients, shared internals moved to ease_clients/utils (llm.py, scanner.py, incident_sources.py, and agent.py renamed to agnes_agent_graph.py); entry points and loggers renamed accordingly
+- Switched the default MCP transport from sse to streamable-http (branch streamable-http): client _get_mcp_server_config gains a streamable_http branch (default URL /mcp, same bearer-token header), server passes MCP_STATELESS_HTTP (default true) to FastMCP so replicas can run behind a load balancer, sse kept as legacy rollback, auth unchanged (the gate already covered both HTTP transports). See docs/streamable-http.md. tests_api now 40
 
 ## General instructions
 
