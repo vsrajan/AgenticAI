@@ -38,7 +38,8 @@ docs/
   agent_api.md    — beginner-oriented guide to the HTTP API layer
   entra_auth_guide.md — Entra ID implementation guide (client->agent + agent->MCP)
   PerformanceRecommendations.md — prod-scale performance analysis + prioritized plan
-  architecture_excalidraw.md + 0*.excalidraw — Excalidraw diagrams (05 = API flows)
+  aks.md          — AKS deployment analysis (topology, per-tier sizing, E2E latency budget)
+  architecture_excalidraw.md + 0*.excalidraw — Excalidraw diagrams (05 = API flows, 06 = AKS topology)
 ```
 
 ## Architecture
@@ -148,6 +149,7 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 - Implemented P0 performance work (docs/P0.md, branch Performance-P0, rebased onto streamable-http): CsvStore reworked onto embedded DuckDB (persisted MCP_DB_PATH file, warm starts skip ingest, atomic fingerprint-based refresh + background sweeper, size-gated BM25 via MCP_SEARCH_MAX_ROWS), pluggable ingestion in data_sources.py (CsvDataSource + DatabaseSource stub for Azure SQL/Postgres), per-tool took=ms logging on the server, per-node/per-turn timing in AgentService. All 5M-row acceptance targets met (25ms filtered group-by, 0.04s warm start, 108MB RSS). mcp-server tests now 35
 - Added ParquetDataSource -- the production data path (docs/P0.md section 11.9): Spark/Databricks parquet exports staged locally from Azure Storage (az cli, service principal) load via MCP_DATA_SOURCE=parquet + MCP_PARQUET_SOURCES=Name=glob pairs. Datasets are folder-of-part-files globs (markers excluded), every column cast to VARCHAR so the string-based tool contract is unchanged, mtime/size fingerprints drive the same atomic refresh cycle; az:// URLs accepted for a future direct-read mode (duckdb azure extension -- blocked in the dev pod, bake into the AKS image later). Verified live over streamable-http + auth. mcp-server tests now 53 (18 new)
 - Implemented P1.1 page-level PDF retrieval (docs/P1.1.md, branch P1.1, based on Performance-P0): DocIndex indexes one BM25 entry per page, search_docs hits carry the page number with page-local snippets, read_page gains a pages selection ("3" / "2-5", empty = full document for back compat), KNOWLEDGEBASE_PROMPT steers to page ranges. Measured 40.4x smaller tool results for single-page reads on a 40-page doc. mcp-server tests now 52
+- Added AKS deployment analysis (docs/aks.md + Excalidraw diagram 06): two-tier topology on managed AKS against the full P1.1 stack -- agent-api replicas 2-3 (unlocked by P3.1, plain round-robin), mcp-server replicas 2 + CPU HPA (unlocked by stateless streamable-http), Azure Cache for Redis, ingress SSE tuning, readiness-vs-liveness probe guidance, hop-by-hop E2E latency budget (Azure OpenAI quota owns ~95% of turn time; topology buys ms + resilience), sizing starting point, and the follow-up register (P1.2, P1.3, P3.2, /livez)
 
 ## General instructions
 
