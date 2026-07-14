@@ -213,3 +213,23 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
     caching; part 2 is portable if written against `usage_metadata`; only the
     breakpoint placement is provider-specific, and it lives entirely inside
     `get_llm()`.
+- Externalize agent session state to Redis (P3.1 in
+  `docs/PerformanceRecommendations.md`) -- NEXT UP, planned before migrating
+  P0/P1.1. Unlocks agent-api replicas > 1 (multi-pod AKS) by moving the three
+  in-process pieces out of AgentService: the LangGraph checkpointer, the
+  session registry (Redis per-key EXPIRE replaces the TTL sweeper), and the
+  per-session locks (SET NX PX distributed locks with a timeout longer than
+  the longest turn). Config seam: REDIS_URL in the single .env; absent ->
+  current in-process MemorySaver behavior unchanged (CLI and scanner never
+  need Redis). Open design decision for the checkpointer: the official
+  langgraph-checkpoint-redis needs the RedisJSON/RediSearch modules
+  (redis-stack locally; Azure Cache Enterprise tier in prod), so the plain-
+  Redis alternatives are a minimal custom saver on plain strings or the
+  official PostgresSaver. Dev environment VALIDATED 2026-07-14: plain redis
+  6.2.7 runs locally on the same host as the agent (RHEL 8.10 dev pod with
+  CentOS 8 repos; install needed
+  --setopt=centos-8-appstream.module_hotfixes=true to bypass missing modular
+  metadata; run redis-server --port 6379 -- NOT 8000, which collides with
+  MCP_PORT). Test rig for the implementation: two agent-api instances on
+  ports 8080/8081 against one local Redis -> restart survival, cross-instance
+  session continuity, concurrent-turn lock exclusion.
