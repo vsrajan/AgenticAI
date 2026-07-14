@@ -348,6 +348,51 @@ def test_mcp_config_without_token_sends_no_headers(monkeypatch):
     assert "headers" not in connection
 
 
+def test_mcp_config_defaults_to_streamable_http(monkeypatch):
+    # no MCP_TRANSPORT set -> streamable-http on the /mcp endpoint;
+    # the connection dict uses the adapter's underscore spelling
+    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+
+    monkeypatch.delenv("MCP_TRANSPORT", raising=False)
+    monkeypatch.delenv("MCP_SERVER_URL", raising=False)
+    monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
+    monkeypatch.delenv("MCP_SERVER_TOKEN", raising=False)
+    connection = _get_mcp_server_config()["access-governance-docs"]
+    assert connection["transport"] == "streamable_http"
+    assert connection["url"] == "http://127.0.0.1:8000/mcp"
+
+
+def test_mcp_config_streamable_http_attaches_bearer_token(monkeypatch):
+    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+
+    monkeypatch.setenv("MCP_TRANSPORT", "streamable-http")
+    monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
+    monkeypatch.setenv("MCP_SERVER_TOKEN", "tok123")
+    connection = _get_mcp_server_config()["access-governance-docs"]
+    assert connection["transport"] == "streamable_http"
+    assert connection["headers"] == {"Authorization": "Bearer tok123"}
+
+
+def test_mcp_config_accepts_underscore_spelling(monkeypatch):
+    # MCP_TRANSPORT=streamable_http (underscore) is normalized
+    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+
+    monkeypatch.setenv("MCP_TRANSPORT", "streamable_http")
+    monkeypatch.delenv("MCP_SERVER_URL", raising=False)
+    monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
+    connection = _get_mcp_server_config()["access-governance-docs"]
+    assert connection["transport"] == "streamable_http"
+    assert connection["url"].endswith("/mcp")
+
+
+def test_mcp_config_rejects_unknown_transport(monkeypatch):
+    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+
+    monkeypatch.setenv("MCP_TRANSPORT", "carrier-pigeon")
+    with pytest.raises(ValueError, match="streamable-http"):
+        _get_mcp_server_config()
+
+
 # -- Authenticators --
 
 def test_static_token_accepts_correct_token():

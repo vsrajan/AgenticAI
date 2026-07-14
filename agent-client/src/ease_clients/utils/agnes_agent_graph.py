@@ -881,20 +881,29 @@ def build_graph(llm, all_tools):
 def _get_mcp_server_config() -> dict:
     """Build MCP server connection config from env vars.
 
-    sse   -- needs MCP_SERVER_URL (e.g. http://host:8000/sse); when
-             MCP_SERVER_TOKEN is set it is sent as a bearer token so
-             the server can authenticate this agent deployment
+    streamable-http -- the default HTTP transport. Needs MCP_SERVER_URL
+             (e.g. http://host:8000/mcp); when MCP_SERVER_TOKEN is set
+             it is sent as a bearer token so the server can
+             authenticate this agent deployment
+    sse   -- legacy HTTP transport, kept for rollback. Same env vars
+             (URL path is /sse instead of /mcp)
     stdio -- needs MCP_SERVER_COMMAND + MCP_SERVER_ARGS (no auth: the
              server runs as a local child process)
+
+    MCP_TRANSPORT accepts hyphen or underscore spellings
+    (streamable-http / streamable_http); the adapter library itself
+    expects the underscore form in the connection dict.
     """
     server_name = os.environ.get("MCP_SERVER_NAME", "access-governance-docs")
-    transport = os.environ.get("MCP_TRANSPORT", "sse").lower()
+    transport = os.environ.get("MCP_TRANSPORT", "streamable-http").lower().replace("_", "-")
 
-    if transport == "sse":
-        url = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8000/sse")
+    if transport in ("streamable-http", "sse"):
+        default_path = "/mcp" if transport == "streamable-http" else "/sse"
+        url = os.environ.get("MCP_SERVER_URL", f"http://127.0.0.1:8000{default_path}")
         connection = {
             "url": url,
-            "transport": "sse",
+            # the adapter's literal is underscore-spelled: streamable_http
+            "transport": "streamable_http" if transport == "streamable-http" else "sse",
         }
         # this deployment's MCP credential -- the server identifies the
         # agent by which token it presents, so no name is sent here.
@@ -903,8 +912,8 @@ def _get_mcp_server_config() -> dict:
         if token:
             connection["headers"] = {"Authorization": f"Bearer {token}"}
         logger.info(
-            "MCP server=%s transport=sse url=%s auth=%s",
-            server_name, url, "bearer" if token else "off",
+            "MCP server=%s transport=%s url=%s auth=%s",
+            server_name, transport, url, "bearer" if token else "off",
         )
         return {server_name: connection}
 
@@ -927,7 +936,8 @@ def _get_mcp_server_config() -> dict:
         }
 
     raise ValueError(
-        f"Unsupported MCP_TRANSPORT={transport!r}. Use 'sse' or 'stdio'."
+        f"Unsupported MCP_TRANSPORT={transport!r}. "
+        "Use 'streamable-http', 'sse', or 'stdio'."
     )
 
 
