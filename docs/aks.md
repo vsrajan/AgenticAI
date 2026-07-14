@@ -29,6 +29,7 @@ consumes. Tune the topology once; keep tuning the token axis.
 9. [What AKS deliberately does not solve](#9-what-aks-deliberately-does-not-solve)
 10. [Rollout order](#10-rollout-order)
 11. [AKS terms used in this document](#11-aks-terms-used-in-this-document)
+12. [Enabling other agents to use the MCP server](#12-enabling-other-agents-to-use-the-mcp-server)
 
 ---
 
@@ -390,3 +391,60 @@ for keeping traffic to managed services (Azure Cache, Azure OpenAI)
 on private network paths instead of public internet routes. Fewer
 hops and no public exposure -- worth a few ms per call and required
 posture in most enterprises.
+
+## 12. Enabling other agents to use the MCP server
+
+A stated goal of the MCP server is that agents OTHER than Agnes can
+consume its tools. The application layer was built for this from the
+start -- per-agent bearer tokens (`MCP_AUTH_TOKENS=agnes:tok1,
+hr-bot:tok2`, identity by token lookup, `caller=<name>` in every tool
+audit line), a stateless transport any MCP client library can speak,
+and dynamically discovered tools (a new agent needs a URL, a token,
+and an MCP client -- none of Agnes's code). What remains is network
+exposure, and one real gap: authorization granularity.
+
+### Scenario A -- another agent inside the same cluster: config only
+
+ClusterIP is reachable from any pod in the cluster; the only barrier
+is the one we placed deliberately.
+
+1. Add the new agent's `name:token` pair to `MCP_AUTH_TOKENS`
+   (Secret update).
+2. Widen the NetworkPolicy: it admits only agent-api pods to :8000 by
+   label selector, and it is meant to be an allowlist you consciously
+   extend -- add the new consumer's pod labels.
+
+No code changes anywhere.
+
+### Scenario B -- agents outside the cluster (other clusters, VMs)
+
+1. A PRIVATE route in: an internal LoadBalancer service (private VNet
+   IP) or an ingress route for /mcp. Never a public IP -- this server
+   fronts entitlement data.
+2. TLS becomes mandatory: bearer tokens ride in cleartext HTTP, which
+   is acceptable pod-to-pod and unacceptable across a network.
+   Terminate TLS at the ingress / internal LB; no server code change.
+3. Same token + NetworkPolicy steps as scenario A.
+
+### The real gap: authorization is all-or-nothing today
+
+Any authenticated agent currently gets ALL 12 tools -- including
+`raise_entitlement_request`, a write. Fine for Agnes alone; not fine
+the moment a reporting bot connects. The fix is per-agent TOOL-GROUP
+authorization, and its proper home is the Entra upgrade already on
+the roadmap (app roles -> tool groups in the TokenVerifier). Full
+design, including an interim static-token variant, in
+[entra_auth_guide.md](entra_auth_guide.md) section 4 (esp. 4.7).
+
+### Before inviting consumers, think about
+
+- **Capacity / noisy neighbor** -- the MCP tier is sized for Agnes;
+  the HPA absorbs some extra load, the per-call `caller=X took=ms`
+  logs give per-agent usage visibility; per-caller rate limiting
+  would be new (small) middleware if ever needed.
+- **Tool schemas become an API contract** -- with a second consumer,
+  result-shape changes need the additive discipline P1.1 modeled
+  (new fields and optional params, never breaking renames).
+- **Data governance** -- a new consumer of entitlement data is a
+  data-access review, not just a token; the `caller=` audit trail
+  supports it.
