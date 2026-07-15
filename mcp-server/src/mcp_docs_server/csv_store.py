@@ -39,7 +39,7 @@ from pathlib import Path
 import duckdb
 from rank_bm25 import BM25Okapi
 
-from mcp_docs_server.data_sources import CsvDataSource, DataSource
+from mcp_docs_server.data_sources import DataSource, build_data_source
 
 logger = logging.getLogger("mcp_docs_server.csv_store")
 
@@ -95,7 +95,10 @@ class CsvStore:
         if refresh_minutes is None:
             refresh_minutes = float(os.environ.get("MCP_DATA_REFRESH_MINUTES", "15"))
         self._search_max_rows = search_max_rows
-        self._source: DataSource = source or CsvDataSource(docs_dir)
+        # source selection: an injected source wins (tests); otherwise
+        # MCP_DATA_SOURCE picks csv (default) or parquet -- see
+        # data_sources.build_data_source
+        self._source: DataSource = source or build_data_source(docs_dir)
 
         # refresh writes are serialised by this lock; reads run on
         # per-call cursors (duckdb allows those concurrently and reads
