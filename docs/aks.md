@@ -61,8 +61,8 @@ by feature:
         +-------------------+--------------------+       quota = the wall)
                             | ClusterIP :8000 + NetworkPolicy
         +-------------------+--------------------+
-        |  mcp-server Deployment, replicas 2+HPA |----> Azure SQL/Postgres
-        |  (streamable-http, stateless)          |      (DatabaseSource, P0 s11)
+        |  mcp-server Deployment, replicas 2+HPA |----> Azure Storage
+        |  (streamable-http, stateless)          |      (parquet exports, P0 s11.9)
         +----------------------------------------+
                             |
               Azure Cache for Redis (rediss://, same region)
@@ -143,8 +143,18 @@ leaning hard on autoscaling.
   the per-pod fingerprint sweeper (`MCP_DATA_REFRESH_MINUTES`) keeps
   it fresh. Replicas can disagree about freshness for at most one
   sweep interval after a source change -- harmless for this workload.
-- Production rows come from Azure SQL / Postgres via DatabaseSource
-  (the P0 section 11 runbook); pods pull on boot and on sweep.
+- Production rows are PARQUET EXPORTS in Azure Storage (Spark jobs
+  write folder-of-part-files datasets; P0 section 11.9), loaded via
+  MCP_DATA_SOURCE=parquet. On AKS the staging step (az cli /
+  azcopy download of part-*.parquet) becomes an initContainer (or a
+  sidecar on a refresh schedule) writing into the pod's volume; the
+  fingerprint sweeper picks up re-staged files exactly as it does
+  CSVs. The future direct-read mode (az:// URLs, duckdb azure
+  extension) needs the extension PRE-BAKED into the image at build
+  time -- runtime INSTALL is blocked in egress-restricted pods (HTTP
+  403 to DuckDB's extension repo; observed in the dev pods).
+  DatabaseSource (Azure SQL / Postgres pull) remains the reserved
+  alternative if the export pipeline ever goes away.
 - PDFs: bake into the image (immutable, fast, the default choice) or
   mount an Azure Files share read-only if documents must change
   without a redeploy.
@@ -172,6 +182,18 @@ superstep; the session TTL bounds total growth, but nothing prunes
 superseded checkpoints yet (P3.2). Budget cache memory for
 (active sessions x conversation size) and put P3.2 on the roadmap
 before very-long-conversation workloads.
+
+A hard-won trap for any self-hosted Redis inside the cluster (dev
+namespaces, or ever replacing Azure Cache): Redis speaks RESP over
+RAW TCP, not HTTP. Exposing it through a Service or mesh that treats
+the port as HTTP breaks it in a confusing way -- TCP connect
+succeeds, then reads time out, because an HTTP-aware layer mangles
+the RESP stream. Rules: the Service port protocol is TCP; never name
+the port `https`/`http` or set `appProtocol: https` (a service mesh
+takes that as an instruction to parse the traffic); name it
+`tcp-redis` / `appProtocol: tcp`. And `redis://` can never sit behind
+an HTTPS ingress -- TLS for Redis is `rediss://` (RESP inside TLS),
+which Azure Cache provides natively on 6380.
 
 ## 6. E2E latency budget, hop by hop
 
@@ -233,7 +255,7 @@ agent replicas beyond 3.
 | per-turn token volume | prompts + history size | KEEP_LAST_N tuning; P1.3 hysteresis trimming |
 | MCP pod cold start | per-pod PDF extraction + ingest | P1.2 (persist extraction/index) |
 | checkpoint growth in Redis | LangGraph full-state-per-superstep | P3.2 (prune superseded checkpoints) |
-| Vector branch per-pod re-embedding (future) | embeddings cost per fresh pod | embed in CI, ship the DuckDB file as an artifact + initContainer (already noted in vector.md context) |
+| Vector branch per-pod re-embedding (future) | embeddings cost per fresh pod | embed in CI, ship the DuckDB file as an artifact + initContainer (see vector.md section 14) |
 | http liveness endpoint | `/health` depends on Redis | optional `/livez` that skips the ping |
 
 ## 10. Rollout order
@@ -245,7 +267,9 @@ agent replicas beyond 3.
 3. Verify the P3.1 rig semantics in-cluster: kill an agent pod
    mid-conversation -> session continues on the other pod; watch for
    the lock-expiry warning in logs (none expected).
-4. Point DatabaseSource at the production database (P0 section 11).
+4. Wire the production data: initContainer stages the parquet
+   exports from Azure Storage, MCP_DATA_SOURCE=parquet +
+   MCP_PARQUET_SOURCES with ABSOLUTE paths (P0 section 11.9).
 5. Load-test to the quota ceiling; only then revisit replica counts,
    PTU, and P1.3.
 
