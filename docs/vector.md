@@ -1,9 +1,22 @@
 # Vector implementation plan -- hybrid semantic + keyword PDF retrieval
 
+> Plan revision (2026-07-15), after the P0 parquet work and the branch
+> reorder: (1) the runtime `vss` extension dependency is DROPPED for
+> v1 -- `array_cosine_similarity` and `FLOAT[N]` arrays are CORE
+> DuckDB (verified live on 1.5.4), and runtime INSTALL is blocked in
+> egress-restricted pods anyway (HTTP 403 to the extension repo, same
+> as the azure extension); vss is future-work only, for HNSW; (2) base
+> refreshed: `Vector` now sits on `P3.1` at the top of the chain
+> streamable-http -> P0 -> P1.1 -> P3.1 (the implementation does NOT
+> depend on P3.1's Redis -- purely branch stacking); (3) suite counts
+> refreshed to 70 / 61; (4) the AKS per-pod re-embedding mitigation
+> (embed in CI, ship the db file as an artifact) added to sections 11
+> and 14, closing the cross-reference from aks.md section 9.
+
 Major-release plan for hybrid retrieval on the knowledgebase (PDF) side
-of the MCP server. Branch: `Vector`, based on `P1.1` (which is based on
-`Performance-P0`). This is a plan only -- nothing here is implemented
-yet.
+of the MCP server. Branch: `Vector`, at the top of the feature chain
+(P0 DuckDB -> P1.1 page chunks are the parts it builds on). This is a
+plan only -- nothing here is implemented yet.
 
 The change: keep the page-level BM25 search from P1.1, ADD an Azure
 OpenAI embedding for every page, store the vectors in an embedded
@@ -92,7 +105,7 @@ strong (rare tokens, precise IDs). Hybrid keeps both strengths.
 | Retrieval strategy | hybrid (BM25 + vector, RRF-fused) | keeps BM25's exact-term precision AND adds semantic recall; production RAG norm |
 | Chunk / citation unit | page (from P1.1) | already produced, already the citation unit; one vector per page is a clean grain |
 | Embedding provider | Azure OpenAI `text-embedding-3-large` (3072-dim) | same Azure resource as GPT-4o, no new vendor/secret, near-SOTA retrieval quality; crosses no new trust boundary |
-| Vector store engine | embedded DuckDB + `vss` extension | DuckDB is already in the stack (P0); reuses its persistence, fingerprint, atomic-refresh, and sweeper patterns; single file, no new server |
+| Vector store engine | embedded DuckDB, CORE functions only (no extension in v1) | DuckDB is already in the stack (P0); `array_cosine_similarity` + `FLOAT[N]` are core (verified on 1.5.4), so v1 needs no `INSTALL` -- which would fail in egress-restricted pods anyway; reuses P0's persistence, fingerprint, atomic-refresh, and sweeper patterns; single file, no new server |
 | Store location | a DEDICATED DuckDB file for the PDF index (`MCP_PDF_DB_PATH`), separate from the CSV file (`MCP_DB_PATH`) | two independent `duckdb.connect(file)` handles in one process cannot both hold a write lock on the same file; a dedicated file keeps `DocIndex` and `CsvStore` fully decoupled, each with its own connection and sweeper, mirroring P0's design |
 | ANN vs brute force | brute-force `array_cosine_similarity` scan | sub-millisecond over a few thousand page-vectors; avoids DuckDB HNSW's experimental-persistence flag; revisit at prod scale |
 | Fusion | Reciprocal Rank Fusion (RRF), `k=60` | rank-based, so it needs no score normalisation between BM25 and cosine (which live on different scales); simple, robust, the standard hybrid fuser |
@@ -145,7 +158,8 @@ A dedicated database file (`MCP_PDF_DB_PATH`, default
 `<docs_dir>/.mcp_docs.duckdb`). Two tables:
 
 ```sql
-INSTALL vss; LOAD vss;   -- run once per connection at startup
+-- no extension needed: FLOAT[N] arrays and array_cosine_similarity
+-- are core DuckDB (vss would only be needed for HNSW -- future work)
 
 CREATE TABLE IF NOT EXISTS pdf_pages (
     page_path   VARCHAR,
@@ -172,7 +186,8 @@ Notes:
   creation from `MCP_EMBEDDING_DIM`. Changing the dimension is a
   breaking store change -> drop and re-embed (guarded by the model-id /
   dim stamp).
-- The `vss` extension supplies `array_cosine_similarity`. No HNSW index
+- `array_cosine_similarity` is a CORE DuckDB function -- no extension
+  involved (verified live on this repo's duckdb 1.5.4). No HNSW index
   in this release; the query is a full scan with `ORDER BY sim DESC
   LIMIT k`.
 - `pdf_files` is the bookkeeping table the fingerprint gate reads; blank
@@ -217,8 +232,8 @@ with a logged warning.
 ### mcp-server
 
 1. **`pyproject.toml`** -- add `openai>=1.40` (Azure OpenAI embeddings
-   client). `duckdb` is already a dependency (P0). The `vss` extension
-   is loaded at runtime (`INSTALL vss; LOAD vss;`), not a pip package.
+   client). `duckdb` is already a dependency (P0), and v1 needs NO
+   DuckDB extension (core array functions only).
    - [ ] done
 2. **`src/mcp_docs_server/embeddings.py`** (new) -- the provider seam.
    - `Embedder` protocol: `model_id: str`, `dim: int`,
@@ -235,10 +250,10 @@ with a logged warning.
    a DuckDB-backed page+vector store and hybrid search.
    - Keep `_extract_pages`, the topic tree, `_make_snippet`, `read()`,
      and the in-memory BM25 (built from the persisted page text).
-   - Add: DuckDB connection to `MCP_PDF_DB_PATH`; `INSTALL/LOAD vss`;
-     the schema in section 4; fingerprint-gated ingestion; the cosine
-     query; RRF fusion; the `MCP_SEARCH_MODE` switch; the embedder
-     fallback.
+   - Add: DuckDB connection to `MCP_PDF_DB_PATH`; the schema in
+     section 4; fingerprint-gated ingestion; the cosine query (core
+     functions, no extension); RRF fusion; the `MCP_SEARCH_MODE`
+     switch; the embedder fallback.
    - Add a background refresh sweeper for changed PDFs (mirror the P0
      `CsvStore` sweeper; can share `MCP_DATA_REFRESH_MINUTES`).
    - `search()` returns the same keys as P1.1, with `score` now the RRF
@@ -307,7 +322,7 @@ of the server). New variables:
 | `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | -- | name of the embedding deployment (created alongside the GPT-4o one) |
 | `MCP_EMBEDDING_MODEL_ID` | `text-embedding-3-large` | stamped on every row; a change forces re-embed |
 | `MCP_EMBEDDING_DIM` | `3072` | vector dimension; lower it for Matryoshka reduction |
-| `MCP_PDF_DB_PATH` | `<docs_dir>/.mcp_docs.duckdb` | dedicated DuckDB file for the PDF index |
+| `MCP_PDF_DB_PATH` | `<docs_dir>/.mcp_docs.duckdb` | dedicated DuckDB file for the PDF index; use an ABSOLUTE path on servers (relative paths resolve against the process cwd -- the exact trap hit during parquet setup, P0 s11.9) |
 | `MCP_VECTOR_TOPK` | `20` | candidate pool from the vector ranker before fusion |
 | `MCP_BM25_TOPK` | `20` | candidate pool from the BM25 ranker before fusion |
 | `MCP_RRF_K` | `60` | RRF damping constant |
@@ -339,9 +354,9 @@ already ignores `*.duckdb` / `*.duckdb.wal`).
   vector, counts calls). No Azure, no network -> CI-safe. Coverage in
   work item 7.
 - The existing PDF suite (17) runs unchanged in the BM25 fallback.
-- Both server suites stay green: mcp-server currently 52 (auth 13,
-  csv_store 22, pdf_indexer 17) plus the new vector tests; agent-client
-  36.
+- Both server suites stay green: mcp-server currently 70 (auth 13,
+  csv_store 22, parquet 18, pdf_indexer 17) plus the new vector tests;
+  agent-client 61 (40 + 21 Redis tests from P3.1 beneath this branch).
 - A manual, env-gated live check (documented, not in CI) against a real
   Azure embedding deployment: confirm a paraphrase query that BM25
   ranks poorly is retrieved in hybrid mode, and confirm the second boot
@@ -361,7 +376,7 @@ Targets only -- measured values are recorded here after implementation
 | model-swap safety | changing `MCP_EMBEDDING_MODEL_ID` forces a clean full re-embed |
 | tool contract | existing `test_pdf_indexer.py` (17) green unchanged |
 | fail-safe | embedder unavailable -> `hybrid` serves BM25 results, logs a warning, no crash |
-| suites green | server 52 + new vector tests; agent-client 36 |
+| suites green | server 70 + new vector tests; agent-client 61 |
 
 ## 11. Rollout and rollback
 
@@ -373,6 +388,9 @@ Targets only -- measured values are recorded here after implementation
 - Rollback is a config change: set `MCP_SEARCH_MODE=bm25`. The DuckDB
   vector file can be left in place (ignored) or deleted; deleting it
   only forces a re-embed on the next hybrid boot.
+- On AKS, do not let pods embed for themselves: ship the pre-built
+  `.mcp_docs.duckdb` as a CI artifact via initContainer (section 14),
+  so scale-ups and restarts never pay the embedding bill.
 
 ## 12. Cost and latency
 
@@ -407,7 +425,18 @@ with `model_id` and the store's `dim`, so:
 
 - **HNSW index** (`vss` `CREATE INDEX ... USING HNSW`) when the corpus
   outgrows a brute-force scan; needs DuckDB's experimental-persistence
-  flag, so defer until measured need.
+  flag, so defer until measured need. This is the ONLY thing that
+  needs the `vss` extension -- and runtime `INSTALL` is blocked in
+  egress-restricted pods (403), so when the day comes, bake the
+  extension into the container image at build time (same rule as the
+  azure extension, aks.md section 4).
+- **AKS deployment shape: embed in CI, ship the store as an
+  artifact.** A fresh pod with an empty volume would re-embed the
+  whole corpus per restart, multiplied by replicas -- real money and
+  boot minutes. Instead: run ingestion once in CI (fingerprint-gated),
+  publish the `.mcp_docs.duckdb` file to Blob Storage, and have an
+  initContainer download it at pod start. Referenced by aks.md
+  section 9's follow-up register.
 - **Azure AI Search** as a managed store at prod scale: native hybrid
   plus a semantic reranker, integrated vectorization that calls this
   same embedding deployment. The `Embedder` seam and the tool contract
