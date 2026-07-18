@@ -40,6 +40,7 @@ docs/
   PerformanceRecommendations.md — prod-scale performance analysis + prioritized plan
   aks.md          — AKS deployment analysis (topology, per-tier sizing, E2E latency budget)
   deploy.md       — deployment plan: podman local builds (registry-free), Helm chart, GitLab CI kaniko, dev->test->uat->prod
+  async.md        — Python async IO tutorial (8 runnable samples) + walkthrough of the agent's async code (spinner, astream_events)
   architecture_excalidraw.md + 0*.excalidraw — Excalidraw diagrams (05 = API flows, 06 = AKS topology)
 ```
 
@@ -152,6 +153,7 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 - Implemented P1.1 page-level PDF retrieval (docs/P1.1.md, branch P1.1, based on Performance-P0): DocIndex indexes one BM25 entry per page, search_docs hits carry the page number with page-local snippets, read_page gains a pages selection ("3" / "2-5", empty = full document for back compat), KNOWLEDGEBASE_PROMPT steers to page ranges. Measured 40.4x smaller tool results for single-page reads on a 40-page doc. mcp-server tests now 52
 - Added AKS deployment analysis (docs/aks.md + Excalidraw diagram 06): two-tier topology on managed AKS against the full P1.1 stack -- agent-api replicas 2-3 (unlocked by P3.1, plain round-robin), mcp-server replicas 2 + CPU HPA (unlocked by stateless streamable-http), Azure Cache for Redis, ingress SSE tuning, readiness-vs-liveness probe guidance, hop-by-hop E2E latency budget (Azure OpenAI quota owns ~95% of turn time; topology buys ms + resilience), sizing starting point, and the follow-up register (P1.2, P1.3, P3.2, /livez)
 - Added deployment implementation plan (docs/deploy.md, plan only): RHEL processes stay the dev loop (no docker-compose ever); images built without Docker (podman locally for smoke tests, az acr build / GitLab CI kaniko for real artifacts); ONE Helm chart + four values files (dev/test/uat/prod) with the values-vs-Key-Vault mapping for every env var; GitLab CI pipeline (test -> build -> deploy with manual gates, same chart+SHA promoted through all clusters, environment-scoped credentials); per-environment validation incl. the in-cluster P3.1 rig; helm rollback story
+- Added async IO tutorial (docs/async.md): part 1 builds the concepts for a novice (coroutines/await, event loop + gather, tasks, cancellation, async generators, async with, asyncio.Lock, never-block-the-loop) with 8 standalone runnable samples -- all verified; part 2 maps each concept onto agnes_agent_graph.py line by line (cli.py's asyncio.run entry, ainvoke in nodes, the astream_events consumer, the Spinner's create_task / polite sleep / cancel-then-await lifecycle, the single-thread spinner+tokens timeline) plus the API-layer parallels (composed async generators to SSE, the per-session lock, the sweeper task)
 
 ## General instructions
 
