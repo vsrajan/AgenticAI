@@ -39,7 +39,7 @@ docs/
   entra_auth_guide.md — Entra ID implementation guide (client->agent + agent->MCP)
   PerformanceRecommendations.md — prod-scale performance analysis + prioritized plan
   aks.md          — AKS deployment analysis (topology, per-tier sizing, E2E latency budget)
-  deploy.md       — deployment plan: containers (podman / az acr build), Helm chart, GitLab CI, dev->test->uat->prod
+  deploy.md       — deployment plan: podman local builds (registry-free), Helm chart, GitLab CI kaniko, dev->test->uat->prod
   architecture_excalidraw.md + 0*.excalidraw — Excalidraw diagrams (05 = API flows, 06 = AKS topology)
 ```
 
