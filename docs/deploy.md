@@ -20,11 +20,17 @@ The three decisions that shape everything here:
    chart encodes the aks.md topology, four small values files carry
    what differs per environment, promotion moves the same chart+image
    through the clusters, and `helm rollback` is the undo button.
-3. **No Docker daemon is ever required on a dev machine.** Images are
-   built either locally with podman (RHEL's daemonless, rootless
-   builder -- for smoke tests) or in the cloud with `az acr build` /
-   GitLab CI. Both produce standard OCI images; AKS cannot tell the
-   difference.
+3. **No Docker daemon is ever required, and the LOCAL phase needs no
+   registry at all.** Images are built and tested locally with podman
+   on the MCP server machine (RHEL's daemonless, rootless builder --
+   podman 5.6.0 confirmed there); they live in podman's local image
+   store and never leave the box. A registry enters the picture only
+   when AKS must PULL images -- a Phase B decision (GitLab Container
+   Registry vs a firm ACR; creating ACR resources is blocked by
+   corporate policy, so `az acr build` is not assumed anywhere).
+   Real pipeline artifacts come from GitLab CI (kaniko, also
+   daemonless). All of these produce standard OCI images; AKS cannot
+   tell the difference.
 
 ## Contents
 
@@ -47,9 +53,11 @@ The three decisions that shape everything here:
 RHEL hosts (uv processes, .env, redislite)     <- dev inner loop, unchanged forever
       |
       v  Dockerfiles (2) committed to the repo
-build:  podman build (local smoke test)  OR  az acr build (cloud)  OR  GitLab CI
+build (local):  podman on the MCP server machine -- registry-free,
+                images in the local store, full stack smoke-tested there
+build (CI):     GitLab CI (kaniko) -> the firm registry   <- Phase B
       |
-      v  images in ACR, tagged with the git SHA
+      v  images in the registry, tagged with the git SHA
 Helm chart (deploy/chart) + values-dev.yaml  ->  AKS dev
       |   validate: health, MCP tool round-trip, P3.1 rig semantics in-cluster
       v
@@ -70,9 +78,9 @@ container-mode on AKS are behaviorally identical by construction.
 |---|---|---|
 | Local multi-service orchestration | none (processes) | compose needs a Docker host that will never exist here; the redislite + two-terminal rig (P3.1.md section 15) already covers local integration |
 | Manifest management | Helm chart, from day one | four known environments; versioned releases, rollback, promotion of one artifact; conform to any existing firm chart/GitOps standard if one surfaces |
-| Image build, local | podman (if present on RHEL -- check `podman --version`) | daemonless/rootless, builds standard OCI images, lets "first run in a container" happen BEFORE "first run in the cluster" |
-| Image build, pipeline | `az acr build` first, GitLab CI + kaniko in steady state | both are daemonless; az acr build needs nothing but az cli and works from the RHEL shell today; kaniko is the GitLab-native equivalent once the pipeline owns builds |
-| Registry | one ACR, shared by all four clusters | images are environment-agnostic (config is not baked in); tag with git SHA, promote by reference |
+| Image build, local | podman 5.6.0 on the MCP server machine (confirmed present) | daemonless/rootless; the local phase is fully REGISTRY-FREE -- build, run, and smoke-test both images from the local store; "first run in a container" happens on this machine, not in the cluster |
+| Image build, pipeline | GitLab CI + kaniko | daemonless, GitLab-native; `az acr build` is NOT assumed (creating ACR resources is blocked by corporate policy) -- it returns only if a firm ACR with Tasks enabled materialises |
+| Registry | DEFERRED to Phase B (first AKS deploy) | nothing local depends on one; the decision is GitLab Container Registry vs an existing firm ACR -- resolved when AKS onboarding clarifies what the firm sanctions; images stay environment-agnostic and git-SHA-tagged either way |
 | Image tags | `<git-sha>` per build, plus a moving `dev` tag | the SHA is the identity that moves through environments; never promote `latest` |
 | Secrets | per-environment Key Vault + CSI driver | values files are plain YAML in git -- they hold no secrets, ever (the .env.example vs .env rule, cluster edition) |
 | Base image | `python:3.11-slim` + uv installed in-image | matches the dev interpreter; uv sync from the committed lockfiles gives identical dependency trees to the RHEL rig |
@@ -86,8 +94,12 @@ shape (illustrative, finalized at implementation):
 
 ```dockerfile
 # mcp-server/Dockerfile -- the agent-client one is the same pattern
-FROM python:3.11-slim
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# base from Microsoft's Docker Hub mirror: same image as python:3.11-slim,
+# no Docker Hub rate limits, reachable from ACR/CI build agents
+FROM mcr.microsoft.com/mirror/docker/library/python:3.11-slim
+# uv from PyPI (reachable from both dev machines -- confirmed), version
+# PINNED so builds are reproducible end to end
+RUN pip install --no-cache-dir uv==<pinned-version>
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev          # locked, reproducible deps
@@ -115,58 +127,73 @@ Notes:
 
 ## 4. Building images without Docker
 
-### 4.1 Local smoke test with podman (recommended first step)
+### 4.1 The local path: podman on the MCP server machine, registry-free
 
-podman is Red Hat's daemonless container engine; on RHEL 8 it is a
-`dnf install podman` away if not already present. Same CLI surface as
-docker:
+This is the PRIMARY local workflow. podman 5.6.0 is present on the
+MCP server machine; the agent machine needs nothing (podman is a
+build-host tool, not a service-host tool -- images are built wherever
+podman is, from repo source). Everything happens in podman's LOCAL
+image store: no registry, no push, no credentials.
 
 ```bash
-cd mcp-server
-podman build -t mcp-server:smoke .
-podman run --rm -p 8000:8000 \
+# on the MCP server machine -- always build from committed source:
+git pull                       # NOT scp from the other machine; the
+git status                     # repo is the source of truth, and a
+                               # clean tree = a reproducible image
+
+cd mcp-server  && podman build -t mcp-server:local .
+cd ../agent-client && podman build -t agent-api:local .
+podman images                  # both images, local store only
+
+# run the FULL stack on this one machine (--network=host keeps the
+# localhost URLs working exactly like the process-based rig):
+podman run -d --network=host --name mcp \
   -e MCP_TRANSPORT=streamable-http -e MCP_HOST=0.0.0.0 \
   -e MCP_AUTH=static -e MCP_AUTH_TOKENS=agnes:smoketok \
-  mcp-server:smoke
-# in another terminal:
-curl -s -o /dev/null -w '%{http_code}\n' \
-  -H 'Authorization: Bearer smoketok' http://localhost:8000/mcp   # not 401 = alive
+  -e MCP_DATA_SOURCE=parquet -e MCP_PARQUET_SOURCES=<ABSOLUTE paths> \
+  mcp-server:local
+podman run -d --network=host --name agent \
+  -e MCP_SERVER_URL=http://localhost:8000/mcp -e MCP_SERVER_TOKEN=smoketok \
+  -e AZURE_OPENAI_API_KEY=... -e AZURE_OPENAI_ENDPOINT=... \
+  -e AGENT_API_AUTH=static -e AGENT_API_TOKEN=... \
+  agent-api:local
+
+curl -s http://localhost:8080/health            # containerized E2E
+podman logs mcp                                  # 'Loaded parquet ... rows'
+podman rm -f mcp agent                           # cleanup
 ```
 
-The point: the first time this app runs inside a container should be
-on your desk, not in a shared cluster. File-path assumptions (use
-ABSOLUTE paths everywhere -- the parquet lesson), user permissions,
-and missing files all surface here in minutes. podman can also push
-straight to ACR after `az acr login` (`podman push <acr>.azurecr.io/...`).
+Notes:
 
-### 4.2 Cloud build with az cli (no container engine at all)
+- The point: the first time this app runs inside a container happens
+  on this machine, not in a shared cluster. File-path assumptions
+  (ABSOLUTE paths everywhere -- the parquet lesson), user permissions,
+  and missing files surface here in minutes, and a Dockerfile
+  iteration costs seconds.
+- The ONE external touch: the first build pulls the base image from
+  mcr.microsoft.com once; it is cached afterwards. That is anonymous
+  consumption of a public registry, not a registry dependency.
+- Config arrives via -e flags here (ad hoc); in AKS the same
+  variables arrive from Secrets/ConfigMaps. Never bake a .env into an
+  image.
+- If an image is ever needed on another machine without a registry:
+  `podman save img -o img.tar` -> scp -> `podman load -i img.tar`.
+  (Also a useful reminder of what a registry IS: save/load over HTTP
+  with tags and auth.)
 
-`az acr build` uploads the build context and ACR builds the image
-server-side -- nothing container-shaped runs on the RHEL host:
+### 4.2 Cloud builds (az acr build) -- NOT currently available
 
-```bash
-az login --service-principal --username <client-id> \
-    --password "$AZ_SP_SECRET" --tenant <tenant-id>
-az account set --subscription "<subscription>"
-
-# one-time: create the registry (or use the firm's existing one)
-az acr create -n <acrname> -g <resource-group> --sku Standard
-
-# build + push in one shot, tagged with the current commit
-az acr build --registry <acrname> \
-  --image agnes/mcp-server:$(git rev-parse --short HEAD) \
-  mcp-server/
-az acr build --registry <acrname> \
-  --image agnes/agent-api:$(git rev-parse --short HEAD) \
-  agent-client/
-```
-
-RBAC note (same family as the storage lesson): the SP needs `AcrPush`
-on the registry to build/push, and the AKS clusters' kubelet
-identities need `AcrPull` to run the images.
-
-Use 4.1 when iterating on a Dockerfile; use 4.2 to produce the real
-artifacts. They converge in CI (section 7).
+Kept for reference: `az acr build` uploads the build context and ACR
+builds server-side, no local container engine. It requires an ACR
+with Tasks enabled -- and creating ACR resources is blocked by
+corporate policy, so this path is NOT part of the plan unless a
+firm-managed ACR with Tasks surfaces during AKS onboarding (the
+Phase B registry decision). If it does: the SP needs `AcrPush`
+(assign with `az role assignment create --role AcrPush ...` -- the
+same data-plane-RBAC family as Storage Blob Data Reader),
+`az acr login --expose-token` is the daemonless auth check, and
+`az acr run --cmd '$Registry/<image>'` gives a cloud-side execution
+smoke. Until then: podman locally (4.1), kaniko in CI (section 7).
 
 ## 5. The Helm chart
 
@@ -327,12 +354,14 @@ All unchecked -- this is a plan.
 1. **`mcp-server/Dockerfile`** + **`agent-client/Dockerfile`** per
    section 3; `.dockerignore` files (exclude .env, .venv, caches).
    - [ ] done
-2. **podman smoke test** of both images on the RHEL rig (section 4.1);
-   record any path/permission fixes back into the Dockerfiles.
+2. **podman build + full-stack smoke** of both images on the MCP
+   server machine, registry-free (section 4.1); record any
+   path/permission fixes back into the Dockerfiles.
    - [ ] done
-3. **ACR**: registry (or firm's existing), `AcrPush` for the CI SP,
-   `AcrPull` for each cluster's kubelet identity; first images via
-   `az acr build` (section 4.2).
+3. **Registry decision (Phase B gate)**: GitLab Container Registry vs
+   an existing firm ACR -- resolved during AKS onboarding. Then: push
+   access for CI, pull access for each cluster (imagePullSecret or
+   AcrPull), and the section 7 pipeline's destination filled in.
    - [ ] done
 4. **`deploy/chart/`** per section 5, `values.yaml` fully commented in
    the house style.
