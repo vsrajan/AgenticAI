@@ -233,3 +233,70 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
   MCP_PORT). Test rig for the implementation: two agent-api instances on
   ports 8080/8081 against one local Redis -> restart survival, cross-instance
   session continuity, concurrent-turn lock exclusion.
+
+### Enterprise maturity gaps (E2E review, 2026-07-16)
+
+Gaps identified beyond the feature roadmap above -- these cluster in
+trust, quality, and governance of the AI behavior itself. Each lands
+on a seam that already exists.
+
+- Evaluation harness -- THE gap to close before P1.3 / Vector / any
+  model swap: no way today to tell whether a prompt/model/retrieval
+  change degrades answer quality (unit tests prove plumbing, not
+  answers). Build a curated golden set per specialist (question ->
+  expected facts/citations), run in CI, exact checks where possible +
+  LLM-as-judge where not, regression-gated. Head start: the scanner
+  CLI already batch-runs questions through the real graph -- an eval
+  harness is that plus assertions.
+- Prompt-injection defenses, especially INDIRECT injection: the agent
+  trusts tool results, so a poisoned PDF page or a crafted entitlement
+  field is an instruction channel into the LLM (classic RAG poisoning;
+  high-stakes in access governance). Mitigations: content demarcation
+  in prompts, tool-result sanitization, output checks before
+  consequential actions; Azure AI Content Safety / Prompt Shields fit
+  the stack.
+- Per-user data authorization (row-level scoping): today every user
+  sees everything the AGENT can see -- no requester-based scoping of
+  entitlement data. Entra leg 1 brings the user identity to the API
+  (Principal.claims is the reserved hook); carry it into tool calls as
+  filter constraints. In an access-governance product this is arguably
+  the product. Do alongside the Entra work -- same identity plumbing.
+- Human-in-the-loop for writes: raise_entitlement_request fires
+  whenever the LLM decides (currently a placeholder -- the deadline is
+  "before the first real write"). Use LangGraph interrupt_before on
+  the tool node; the checkpointer investment (P3.1 RedisSaver) is
+  exactly what makes interrupts resumable across pods. API surfaces
+  "agent wants to submit X -- confirm?", user approves, graph resumes.
+- LLM observability + cost accounting: latency telemetry exists
+  (took=ms both sides) but no token/cost tracking per turn / session /
+  user / specialist, no cache-hit rates (P1.3 part 2 starts this), no
+  trace visualization of a full turn. Candidates: Langfuse
+  (self-hostable), LangSmith, or OpenTelemetry GenAI conventions into
+  the existing Azure Monitor story. Per-caller cost attribution also
+  matters once other agents consume the MCP server. Do with the AKS
+  move.
+- Durable conversation audit (compliance): sessions are deliberately
+  ephemeral (P3.1 non-goal, decision point flagged there). "Show me
+  what the agent told this user on March 3rd" is regulated-industry
+  table stakes; the seam is a PostgresSaver or an export pipeline off
+  the checkpointer. Needs a business decision on retention/PII/DLP
+  before code.
+- User feedback loop: no thumbs up/down or correction capture. Cheap
+  to add at the API/web-UI layer; feeds the eval set, prioritizes
+  knowledgebase gaps, demonstrates value.
+- LLM-call resilience: get_llm() sets no timeout; retries are SDK
+  defaults; no circuit breaker, no fallback deployment/region. An
+  Azure OpenAI brownout currently hangs turns toward the P3.1 lock
+  timeout. Add explicit timeouts, budgeted retries with jitter, a
+  fallback model/region, graceful degradation messaging -- and keep
+  lock TTL > (LLM timeout x retries) + tool time (P3.1.md section 14).
+- Smaller items: cross-session user memory/personalization (LangGraph
+  store patterns); per-user rate limits and token budgets at the API
+  (arrives naturally with Entra identities); prompt versioning + A/B
+  against the eval set; citations as structured data (source links)
+  for the real web UI -- the tool results already carry them.
+- Sequencing against the existing roadmap: evals BEFORE P1.3/Vector
+  (they are the safety net those changes need); injection defenses +
+  row-level authorization ALONGSIDE Entra; HITL when the request tool
+  becomes real; observability + resilience WITH the AKS move; audit
+  after the retention decision.
