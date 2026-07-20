@@ -17,7 +17,10 @@ decisions, this one builds the vocabulary from zero.
 
 Running the samples: you need `minikube` (a whole Kubernetes cluster
 on your laptop -- one node, real API), `kubectl` (the client that
-talks to it), and `helm` (section 9). Start the cluster once:
+talks to it), and `helm` (section 9). If you are on Windows 11 with
+WSL2, the "Setup" section immediately below installs all three; once
+it ends with a Ready node you are ready for Part 1. On an existing
+Linux/macOS box the whole setup is just:
 
 ```bash
 minikube start                 # boots the single-node cluster
@@ -40,6 +43,9 @@ section 14 names each one and what AKS puts in its place.
 
 ## Contents
 
+Setup
+0. [Setup: Docker + minikube on Windows 11 with WSL2](#0-setup-docker--minikube-on-windows-11-with-wsl2)
+
 Part 1 -- the concepts (on minikube)
 1. [Kubernetes is a reconciliation loop](#1-kubernetes-is-a-reconciliation-loop)
 2. [Deployments: replicas, self-healing, rolling updates](#2-deployments-replicas-self-healing-rolling-updates)
@@ -58,6 +64,137 @@ Part 2 -- the concepts in this repo
 13. [Four values files and the promotion invariant](#13-four-values-files-and-the-promotion-invariant)
 14. [What minikube cannot show](#14-what-minikube-cannot-show)
 15. [The whole picture in one turn](#15-the-whole-picture-in-one-turn)
+
+---
+
+## 0. Setup: Docker + minikube on Windows 11 with WSL2
+
+The whole point of WSL2 is that your terminal is a real Linux box, so
+every command in this guide runs unchanged. The plan: WSL2 gives you
+Ubuntu, Docker gives minikube something to run containers ON (the
+"driver"), and minikube + kubectl + helm all get installed INSIDE
+Ubuntu. You will do everything from the Ubuntu shell, never from
+PowerShell after the first step.
+
+The layering is worth holding in your head, because it is turtles all
+the way down: Windows runs a lightweight Linux VM (WSL2), inside which
+Docker runs containers, one of which minikube uses as its single
+Kubernetes "node", inside which YOUR pods run as more containers.
+minikube's `--driver=docker` is what makes the node a container
+rather than a nested VM -- the light, fast choice on WSL2.
+
+### 0.1 WSL2 and Ubuntu
+
+WSL is already enabled per your setup; make sure a distro is present
+and defaulted to version 2. In an ADMINISTRATOR PowerShell:
+
+```powershell
+wsl --install -d Ubuntu        # installs Ubuntu if you don't have it
+wsl --set-default-version 2    # new distros use the WSL2 kernel
+wsl -l -v                      # confirm Ubuntu shows VERSION 2
+```
+
+Reboot if it asks. Launch "Ubuntu" from the Start menu, set your
+Linux username/password once, then `sudo apt update && sudo apt
+upgrade -y`. From here on, every command is in this Ubuntu shell.
+
+Optional but recommended -- cap what the VM may grab, since minikube
+wants a couple of GB. Create `C:\Users\<you>\.wslconfig` (a Windows
+file) with:
+
+```ini
+[wsl2]
+memory=6GB
+processors=4
+```
+
+then `wsl --shutdown` in PowerShell and reopen Ubuntu.
+
+### 0.2 Docker -- pick ONE of two paths
+
+**Path A -- Docker Desktop (simplest on Windows).** Install Docker
+Desktop for Windows from docker.com. In its settings: General ->
+"Use the WSL 2 based engine" (on by default), and Resources -> WSL
+Integration -> enable your Ubuntu distro. Docker Desktop then runs
+the engine on the Windows side and exposes the `docker` CLI inside
+Ubuntu. Verify from the Ubuntu shell:
+
+```bash
+docker version                 # Client AND Server both answer
+docker run --rm hello-world    # pulls and runs a tiny test image
+```
+
+(Note: Docker Desktop requires a paid licence for larger for-profit
+companies -- check your firm's policy, the same kind that blocked the
+ACR path in deploy.md. If it is disallowed, use Path B.)
+
+**Path B -- Docker Engine inside WSL2 (no Docker Desktop).** Install
+the engine directly in Ubuntu. Modern WSL2 supports systemd, which
+makes the daemon behave like on any Linux box -- enable it first:
+
+```bash
+# tell WSL to run systemd, then restart the distro from PowerShell:
+printf '[boot]\nsystemd=true\n' | sudo tee /etc/wsl.conf
+#   (in PowerShell)  wsl --shutdown     then reopen Ubuntu
+
+# install Docker's official engine packages
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker "$USER"   # run docker without sudo
+sudo systemctl enable --now docker
+
+# close and reopen Ubuntu so the group change takes effect, then:
+docker run --rm hello-world
+```
+
+Either path leaves you with a working `docker` in Ubuntu -- which is
+all minikube needs.
+
+### 0.3 minikube, kubectl, and helm
+
+Three single-binary installs inside Ubuntu:
+
+```bash
+# minikube
+curl -fsSLO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+sudo install minikube-linux-amd64 /usr/local/bin/minikube && rm minikube-linux-amd64
+
+# kubectl (the version string is fetched, so it tracks stable)
+curl -fsSLO "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+sudo install kubectl /usr/local/bin/kubectl && rm kubectl
+
+# helm
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+minikube version && kubectl version --client && helm version
+```
+
+### 0.4 Start the cluster
+
+```bash
+minikube start --driver=docker    # the node is a docker container
+kubectl get nodes                 # one node, STATUS Ready
+```
+
+That Ready node is the finish line for setup. The samples reference
+two addons; enable them when you reach the sample that needs one (or
+now, to save a step later):
+
+```bash
+minikube addons enable metrics-server   # sample 7 (HPA)
+minikube addons enable ingress          # sample 8 (Ingress)
+```
+
+One WSL2-specific note for the Ingress sample (section 8): `minikube
+ip` returns an address on Docker's internal network, reachable with
+`curl` FROM the Ubuntu shell (which is where you run the samples), but
+not directly from a Windows browser. `curl http://web.local` from
+Ubuntu is the intended way to test it; if you want it in a Windows
+browser, `minikube tunnel` (left running in a second Ubuntu shell)
+bridges the gap. Everything else in the guide just works from the
+Ubuntu shell.
+
+When you are done for the day, `minikube stop` frees the resources
+without deleting the cluster; `minikube delete` wipes it entirely.
 
 ---
 
