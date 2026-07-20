@@ -1,0 +1,59 @@
+# dev cluster overrides. Placeholders marked <...> are filled during
+# AKS onboarding (docs/deploy.md section 6); everything else falls
+# back to deploy/chart/values.yaml. No secrets here, ever -- the five
+# secret values live in the dev Key Vault.
+
+image:
+  # Phase B: registry.gitlab.com/<group>/<project> or firm ACR
+  registry: "<registry-base>"
+  # tag comes from the pipeline: --set image.tag=$CI_COMMIT_SHORT_SHA
+
+serviceAccount:
+  workloadIdentity:
+    clientId: "<dev-managed-identity-client-id>"
+
+keyVault:
+  name: "<dev-key-vault-name>"
+  tenantId: "<tenant-id>"
+
+mcp:
+  # single replica in dev; HPA off; smallest useful footprint
+  replicas: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  parquet:
+    storageAccount: "<dev-storage-account>"
+    container: "<dev-container>"
+
+agent:
+  # 2 on purpose, even in dev: the one-time in-cluster P3.1 check
+  # (kill a pod mid-conversation, session continues on the other --
+  # docs/deploy.md section 8 step 4) needs a second replica. Redis
+  # mode is on, so 2 is legal.
+  replicas: 2
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  azureOpenAI:
+    endpoint: "<https://dev-aoai-resource.openai.azure.com/>"
+    deployment: "<gpt-4o-deployment-name>"
+  # permissive CORS + the per-node execution log, dev only
+  corsOrigins: "*"
+  streamFile: "agent_api_stream.txt"
+
+ingress:
+  host: "<agnes-dev.internal.example.com>"
+  tlsSecretName: ""
+
+pdb:
+  # pointless with dev's single mcp replica
+  enabled: false

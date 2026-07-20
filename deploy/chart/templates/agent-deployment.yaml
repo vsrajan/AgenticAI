@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agnes.agentName" . }}
+  labels:
+    {{- include "agnes.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+spec:
+  replicas: {{ .Values.agent.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: agent
+  template:
+    metadata:
+      labels:
+        {{- include "agnes.labels" . | nindent 8 }}
+        app.kubernetes.io/component: agent
+        {{- if .Values.serviceAccount.workloadIdentity.enabled }}
+        azure.workload.identity/use: "true"
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- if .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecret }}
+      {{- end }}
+      # let in-flight turns (LLM calls + SSE streams) drain on
+      # shutdown instead of killing them at the default 30 s
+      terminationGracePeriodSeconds: 300
+      affinity:
+        {{- include "agnes.antiAffinity" (dict "component" "agent") | nindent 8 }}
+      containers:
+        - name: agent-api
+          image: {{ include "agnes.agentImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "agnes.agentName" . }}-config
+          env:
+            - name: AZURE_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agnes.secretName" . }}
+                  key: AZURE_OPENAI_API_KEY
+            - name: AGENT_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agnes.secretName" . }}
+                  key: AGENT_API_TOKEN
+            - name: MCP_SERVER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agnes.secretName" . }}
+                  key: MCP_SERVER_TOKEN
+            {{- if .Values.agent.redis.enabled }}
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agnes.secretName" . }}
+                  key: REDIS_URL
+            {{- end }}
+          # readiness = /health: it pings Redis in Redis mode, so a
+          # pod with a broken Redis connection stops RECEIVING new
+          # traffic. liveness = plain TCP on purpose: a Redis blip
+          # must take pods out of rotation, not restart the whole
+          # fleet (docs/aks.md section 5 -- never point liveness at
+          # a dependency-checking endpoint).
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            # startup includes connecting to MCP and loading 12 tools
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}
+          volumeMounts:
+            # mounting the CSI volume is what triggers the Key Vault
+            # -> k8s Secret sync; the file mount itself is unused
+            - name: kv
+              mountPath: /mnt/kv
+              readOnly: true
+      volumes:
+        - name: kv
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ .Release.Name }}-kv

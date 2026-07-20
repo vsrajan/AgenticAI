@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "agnes.mcpName" . }}
+  labels:
+    {{- include "agnes.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+spec:
+  {{- if not .Values.mcp.hpa.enabled }}
+  # omitted when the HPA owns the replica count (a fixed value here
+  # would fight the autoscaler on every helm upgrade)
+  replicas: {{ .Values.mcp.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: mcp
+  template:
+    metadata:
+      labels:
+        {{- include "agnes.labels" . | nindent 8 }}
+        app.kubernetes.io/component: mcp
+        {{- if .Values.serviceAccount.workloadIdentity.enabled }}
+        # the workload identity webhook only mutates labeled pods
+        azure.workload.identity/use: "true"
+        {{- end }}
+      annotations:
+        # restart pods when config changes (env vars are read once at
+        # process start)
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- if .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecret }}
+      {{- end }}
+      affinity:
+        {{- include "agnes.antiAffinity" (dict "component" "mcp") | nindent 8 }}
+      {{- if .Values.mcp.parquet.enabled }}
+      initContainers:
+        # stage the Spark parquet exports from Azure Storage onto the
+        # /data emptyDir before the server starts (P0 section 11.9).
+        # Auth is the pod's workload identity (needs Storage Blob
+        # Data Reader on the account) -- the AZURE_* env vars are
+        # injected by the workload identity webhook.
+        - name: stage-parquet
+          image: {{ .Values.mcp.parquet.stagingImage }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              az login --service-principal \
+                -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" \
+                --federated-token "$(cat "$AZURE_FEDERATED_TOKEN_FILE")" \
+                --allow-no-subscriptions -o none
+              az storage blob download-batch \
+                --auth-mode login \
+                --account-name {{ required "set mcp.parquet.storageAccount" .Values.mcp.parquet.storageAccount | quote }} \
+                --source {{ required "set mcp.parquet.container" .Values.mcp.parquet.container | quote }} \
+                --pattern '{{ .Values.mcp.parquet.prefix }}/*' \
+                --destination /data
+              echo "staged:" && find /data -name '*.parquet' | head
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      {{- end }}
+      containers:
+        - name: mcp-server
+          image: {{ include "agnes.mcpImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "agnes.mcpName" . }}-config
+          env:
+            - name: MCP_AUTH_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agnes.secretName" . }}
+                  key: MCP_AUTH_TOKENS
+          # the server ingests data at import time and binds the port
+          # only after -- so a plain TCP check IS the "ingest finished"
+          # readiness gate (docs/aks.md section 5)
+          startupProbe:
+            tcpSocket:
+              port: http
+            # large exports take a while on cold start; 30 x 10 s
+            failureThreshold: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.mcp.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: duckdb
+              mountPath: /duckdb
+            # mounting the CSI volume is what triggers the Key Vault
+            # -> k8s Secret sync; the file mount itself is unused
+            - name: kv
+              mountPath: /mnt/kv
+              readOnly: true
+      volumes:
+        # staged parquet + the DuckDB cache are pod-local and
+        # disposable -- both rebuild from source (docs/aks.md s4)
+        - name: data
+          emptyDir: {}
+        - name: duckdb
+          emptyDir: {}
+        - name: kv
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ .Release.Name }}-kv

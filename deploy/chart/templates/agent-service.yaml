@@ -1,0 +1,18 @@
+# the ingress routes to this service; nothing else needs the agent
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agnes.agentName" . }}
+  labels:
+    {{- include "agnes.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: agent
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

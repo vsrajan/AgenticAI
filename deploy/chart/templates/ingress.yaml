@@ -1,0 +1,39 @@
+{{- if .Values.ingress.enabled }}
+# TLS terminates here; only the agent is exposed. The SSE annotations
+# apply ingress-wide (simpler than a separate /stream route and
+# harmless for the JSON endpoints): buffering off so tokens reach the
+# client as they stream, and read/send timeouts sized to a full turn
+# (matches AGENT_API_LOCK_TIMEOUT_SECONDS -- docs/aks.md section 6).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "agnes.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tlsSecretName }}
+  tls:
+    - hosts:
+        - {{ required "set ingress.host" .Values.ingress.host }}
+      secretName: {{ .Values.ingress.tlsSecretName }}
+  {{- end }}
+  rules:
+    - host: {{ required "set ingress.host" .Values.ingress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "agnes.agentName" . }}
+                port:
+                  name: http
+{{- end }}

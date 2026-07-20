@@ -1,0 +1,35 @@
+# prod cluster overrides -- the docs/aks.md section 7 sizing:
+# agent 3 fixed replicas (IO-bound on Azure OpenAI quota; scale by
+# raising TPM quota before adding replicas beyond 3), mcp 2 + HPA
+# 2->6 at 70% CPU. Placeholders <...> are filled during AKS
+# onboarding. No secrets here, ever.
+
+image:
+  registry: "<registry-base>"
+
+serviceAccount:
+  workloadIdentity:
+    clientId: "<prod-managed-identity-client-id>"
+
+keyVault:
+  name: "<prod-key-vault-name>"
+  tenantId: "<tenant-id>"
+
+mcp:
+  hpa:
+    enabled: true
+  parquet:
+    storageAccount: "<prod-storage-account>"
+    container: "<prod-container>"
+
+agent:
+  replicas: 3
+  azureOpenAI:
+    endpoint: "<https://prod-aoai-resource.openai.azure.com/>"
+    deployment: "<gpt-4o-deployment-name>"
+  corsOrigins: "<https://webclient.internal.example.com>"
+  streamFile: ""
+
+ingress:
+  host: "<agnes.internal.example.com>"
+  tlsSecretName: "<prod-tls-secret>"

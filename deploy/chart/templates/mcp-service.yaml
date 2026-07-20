@@ -1,0 +1,22 @@
+# in-cluster only (ClusterIP): the agent reaches MCP at
+# http://<release>-mcp:8000/mcp; nothing outside the cluster does.
+# Protocol is plain TCP/HTTP -- never label MCP or Redis services
+# with a protocol they do not speak (the RESP-behind-https lesson,
+# docs/aks.md section 6).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "agnes.mcpName" . }}
+  labels:
+    {{- include "agnes.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: mcp
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP

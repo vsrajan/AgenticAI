@@ -1,0 +1,29 @@
+{{- if .Values.networkPolicy.enabled }}
+# only agent pods may reach mcp pods, and only on :8000. The MCP
+# bearer token is the auth layer; this is the network layer under it.
+# Other in-cluster agents that should use the MCP tools get their own
+# allow rule here (plus their own token in MCP_AUTH_TOKENS) -- see
+# docs/aks.md section 12.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "agnes.mcpName" . }}-ingress
+  labels:
+    {{- include "agnes.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: mcp
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: agent
+      ports:
+        - protocol: TCP
+          port: 8000
+{{- end }}

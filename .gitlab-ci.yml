@@ -1,0 +1,135 @@
+# GitLab CI: test -> build -> deploy (docs/deploy.md section 7).
+#
+# The promotion invariant: every deploy job uses the SAME images
+# (tagged $CI_COMMIT_SHORT_SHA) and the SAME chart -- only the values
+# file differs per environment. Nothing is rebuilt between clusters.
+#
+# Environment-scoped CI/CD variables expected (Settings -> CI/CD ->
+# Variables, each scoped to its environment name):
+#   AZ_CLIENT_ID / AZ_CLIENT_SECRET / AZ_TENANT  -- deploy SP per env
+#   AKS_CLUSTER / AKS_RG                         -- target cluster per env
+# Prefer GitLab-Azure OIDC federation (id_tokens -> Entra workload
+# identity federation) over stored SP secrets when the firm supports
+# it -- same keyless direction as the rest of the auth roadmap.
+#
+# Registry note (Phase B, docs/deploy.md section 2): REGISTRY_BASE
+# defaults to this project's GitLab Container Registry, for which the
+# job token below just works. Point it at a firm ACR instead by
+# overriding REGISTRY_BASE + REGISTRY_USER + REGISTRY_PASSWORD.
+#
+# Egress note: job images pull from ghcr.io (uv) and gcr.io (kaniko);
+# the base image pulls from mcr.microsoft.com. Confirm all three are
+# reachable from the firm's runners during onboarding, and substitute
+# the firm's mirror convention if not (the extensions.duckdb.org
+# lesson: assume egress is blocked until proven otherwise).
+
+stages: [test, build, deploy]
+
+variables:
+  REGISTRY_BASE: $CI_REGISTRY_IMAGE
+  REGISTRY_USER: $CI_REGISTRY_USER
+  REGISTRY_PASSWORD: $CI_REGISTRY_PASSWORD
+
+# -- test: the same suites run at every feature checkpoint --
+
+test:mcp:
+  stage: test
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm
+  script:
+    - cd mcp-server
+    - uv run --with pytest pytest tests/ -q
+
+test:agent:
+  stage: test
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm
+  script:
+    - cd agent-client
+    - uv run --with pytest --with httpx --with 'fakeredis[lua]' pytest tests_api/ -q
+
+# -- build: daemonless image builds (kaniko), git-SHA tagged --
+
+.kaniko: &kaniko
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  before_script:
+    - mkdir -p /kaniko/.docker
+    - >-
+      printf '{"auths":{"%s":{"auth":"%s"}}}'
+      "$CI_REGISTRY"
+      "$(printf '%s:%s' "$REGISTRY_USER" "$REGISTRY_PASSWORD" | base64 | tr -d '\n')"
+      > /kaniko/.docker/config.json
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+build:mcp:
+  <<: *kaniko
+  script:
+    - /kaniko/executor
+      --context "$CI_PROJECT_DIR/mcp-server"
+      --dockerfile "$CI_PROJECT_DIR/mcp-server/Dockerfile"
+      --destination "$REGISTRY_BASE/agnes/mcp-server:$CI_COMMIT_SHORT_SHA"
+
+build:agent:
+  <<: *kaniko
+  script:
+    - /kaniko/executor
+      --context "$CI_PROJECT_DIR/agent-client"
+      --dockerfile "$CI_PROJECT_DIR/agent-client/Dockerfile"
+      --destination "$REGISTRY_BASE/agnes/agent-api:$CI_COMMIT_SHORT_SHA"
+
+# -- deploy: same chart + same SHA through all four clusters --
+
+.deploy: &deploy
+  stage: deploy
+  image: mcr.microsoft.com/azure-cli
+  before_script:
+    # az is in the image; add kubectl+kubelogin (az aks install-cli)
+    # and a pinned helm
+    - az aks install-cli
+    - curl -fsSL https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz | tar -xz
+    - mv linux-amd64/helm /usr/local/bin/helm
+  script:
+    - az login --service-principal -u "$AZ_CLIENT_ID" -p "$AZ_CLIENT_SECRET" -t "$AZ_TENANT" -o none
+    - az aks get-credentials -n "$AKS_CLUSTER" -g "$AKS_RG" --overwrite-existing
+    # AAD-enabled clusters need kubeconfig converted to the azurecli
+    # credential flow (no device-code prompt in CI)
+    - kubelogin convert-kubeconfig -l azurecli
+    - helm upgrade --install agnes deploy/chart
+      -f "deploy/values-$CI_ENVIRONMENT_NAME.yaml"
+      --set image.tag="$CI_COMMIT_SHORT_SHA"
+      --set image.registry="$REGISTRY_BASE"
+      --namespace agnes --create-namespace
+      --wait --timeout 10m
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+deploy:dev:
+  <<: *deploy
+  environment:
+    name: dev
+
+deploy:test:
+  <<: *deploy
+  environment:
+    name: test
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+
+deploy:uat:
+  <<: *deploy
+  environment:
+    name: uat
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+
+deploy:prod:
+  <<: *deploy
+  environment:
+    name: prod
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual

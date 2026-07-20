@@ -1,0 +1,23 @@
+# never ship secrets or local state into a build context
+.env
+
+# virtualenv and caches (rebuilt inside the image from uv.lock)
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+
+# the DuckDB file is a disposable local cache -- the pod rebuilds it
+# on an emptyDir volume (default location is inside docs/, so this
+# matters: without these lines COPY docs/ would bake it in)
+*.duckdb
+*.duckdb.wal
+docs/.mcp_data.duckdb
+
+# locally staged parquet exports (gigabytes; staged at runtime in AKS)
+mcp-data
+
+# not part of the runtime image
+tests
+tester.py
+indexer.md

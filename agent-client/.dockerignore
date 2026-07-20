@@ -1,0 +1,19 @@
+# never ship secrets or local state into a build context
+.env
+
+# virtualenv and caches (rebuilt inside the image from uv.lock)
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+
+# local run artifacts
+agent_api_stream.txt
+agent_stream.txt
+scan_results.csv
+
+# not part of the runtime image
+tests_api
+data
+webclient_api.html
+README_api.md

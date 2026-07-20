@@ -1,0 +1,150 @@
+# Default values + documentation for every knob. Per-environment
+# overrides live in deploy/values-{dev,test,uat,prod}.yaml -- keep
+# those files small; anything not overridden falls back to here.
+#
+# The rule from docs/deploy.md section 6:
+#   secret            -> the environment's Key Vault (secretproviderclass.yaml)
+#   varies per env    -> the values file
+#   topology truth    -> fixed in the templates (not configurable here)
+#
+# Values files are plain YAML in git. They hold NO secrets, ever.
+
+image:
+  # registry base, e.g. registry.gitlab.com/<group>/<project> or
+  # <firm-acr>.azurecr.io -- the Phase B decision (deploy.md s2).
+  # Local podman smoke tests need no registry at all.
+  registry: ""
+  mcpRepository: agnes/mcp-server
+  agentRepository: agnes/agent-api
+  # always deploy a git SHA; the pipeline passes
+  # --set image.tag=$CI_COMMIT_SHORT_SHA. Never promote latest.
+  tag: ""
+  pullPolicy: IfNotPresent
+  # name of an existing imagePullSecret in the namespace; "" when the
+  # cluster pulls anonymously or via kubelet identity (AcrPull)
+  pullSecret: ""
+
+serviceAccount:
+  # one service account shared by both Deployments. With workload
+  # identity enabled, its annotation binds the user-assigned managed
+  # identity that reads Key Vault (CSI driver) and the parquet
+  # storage account (initContainer) -- the keyless direction from
+  # docs/aks.md section 8.
+  name: agnes
+  workloadIdentity:
+    enabled: true
+    # client id of the user-assigned managed identity federated to
+    # this service account. Needs: Key Vault get on secrets, Storage
+    # Blob Data Reader on the parquet storage account.
+    clientId: ""
+
+keyVault:
+  # the environment's Azure Key Vault (one per cluster). The CSI
+  # driver pulls five secrets from it and syncs them into one k8s
+  # Secret -- object names are fixed in secretproviderclass.yaml:
+  #   azure-openai-api-key, agent-api-token, mcp-server-token,
+  #   mcp-auth-tokens, redis-url
+  name: ""
+  tenantId: ""
+
+mcp:
+  # 2 replicas is the availability floor; HPA adds more under CPU
+  # (the GIL workaround -- see docs/aks.md section 4)
+  replicas: 2
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  hpa:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  logLevel: INFO
+  # background staleness check interval (minutes); reload only when
+  # the staged source actually changed
+  dataRefreshMinutes: "15"
+  # datasets larger than this get no BM25 index (P0 size gate)
+  searchMaxRows: "50000"
+  parquet:
+    # runtime-staged parquet data (docs/P0.md section 11.9): an
+    # initContainer downloads the Spark exports from Azure Storage
+    # onto an emptyDir mounted at /data before the server starts.
+    # false = csv mode from the baked docs/ dir (local-style rigs).
+    enabled: true
+    storageAccount: ""
+    container: ""
+    # blob prefix inside the container to download (matches the
+    # export layout: <prefix>/Resource.parquet/part-*.parquet ...)
+    prefix: "export"
+    # dataset map handed to the server. ABSOLUTE container paths on
+    # the /data volume -- the parquet lesson: never relative. A
+    # directory auto-expands to dir/*.parquet and marker files are
+    # skipped, so pointing at the export folders is enough.
+    sources: "Resources=/data/export/Resource.parquet,Entitlements=/data/export/entitlement.parquet"
+    # image that runs the az download; pin to a firm-approved tag
+    stagingImage: "mcr.microsoft.com/azure-cli:latest"
+
+agent:
+  # 2-3 replicas, made legal by P3.1 (shared Redis sessions); the
+  # load balancer stays dumb. In-process mode with replicas > 1 is
+  # the one forbidden combination (docs/aks.md section 3).
+  replicas: 2
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  azureOpenAI:
+    # per-environment resource + quota; the API key is in Key Vault
+    endpoint: ""
+    deployment: ""
+    apiVersion: "2024-12-01-preview"
+  # comma-separated CORS allowlist; permissive in dev, the exact web
+  # origin from test upward
+  corsOrigins: "*"
+  # per-node execution log file; "" disables it (recommended from
+  # test upward -- P4 in docs/PerformanceRecommendations.md)
+  streamFile: ""
+  sessionTtlMinutes: "60"
+  maxSessions: "500"
+  # distributed turn-lock TTL; must exceed the longest realistic
+  # turn -- see docs/P3.1.md section 14 before changing
+  lockTimeoutSeconds: "300"
+  # conversation-window trimming (docs/PerformanceRecommendations.md)
+  keepLastNMsgs: "20"
+  maxToolContentLen: "80000"
+  redis:
+    # Redis lives OUTSIDE the cluster (Azure Cache for Redis; plain
+    # RESP over TCP, rediss:// for TLS on 6380). The URL embeds the
+    # access key, so it arrives from Key Vault (redis-url), never
+    # from a values file. false = in-process sessions -- then
+    # agent.replicas MUST be 1 and sessions die on restart.
+    enabled: true
+
+ingress:
+  enabled: true
+  className: nginx
+  # e.g. agnes-dev.internal.example.com -> agnes.internal.example.com
+  host: ""
+  # existing TLS secret in the namespace; "" uses the ingress
+  # controller's default certificate
+  tlsSecretName: ""
+  # extra annotations merged over the SSE defaults the template sets
+  # (proxy-buffering off, 300 s read/send timeouts)
+  annotations: {}
+
+networkPolicy:
+  # only agent pods may reach mcp pods on :8000
+  enabled: true
+
+pdb:
+  # keep at least one pod of each Deployment through voluntary
+  # disruptions (node drains); pointless with single replicas, so
+  # dev turns it off
+  enabled: true

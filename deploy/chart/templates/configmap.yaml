@@ -1,0 +1,59 @@
+# non-secret configuration for both services. Topology truths (fixed
+# by the aks.md decisions) are literal here; per-environment knobs
+# come from values. Secrets never appear in a ConfigMap -- they are
+# in {{ include "agnes.secretName" . }} via the CSI driver.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agnes.mcpName" . }}-config
+  labels:
+    {{- include "agnes.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mcp
+data:
+  # -- topology truths (do not make these per-environment) --
+  MCP_TRANSPORT: "streamable-http"
+  MCP_STATELESS_HTTP: "true"          # any replica answers any request
+  MCP_HOST: "0.0.0.0"                 # bind on the pod interface
+  MCP_PORT: "8000"
+  MCP_AUTH: "static"                  # fail-closed bearer auth
+  MCP_DOCS_DIR: "/app/docs"           # baked into the image
+  MCP_DB_PATH: "/duckdb/mcp_data.duckdb"  # disposable cache on emptyDir
+  {{- if .Values.mcp.parquet.enabled }}
+  MCP_DATA_SOURCE: "parquet"
+  # ABSOLUTE container paths on the initContainer-staged /data volume
+  MCP_PARQUET_SOURCES: {{ .Values.mcp.parquet.sources | quote }}
+  {{- else }}
+  MCP_DATA_SOURCE: "csv"
+  {{- end }}
+  # -- per-environment knobs --
+  MCP_LOG_LEVEL: {{ .Values.mcp.logLevel | quote }}
+  MCP_DATA_REFRESH_MINUTES: {{ .Values.mcp.dataRefreshMinutes | quote }}
+  MCP_SEARCH_MAX_ROWS: {{ .Values.mcp.searchMaxRows | quote }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agnes.agentName" . }}-config
+  labels:
+    {{- include "agnes.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+data:
+  # -- topology truths --
+  AGENT_API_HOST: "0.0.0.0"
+  AGENT_API_PORT: "8080"
+  AGENT_API_AUTH: "static"
+  # in-cluster MCP URL derived from the service name -- clients never
+  # configure it per environment
+  MCP_SERVER_URL: "http://{{ include "agnes.mcpName" . }}:8000/mcp"
+  MCP_TRANSPORT: "streamable-http"
+  # -- per-environment knobs --
+  AZURE_OPENAI_ENDPOINT: {{ required "set agent.azureOpenAI.endpoint" .Values.agent.azureOpenAI.endpoint | quote }}
+  AZURE_OPENAI_DEPLOYMENT: {{ required "set agent.azureOpenAI.deployment" .Values.agent.azureOpenAI.deployment | quote }}
+  AZURE_OPENAI_API_VERSION: {{ .Values.agent.azureOpenAI.apiVersion | quote }}
+  AGENT_API_CORS_ORIGINS: {{ .Values.agent.corsOrigins | quote }}
+  AGENT_API_STREAM_FILE: {{ .Values.agent.streamFile | quote }}
+  AGENT_API_SESSION_TTL_MINUTES: {{ .Values.agent.sessionTtlMinutes | quote }}
+  AGENT_API_MAX_SESSIONS: {{ .Values.agent.maxSessions | quote }}
+  AGENT_API_LOCK_TIMEOUT_SECONDS: {{ .Values.agent.lockTimeoutSeconds | quote }}
+  KEEP_LAST_N_MSGS: {{ .Values.agent.keepLastNMsgs | quote }}
+  MAX_TOOL_CONTENT_LEN: {{ .Values.agent.maxToolContentLen | quote }}

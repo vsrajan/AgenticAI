@@ -1,0 +1,33 @@
+# uat cluster overrides -- prod-shaped on purpose (same topology,
+# HPA on) so uat rehearses exactly what prod runs. Placeholders <...>
+# are filled during AKS onboarding. No secrets here, ever.
+
+image:
+  registry: "<registry-base>"
+
+serviceAccount:
+  workloadIdentity:
+    clientId: "<uat-managed-identity-client-id>"
+
+keyVault:
+  name: "<uat-key-vault-name>"
+  tenantId: "<tenant-id>"
+
+mcp:
+  hpa:
+    enabled: true
+  parquet:
+    storageAccount: "<uat-storage-account>"
+    container: "<uat-container>"
+
+agent:
+  replicas: 2
+  azureOpenAI:
+    endpoint: "<https://uat-aoai-resource.openai.azure.com/>"
+    deployment: "<gpt-4o-deployment-name>"
+  corsOrigins: "<https://webclient-uat.internal.example.com>"
+  streamFile: ""
+
+ingress:
+  host: "<agnes-uat.internal.example.com>"
+  tlsSecretName: "<uat-tls-secret>"

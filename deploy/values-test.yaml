@@ -1,0 +1,32 @@
+# test cluster overrides. From test upward: exact CORS origin, no
+# stream file, both tiers at 2 replicas. Placeholders <...> are
+# filled during AKS onboarding. No secrets here, ever.
+
+image:
+  registry: "<registry-base>"
+
+serviceAccount:
+  workloadIdentity:
+    clientId: "<test-managed-identity-client-id>"
+
+keyVault:
+  name: "<test-key-vault-name>"
+  tenantId: "<tenant-id>"
+
+mcp:
+  replicas: 2
+  parquet:
+    storageAccount: "<test-storage-account>"
+    container: "<test-container>"
+
+agent:
+  replicas: 2
+  azureOpenAI:
+    endpoint: "<https://test-aoai-resource.openai.azure.com/>"
+    deployment: "<gpt-4o-deployment-name>"
+  corsOrigins: "<https://webclient-test.internal.example.com>"
+  streamFile: ""
+
+ingress:
+  host: "<agnes-test.internal.example.com>"
+  tlsSecretName: "<test-tls-secret>"

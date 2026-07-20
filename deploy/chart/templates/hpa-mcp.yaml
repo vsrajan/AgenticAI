@@ -1,0 +1,33 @@
+{{- if .Values.mcp.hpa.enabled }}
+# CPU-based autoscaling for the MCP tier only. More replicas is the
+# clean way around the GIL for the CPU-bound paths (BM25 scoring,
+# parquet ingest) -- docs/aks.md section 4. The agent tier scales by
+# editing agent.replicas instead: its load is IO-bound waiting on
+# Azure OpenAI, which CPU metrics track badly.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "agnes.mcpName" . }}
+  labels:
+    {{- include "agnes.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "agnes.mcpName" . }}
+  minReplicas: {{ .Values.mcp.hpa.minReplicas }}
+  maxReplicas: {{ .Values.mcp.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.mcp.hpa.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleUp:
+      # ride out short bursts before adding pods
+      stabilizationWindowSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+{{- end }}

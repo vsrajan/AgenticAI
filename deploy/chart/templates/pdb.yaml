@@ -1,0 +1,30 @@
+{{- if .Values.pdb.enabled }}
+# keep at least one pod of each tier through voluntary disruptions
+# (node drains, cluster upgrades). Pointless with single replicas --
+# dev disables this.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "agnes.mcpName" . }}
+  labels:
+    {{- include "agnes.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: mcp
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "agnes.agentName" . }}
+  labels:
+    {{- include "agnes.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: agent
+{{- end }}

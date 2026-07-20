@@ -1,0 +1,14 @@
+apiVersion: v2
+name: agnes
+description: >-
+  Access Governance AI -- agent-api (LangGraph multi-agent HTTP API)
+  and mcp-server (FastMCP tool server) on AKS. One chart for both
+  services; per-environment differences live in deploy/values-*.yaml.
+  Topology decisions documented in docs/aks.md; the deployment plan
+  and the values-vs-Key-Vault mapping in docs/deploy.md.
+type: application
+# chart version: bump on template changes
+version: 0.1.0
+# appVersion is informational -- the deployed image is always pinned
+# explicitly with --set image.tag=<git-sha>
+appVersion: "0.1.0"
