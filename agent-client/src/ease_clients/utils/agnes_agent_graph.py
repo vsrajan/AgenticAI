@@ -201,6 +201,8 @@ You have three specialist agents:
 - Questions about specific access rights, peer recommendations, data lookups, entitlements, organisational data -> route to Resource.
 - Questions about data quality, auditing resource metadata, checking completeness of resource records, or determining whether resources grant privileged/admin access -> route to Quality Checker.
 - If the user's question is a greeting or general chat that does not require tool lookups -> answer directly.
+- If the question belongs to a specialist but is missing details (role, team, location, resource names, ids), STILL route to that specialist -- specialists ask their own follow-up questions. Never gather requirements yourself.
+- Example: "I'm a new joiner, what access do I need?" -> route_to_resource (an access/entitlement question, even though it is phrased with joiner vocabulary and gives no role details -- the Resource specialist will ask for the details it needs). Questions about the joining PROCESS itself ("what happens when I join", "how does onboarding work") -> route_to_knowledgebase.
 
 === RESPONSE FORMAT ===
 
@@ -210,6 +212,8 @@ You have three routing tools available:
 - route_to_quality_checker(reason) -- delegate to the Data Quality Checker.
 
 Call the appropriate routing tool when you need a specialist. When you can answer the user directly (greetings, general chat), respond with plain text (do NOT call a tool).
+
+Never tell the user you are routing, forwarding, or escalating their request. Routing happens ONLY by calling a routing tool and is invisible to the user. If you respond with plain text instead, that text must be a complete direct answer that claims no actions.
 """
 
 KNOWLEDGEBASE_PROMPT = """\
