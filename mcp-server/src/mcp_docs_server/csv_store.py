@@ -1,18 +1,45 @@
-"""CSV data store with BM25 search and column-based filtering.
+"""Dataset store served by DuckDB behind the CSV tool contracts.
 
-Recursively reads all CSV files from a directory, discovers columns
-automatically from the header row, and provides:
-  - Full-text BM25 search across all text columns
-  - Column-based filtering and grouping
-  - Distinct value listing per column (for agent discovery)
+Serving and ingestion are separate concerns:
+
+- SERVING (this module): agent queries -- filters, counts, distinct
+  values -- run as SQL against an embedded DuckDB database. Vectorized
+  and columnar, they stay in the low milliseconds even at millions of
+  rows, where the previous pure-python row scans took seconds and the
+  list-of-dicts storage took gigabytes.
+- INGESTION (data_sources.py): where rows come from. CsvDataSource
+  loads *.csv files (dev, tests, samples); DatabaseSource reserves the
+  production path (Azure SQL / Postgres batch sync).
+
+The database persists to a file (MCP_DB_PATH), so a restart with
+unchanged source data starts in milliseconds -- ingestion runs only
+when the source fingerprint changes. Refresh is atomic: a load runs
+in one transaction, so readers see the complete old data until the
+commit, then the complete new data. A background sweeper re-checks
+the fingerprint every MCP_DATA_REFRESH_MINUTES.
+
+Full-text search is size-gated: BM25 indexes exist only for datasets
+with at most MCP_SEARCH_MAX_ROWS rows (the Resources catalogue).
+Larger datasets (Entitlements at production volume) get a guidance
+error steering the agent to the filter/count tools -- which is how
+the resource prompt already uses them.
+
+The class keeps its historical name (repo convention: MCP server
+internals keep implementation names) -- the tool contracts hide the
+storage engine.
 """
 
-import csv
 import logging
+import os
 import re
+import threading
+import time
 from pathlib import Path
 
+import duckdb
 from rank_bm25 import BM25Okapi
+
+from mcp_docs_server.data_sources import DataSource, build_data_source
 
 logger = logging.getLogger("mcp_docs_server.csv_store")
 
@@ -26,442 +53,376 @@ def _tokenize(text: str) -> list[str]:
     return re.findall(r"\w+", text.lower())
 
 
-class CsvDataset:
-    """A single CSV file loaded into memory with search support."""
+def _quote(identifier: str) -> str:
+    """Quote a table/column identifier for SQL.
 
-    def __init__(self, name: str, path: Path, rows: list[dict], columns: list[str]):
-        """Initialise a dataset from pre-read CSV data.
+    Values are always bound as parameters; identifiers cannot be
+    bound, so they are validated against the actual schema first
+    (only known tables/columns ever reach a query) and quoted here.
+    """
+    return '"' + identifier.replace('"', '""') + '"'
 
-        Args:
-            name:    Dataset identifier, e.g. "Entitlements"
-            path:    Absolute path, e.g. Path("/data/docs/Entitlements.csv")
-            rows:    List of dicts — one per CSV row, e.g.
-                     [{"ResourceID": "R001", "JOBTITLE": "Analyst", "OU": "Finance"},
-                      {"ResourceID": "R002", "JOBTITLE": "Manager", "OU": "HR"}]
-            columns: Header names, e.g. ["ResourceID", "JOBTITLE", "OU"]
-        """
-        self.name = name
-        self.path = path
+
+class _SearchIndex:
+    """BM25 sidecar for one SMALL dataset.
+
+    Keeps the rows in memory so search can return them -- acceptable
+    only because the size gate caps how many rows this can be.
+    """
+
+    def __init__(self, rows: list[dict]):
         self.rows = rows
-        self.columns = columns
-        self._bm25: BM25Okapi | None = None
-        self._build_index()
-
-    def _build_index(self) -> None:
-        """Build a BM25 index over all row text.
-
-        Concatenates every cell in a row into one string, tokenizes it,
-        and feeds the resulting corpus to BM25Okapi.
-
-        Given rows:
-            [{"ResourceID": "R001", "name": "SAP Finance Reporting"}]
-
-        Produces corpus:
-            [["r001", "sap", "finance", "reporting"]]
-        """
-        if not self.rows:
-            return
         corpus = [
-            _tokenize(" ".join(str(v) for v in row.values()))
-            for row in self.rows
+            _tokenize(" ".join(str(v) for v in row.values() if v is not None))
+            for row in rows
         ]
-        self._bm25 = BM25Okapi(corpus)
-        logger.info(
-            "BM25 index built for %s: %d rows, %d columns",
-            self.name, len(self.rows), len(self.columns),
-        )
-
-    def search(self, query: str, max_results: int = 10) -> list[dict]:
-        """Full-text BM25 search across all columns.
-
-        Tokenizes *query*, scores every row against the BM25 index, and
-        returns the top-*max_results* rows (score > 0) with a ``_score``
-        field appended.
-
-        Input:  query="SAP finance", max_results=2
-        Output: [
-                    {"ResourceID": "R001", "name": "SAP Finance Reporting",
-                     "DESCRIPTION": "...", "_score": 4.721},
-                    {"ResourceID": "R045", "name": "SAP FI Access",
-                     "DESCRIPTION": "...", "_score": 3.108},
-                ]
-        Returns [] if no rows score above 0.
-        """
-        if not self._bm25 or not self.rows:
-            return []
-        tokens = _tokenize(query)
-        if not tokens:
-            return []
-        scores = self._bm25.get_scores(tokens)
-        scored = sorted(zip(scores, self.rows), key=lambda x: x[0], reverse=True)
-        results = []
-        for score, row in scored[:max_results]:
-            if score <= 0:
-                break
-            results.append({**row, "_score": round(float(score), 3)})
-        return results
-
-    # -- Private helpers (uncapped, used internally by count_by) ----------
-
-    def _filter_rows(self, **criteria: str) -> list[dict]:
-        """Core exact-match filter — returns ALL matches, no cap."""
-        matching = self.rows
-        for col, value in criteria.items():
-            if col not in self.columns:
-                continue
-            value_lower = value.lower()
-            matching = [
-                row for row in matching
-                if str(row.get(col, "")).lower() == value_lower
-            ]
-        return matching
-
-    def _filter_rows_fuzzy(self, **criteria: str) -> list[dict]:
-        """Core regex filter — returns ALL matches, no cap."""
-        matching = self.rows
-        for col, value in criteria.items():
-            if col not in self.columns:
-                continue
-            try:
-                pattern = re.compile(value, re.IGNORECASE)
-            except re.error:
-                pattern = re.compile(re.escape(value), re.IGNORECASE)
-            matching = [
-                row for row in matching
-                if pattern.search(str(row.get(col, "")))
-            ]
-        return matching
-
-    # -- Public filter methods (capped) ------------------------------------
-
-    def filter(self, max_results: int = 100, **criteria: str) -> tuple[list[dict], int]:
-        """Filter rows where columns match the given values (case-insensitive).
-
-        Each keyword argument is a column=value exact-match filter.
-        Multiple criteria are ANDed together.  Returns at most
-        *max_results* rows plus the total match count.
-
-        Input:  filter(JOBTITLE="Analyst", OU="Finance")
-        Output: (
-                    [{"ResourceID": "R001", ...}, {"ResourceID": "R017", ...}],
-                    2,   # total matches
-                )
-        Returns ([], 0) if no rows match all criteria.
-        """
-        matching = self._filter_rows(**criteria)
-        total = len(matching)
-        return matching[:max_results], total
-
-    def filter_fuzzy(self, max_results: int = 100, **criteria: str) -> tuple[list[dict], int]:
-        """Filter rows where columns match the given regex patterns (case-insensitive).
-
-        Like ``filter()``, but each value is treated as a regex pattern
-        (falls back to literal match if the regex is invalid).  Returns at
-        most *max_results* rows plus the total match count.
-
-        Input:  filter_fuzzy(JOBTITLE="finance|accounting", OU="HR")
-        Output: (
-                    [{"ResourceID": "R005", ...}, {"ResourceID": "R012", ...}],
-                    2,   # total matches
-                )
-        Returns ([], 0) if no rows match all patterns.
-        """
-        matching = self._filter_rows_fuzzy(**criteria)
-        total = len(matching)
-        return matching[:max_results], total
-
-    def distinct(self, column: str) -> list[str]:
-        """Return sorted distinct non-empty values for a column.
-
-        Input:  distinct("OU")
-        Output: ["Engineering", "Finance", "HR", "Marketing"]
-        Returns [] if the column does not exist.
-        """
-        if column not in self.columns:
-            return []
-        values = {str(row[column]) for row in self.rows if row.get(column)}
-        return sorted(values)
-
-    def count_by(self, column: str, fuzzy: bool = False, **criteria: str) -> list[dict]:
-        """Filter rows by *criteria*, then count occurrences of each
-        distinct value in *column*.
-
-        When *fuzzy* is ``False`` (default), applies exact-match filters.
-        When *fuzzy* is ``True``, applies regex pattern matching (same
-        semantics as ``filter_fuzzy``).
-
-        Input:  count_by("ResourceID", JOBTITLE="Analyst", OU="Finance")
-        Output: [
-                    {"value": "R001", "count": 14},
-                    {"value": "R045", "count": 9},
-                    {"value": "R102", "count": 3},
-                ]
-        Results are sorted descending by count.
-        Returns [] if *column* does not exist.
-        """
-        if criteria:
-            rows = self._filter_rows_fuzzy(**criteria) if fuzzy else self._filter_rows(**criteria)
-        else:
-            rows = self.rows
-        if column not in self.columns:
-            return []
-        counts: dict[str, int] = {}
-        for row in rows:
-            val = str(row.get(column, "")).strip()
-            if val:
-                counts[val] = counts.get(val, 0) + 1
-        return sorted(
-            [{"value": v, "count": c} for v, c in counts.items()],
-            key=lambda x: x["count"],
-            reverse=True,
-        )
+        self.bm25 = BM25Okapi(corpus)
 
 
 class CsvStore:
-    """Manages all CSV files in a directory, each as a named dataset."""
+    """DuckDB-backed dataset store; public surface unchanged from the
+    previous in-memory implementation."""
 
-    def __init__(self, docs_dir: str) -> None:
-        """Load every CSV file found under *docs_dir* into memory.
-
-        Args:
-            docs_dir: Root directory to scan, e.g. "/data/docs".
-                      All ``*.csv`` files found recursively become
-                      named datasets keyed by filename stem
-                      (e.g. ``/data/docs/access/Entitlements.csv``
-                      → dataset name ``"Entitlements"``).
-        """
+    def __init__(self, docs_dir, db_path=None, source: DataSource | None = None,
+                 search_max_rows: int | None = None,
+                 refresh_minutes: float | None = None):
         self.docs_dir = Path(docs_dir)
-        self._datasets: dict[str, CsvDataset] = {}
-        self._load_all()
+        if db_path is None:
+            db_path = os.environ.get(
+                "MCP_DB_PATH", str(self.docs_dir / ".mcp_data.duckdb"))
+        if search_max_rows is None:
+            search_max_rows = int(os.environ.get("MCP_SEARCH_MAX_ROWS", "50000"))
+        if refresh_minutes is None:
+            refresh_minutes = float(os.environ.get("MCP_DATA_REFRESH_MINUTES", "15"))
+        self._search_max_rows = search_max_rows
+        # source selection: an injected source wins (tests); otherwise
+        # MCP_DATA_SOURCE picks csv (default) or parquet -- see
+        # data_sources.build_data_source
+        self._source: DataSource = source or build_data_source(docs_dir)
 
-    def _load_all(self) -> None:
-        """Recursively find and load all ``*.csv`` files under ``docs_dir``.
+        # refresh writes are serialised by this lock; reads run on
+        # per-call cursors (duckdb allows those concurrently and reads
+        # see committed data only)
+        self._refresh_lock = threading.RLock()
 
-        Populates ``self._datasets`` — e.g. after scanning a directory
-        containing ``Entitlements.csv`` and ``Resources.csv``::
-
-            self._datasets == {
-                "Entitlements": CsvDataset(..., rows=[{...}, ...]),
-                "Resources":    CsvDataset(..., rows=[{...}, ...]),
-            }
-        """
-        if not self.docs_dir.exists():
-            logger.warning("Docs directory does not exist: %s", self.docs_dir)
-            return
-
-        logger.info("Scanning for CSV files in %s", self.docs_dir)
-
-        for csv_path in sorted(self.docs_dir.rglob("*.csv")):
-            rel_path = csv_path.relative_to(self.docs_dir)
-            name = csv_path.stem  # filename without extension as the dataset name
-            try:
-                rows, columns = self._read_csv(csv_path)
-            except Exception:
-                logger.exception("Failed to read %s, skipping", rel_path)
-                continue
-
-            if not rows:
-                logger.warning("No rows in %s, skipping", rel_path)
-                continue
-
-            self._datasets[name] = CsvDataset(name, csv_path, rows, columns)
-            logger.info("Loaded CSV %s: %d rows, columns=%s", name, len(rows), columns)
-
-    @staticmethod
-    def _read_csv(path: Path) -> tuple[list[dict], list[str]]:
-        """Read a CSV file and return ``(rows_as_dicts, column_names)``.
-
-        Input:  path pointing to a CSV whose contents are::
-
-                    ResourceID,name,DESCRIPTION
-                    R001,SAP Finance Reporting,Access to SAP FI module
-                    R002,Jira Admin,Full admin on Jira
-
-        Output: (
-                    [{"ResourceID": "R001", "name": "SAP Finance Reporting",
-                      "DESCRIPTION": "Access to SAP FI module"},
-                     {"ResourceID": "R002", "name": "Jira Admin",
-                      "DESCRIPTION": "Full admin on Jira"}],
-                    ["ResourceID", "name", "DESCRIPTION"],
-                )
-        """
-        for enc in ("utf-8-sig", "cp1252"):
-            try:
-                with open(path, newline="", encoding=enc) as f:
-                    reader = csv.DictReader(f)
-                    columns = reader.fieldnames or []
-                    rows = list(reader)
-                if enc != "utf-8-sig":
-                    logger.warning("Read %s with fallback encoding %s", path.name, enc)
-                return rows, list(columns)
-            except UnicodeDecodeError:
-                continue
-        # all encodings failed -- raise so _load_all logs and skips
-        raise UnicodeDecodeError(
-            "utf-8", b"", 0, 1,
-            f"Could not decode {path.name} with any supported encoding",
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._con = duckdb.connect(str(db_path))
+        self._con.execute(
+            "CREATE TABLE IF NOT EXISTS _sync_info "
+            "(fingerprint VARCHAR, synced_at TIMESTAMP)"
         )
+
+        self._columns: dict[str, list[str]] = {}
+        self._search: dict[str, _SearchIndex] = {}
+
+        if not self.refresh_if_stale():
+            # warm start: data already current, just read the schema
+            self._load_schema()
+            self._build_search_indexes()
+            logger.info("Warm start: %d dataset(s) already current", len(self._columns))
+
+        if refresh_minutes > 0:
+            # daemon thread so it never blocks process exit; works for
+            # both stdio and sse transports
+            thread = threading.Thread(
+                target=self._sweep_loop, args=(refresh_minutes * 60,),
+                daemon=True, name="data-refresh-sweeper",
+            )
+            thread.start()
+
+    # -- refresh --
+
+    def refresh_if_stale(self) -> bool:
+        """Reload from the source if its fingerprint changed.
+
+        Returns True when a reload happened. The load runs in one
+        transaction: readers see the old tables until the commit.
+        """
+        new_fingerprint = self._source.fingerprint()
+        with self._refresh_lock:
+            stored = self._con.execute(
+                "SELECT fingerprint FROM _sync_info").fetchone()
+            if stored is not None and stored[0] == new_fingerprint:
+                return False
+
+            start = time.perf_counter()
+            self._con.execute("BEGIN")
+            try:
+                loaded = self._source.load(self._con)
+                # drop datasets that disappeared from the source
+                existing = [r[0] for r in self._con.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'main'").fetchall()]
+                for table in existing:
+                    if not table.startswith("_") and table not in loaded:
+                        self._con.execute(f"DROP TABLE {_quote(table)}")
+                self._con.execute("DELETE FROM _sync_info")
+                self._con.execute(
+                    "INSERT INTO _sync_info VALUES (?, current_timestamp)",
+                    [new_fingerprint],
+                )
+                self._con.execute("COMMIT")
+            except Exception:
+                self._con.execute("ROLLBACK")
+                raise
+
+            self._load_schema()
+            self._build_search_indexes()
+            logger.info(
+                "Data refresh complete in %.2fs: %s",
+                time.perf_counter() - start,
+                ", ".join(f"{n} ({self._row_count(n)} rows)"
+                          for n in self.dataset_names) or "no datasets",
+            )
+            return True
+
+    def _sweep_loop(self, interval_seconds: float) -> None:
+        """Background staleness check; reloads only on fingerprint change."""
+        while True:
+            time.sleep(interval_seconds)
+            try:
+                self.refresh_if_stale()
+            except Exception:
+                logger.exception("Background data refresh failed")
+
+    # -- schema --
+
+    def _load_schema(self) -> None:
+        rows = self._con.execute(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = 'main' ORDER BY table_name, ordinal_position"
+        ).fetchall()
+        columns: dict[str, list[str]] = {}
+        for table, column in rows:
+            if table.startswith("_"):
+                continue  # internal tables (_sync_info)
+            columns.setdefault(table, []).append(column)
+        self._columns = columns  # atomic swap; readers never see a partial dict
+
+    def _build_search_indexes(self) -> None:
+        """Build BM25 sidecars for datasets under the size gate."""
+        indexes: dict[str, _SearchIndex] = {}
+        for name in self._columns:
+            count = self._row_count(name)
+            if count > self._search_max_rows:
+                logger.info(
+                    "No search index for %s: %d rows > MCP_SEARCH_MAX_ROWS=%d",
+                    name, count, self._search_max_rows,
+                )
+                continue
+            result = self._con.execute(f"SELECT * FROM {_quote(name)}")
+            cols = [d[0] for d in result.description]
+            rows = [dict(zip(cols, r)) for r in result.fetchall()]
+            indexes[name] = _SearchIndex(rows)
+            logger.info("BM25 index built for %s: %d rows", name, count)
+        self._search = indexes
+
+    def _row_count(self, name: str) -> int:
+        return self._con.execute(
+            f"SELECT count(*) FROM {_quote(name)}").fetchone()[0]
+
+    def _synced_at(self) -> str | None:
+        row = self._con.execute("SELECT synced_at FROM _sync_info").fetchone()
+        return row[0].isoformat() if row and row[0] else None
 
     @property
     def dataset_names(self) -> list[str]:
-        return sorted(self._datasets.keys())
+        return sorted(self._columns.keys())
 
-    def get_dataset(self, name: str) -> CsvDataset | None:
-        return self._datasets.get(name)
+    # -- query building --
+    # values are ALWAYS bound parameters; identifiers are validated
+    # against the schema (unknown filter columns are silently ignored,
+    # matching the previous implementation) and quoted
+
+    def _where(self, dataset: str, criteria: dict, fuzzy: bool,
+               literal: bool = False) -> tuple[str, list]:
+        clauses: list[str] = []
+        params: list = []
+        for column, value in criteria.items():
+            if column not in self._columns[dataset]:
+                continue
+            q = _quote(column)
+            if not fuzzy:
+                clauses.append(f"lower({q}) = lower(?)")
+            elif literal:
+                # fallback when the pattern is not valid regex: plain
+                # case-insensitive substring match, mirroring the old
+                # escape-and-retry behavior
+                clauses.append(f"contains(lower({q}), lower(?))")
+            else:
+                clauses.append(f"regexp_matches({q}, ?, 'i')")
+            params.append(str(value))
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        return where, params
+
+    def _rows_to_dicts(self, result) -> list[dict]:
+        cols = [d[0] for d in result.description]
+        return [dict(zip(cols, row)) for row in result.fetchall()]
+
+    def _run_filter(self, dataset_name: str, max_results: int, criteria: dict,
+                    fuzzy: bool, hint: str) -> list[dict]:
+        """Shared body of filter_rows / filter_rows_fuzzy."""
+        if dataset_name not in self._columns:
+            return [{"error": f"Dataset not found: {dataset_name}",
+                     "available": self.dataset_names}]
+        cursor = self._con.cursor()
+        try:
+            where, params = self._where(dataset_name, criteria, fuzzy)
+            table = _quote(dataset_name)
+            try:
+                # LIMIT max+1: one extra row cheaply detects truncation
+                result = cursor.execute(
+                    f"SELECT * FROM {table}{where} LIMIT {int(max_results) + 1}",
+                    params,
+                )
+                rows = self._rows_to_dicts(result)
+            except duckdb.Error:
+                if not fuzzy:
+                    raise
+                # invalid regex for duckdb's RE2 -- retry as literal text
+                where, params = self._where(dataset_name, criteria, fuzzy,
+                                            literal=True)
+                result = cursor.execute(
+                    f"SELECT * FROM {table}{where} LIMIT {int(max_results) + 1}",
+                    params,
+                )
+                rows = self._rows_to_dicts(result)
+
+            if len(rows) > max_results:
+                total = cursor.execute(
+                    f"SELECT count(*) FROM {table}{where}", params).fetchone()[0]
+                rows = rows[:max_results]
+                rows.append({
+                    "_truncated": True,
+                    "_total_matches": total,
+                    "_returned": max_results,
+                    "_message": (
+                        f"Showing {max_results} of {total} matches. {hint}"
+                    ),
+                })
+            return rows
+        finally:
+            cursor.close()
+
+    # -- public query surface (contracts unchanged) --
 
     def list_datasets(self) -> dict:
-        """Return metadata about all loaded CSV datasets.
+        """Metadata for all datasets, plus data freshness.
 
-        Output (example with two loaded CSVs)::
-
-            {
-                "datasets": {
-                    "Entitlements": {
-                        "columns": ["ResourceID", "JOBTITLE", "OU", ...],
-                        "row_count": 54210,
-                    },
-                    "Resources": {
-                        "columns": ["ResourceID", "name", "DESCRIPTION", ...],
-                        "row_count": 820,
-                    },
-                },
-                "total_datasets": 2,
-            }
-
-        Returns ``{"message": "No CSV files found ..."}`` when empty.
+        Output shape matches the previous implementation, with one
+        addition: synced_at reports when the data was last ingested.
         """
-        if not self._datasets:
+        if not self._columns:
             return {"message": "No CSV files found in the docs directory."}
         return {
             "datasets": {
                 name: {
-                    "columns": ds.columns,
-                    "row_count": len(ds.rows),
+                    "columns": self._columns[name],
+                    "row_count": self._row_count(name),
                 }
-                for name, ds in sorted(self._datasets.items())
+                for name in self.dataset_names
             },
-            "total_datasets": len(self._datasets),
+            "total_datasets": len(self._columns),
+            "synced_at": self._synced_at(),
         }
 
     def search(self, dataset_name: str, query: str, max_results: int = 10) -> list[dict]:
-        """BM25 search on a named dataset.  Delegates to ``CsvDataset.search``.
-
-        Input:  search("Resources", "SAP finance", max_results=2)
-        Output: [
-                    {"ResourceID": "R001", "name": "SAP Finance Reporting",
-                     "DESCRIPTION": "...", "_score": 4.721},
-                    {"ResourceID": "R045", "name": "SAP FI Access",
-                     "DESCRIPTION": "...", "_score": 3.108},
-                ]
-
-        Returns [{"error": "Dataset not found: ...", "available": [...]}]
-        if the dataset name is invalid, or
-        [{"message": "No matching rows found.", "query": "..."}]
-        if nothing scored above 0.
-        """
-        ds = self._datasets.get(dataset_name)
-        if ds is None:
+        """BM25 search -- size-gated (see module docstring)."""
+        if dataset_name not in self._columns:
             return [{"error": f"Dataset not found: {dataset_name}",
                      "available": self.dataset_names}]
-        results = ds.search(query, max_results)
+        index = self._search.get(dataset_name)
+        if index is None:
+            return [{
+                "error": (
+                    f"Dataset {dataset_name} is too large for free-text "
+                    f"search ({self._row_count(dataset_name)} rows)."
+                ),
+                "hint": ("Use filter_dataset, filter_dataset_fuzzy, or "
+                         "count_by_column instead."),
+            }]
+        tokens = _tokenize(query)
+        results: list[dict] = []
+        if tokens:
+            scores = index.bm25.get_scores(tokens)
+            scored = sorted(zip(scores, range(len(index.rows))),
+                            key=lambda x: x[0], reverse=True)
+            for score, i in scored[:max_results]:
+                if score <= 0:
+                    break
+                results.append({**index.rows[i], "_score": round(float(score), 3)})
         if not results:
             return [{"message": "No matching rows found.", "query": query}]
         return results
 
-    def filter_rows(self, dataset_name: str, max_results: int = 100, **criteria: str) -> list[dict]:
-        """Exact-match filter on a named dataset.  Delegates to ``CsvDataset.filter``.
+    def filter_rows(self, dataset_name: str, max_results: int = 100,
+                    **criteria: str) -> list[dict]:
+        """Exact-match filter (case-insensitive), AND across columns."""
+        return self._run_filter(
+            dataset_name, max_results, criteria, fuzzy=False,
+            hint=("Use count_by_column for compact summaries, "
+                  "or add more filter columns to narrow results."),
+        )
 
-        Returns at most *max_results* rows.  When the total number of
-        matches exceeds *max_results*, a metadata dict with
-        ``_truncated=True`` is appended as the last element.
+    def filter_rows_fuzzy(self, dataset_name: str, max_results: int = 100,
+                          **criteria: str) -> list[dict]:
+        """Regex filter (case-insensitive); literal fallback on bad regex."""
+        return self._run_filter(
+            dataset_name, max_results, criteria, fuzzy=True,
+            hint=("Use count_by_column with fuzzy=True for compact "
+                  "summaries, or add more filter columns to narrow results."),
+        )
 
-        Returns an error dict if the dataset name is invalid.
-        """
-        ds = self._datasets.get(dataset_name)
-        if ds is None:
-            return [{"error": f"Dataset not found: {dataset_name}",
-                     "available": self.dataset_names}]
-        rows, total = ds.filter(max_results=max_results, **criteria)
-        if total > max_results:
-            rows.append({
-                "_truncated": True,
-                "_total_matches": total,
-                "_returned": max_results,
-                "_message": (
-                    f"Showing {max_results} of {total} matches. "
-                    f"Use count_by_column for compact summaries, "
-                    f"or add more filter columns to narrow results."
-                ),
-            })
-        return rows
-
-    def filter_rows_fuzzy(self, dataset_name: str, max_results: int = 100, **criteria: str) -> list[dict]:
-        """Regex-match filter on a named dataset.  Delegates to ``CsvDataset.filter_fuzzy``.
-
-        Returns at most *max_results* rows.  When the total number of
-        matches exceeds *max_results*, a metadata dict with
-        ``_truncated=True`` is appended as the last element.
-
-        Returns an error dict if the dataset name is invalid.
-        """
-        ds = self._datasets.get(dataset_name)
-        if ds is None:
-            return [{"error": f"Dataset not found: {dataset_name}",
-                     "available": self.dataset_names}]
-        rows, total = ds.filter_fuzzy(max_results=max_results, **criteria)
-        if total > max_results:
-            rows.append({
-                "_truncated": True,
-                "_total_matches": total,
-                "_returned": max_results,
-                "_message": (
-                    f"Showing {max_results} of {total} matches. "
-                    f"Use count_by_column with fuzzy=True for compact "
-                    f"summaries, or add more filter columns to narrow results."
-                ),
-            })
-        return rows
-
-    def count_by_column(
-        self, dataset_name: str, column: str, fuzzy: bool = False, **criteria: str
-    ) -> list[dict] | dict:
-        """Group-count a column after applying optional filters.
-
-        Delegates to ``CsvDataset.count_by``.  When *fuzzy* is ``True``,
-        filter values are treated as regex patterns (case-insensitive);
-        when ``False`` (default), exact matching is used.
-
-        Commonly used for peer-based recommendations: filter Entitlements
-        by JOBTITLE + OU, then count by ResourceID to rank the most
-        popular access rights.
-
-        Returns an error dict if the dataset or column is invalid.
-        """
-        ds = self._datasets.get(dataset_name)
-        if ds is None:
+    def count_by_column(self, dataset_name: str, column: str,
+                        fuzzy: bool = False, **criteria: str) -> list[dict] | dict:
+        """Group-count a column after optional filters -- one GROUP BY."""
+        if dataset_name not in self._columns:
             return {"error": f"Dataset not found: {dataset_name}",
                     "available": self.dataset_names}
-        if column not in ds.columns:
+        if column not in self._columns[dataset_name]:
             return {"error": f"Column not found: {column}",
-                    "available_columns": ds.columns}
-        return ds.count_by(column, fuzzy=fuzzy, **criteria)
+                    "available_columns": self._columns[dataset_name]}
+        cursor = self._con.cursor()
+        try:
+            q = _quote(column)
+
+            def run(literal: bool):
+                where, params = self._where(dataset_name, criteria, fuzzy, literal)
+                # skip empty values, like the previous implementation
+                where += (" AND " if where else " WHERE ")
+                where += f"({q} IS NOT NULL AND {q} <> '')"
+                return cursor.execute(
+                    f"SELECT {q} AS value, count(*) AS count "
+                    f"FROM {_quote(dataset_name)}{where} "
+                    f"GROUP BY {q} ORDER BY count DESC, value",
+                    params,
+                ).fetchall()
+
+            try:
+                rows = run(literal=False)
+            except duckdb.Error:
+                if not fuzzy:
+                    raise
+                rows = run(literal=True)
+            return [{"value": value, "count": count} for value, count in rows]
+        finally:
+            cursor.close()
 
     def get_distinct_values(self, dataset_name: str, column: str) -> list[str] | dict:
-        """Return sorted distinct values for a column in a dataset.
-
-        Useful for low-cardinality columns (OU, AREANAME, etc.) where
-        listing all options is practical.
-
-        Input:  get_distinct_values("Entitlements", "OU")
-        Output: ["Engineering", "Finance", "HR", "Marketing"]
-
-        Returns an error dict if the dataset or column is invalid.
-        """
-        ds = self._datasets.get(dataset_name)
-        if ds is None:
+        """Sorted distinct non-empty values of a column."""
+        if dataset_name not in self._columns:
             return {"error": f"Dataset not found: {dataset_name}",
                     "available": self.dataset_names}
-        if column not in ds.columns:
+        if column not in self._columns[dataset_name]:
             return {"error": f"Column not found: {column}",
-                    "available_columns": ds.columns}
-        return ds.distinct(column)
+                    "available_columns": self._columns[dataset_name]}
+        cursor = self._con.cursor()
+        try:
+            q = _quote(column)
+            rows = cursor.execute(
+                f"SELECT DISTINCT {q} FROM {_quote(dataset_name)} "
+                f"WHERE {q} IS NOT NULL AND {q} <> '' ORDER BY {q}"
+            ).fetchall()
+            return [row[0] for row in rows]
+        finally:
+            cursor.close()
