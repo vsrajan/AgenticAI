@@ -106,3 +106,42 @@ Key points:
 - **Auth gate on everything except /health** -- static bearer token, pluggable for Entra later
 - **Sessions come first** -- `POST /sessions` returns the session id both flows use
 - **Agent graph and MCP server unchanged** -- shown as single blocks; see diagrams 2 and 3 for their internals
+
+## 6. AKS Deployment Topology
+
+The production deployment shape on managed AKS, drawn against the full
+`P1.1` stack (streamable-http transport, P0 DuckDB layer, P3.1 Redis
+session state, page-level retrieval). For the full analysis -- per-tier
+sizing, the hop-by-hop latency budget, and what AKS deliberately does
+not solve -- see [aks.md](aks.md).
+
+> Source: [06_aks_topology.excalidraw](06_aks_topology.excalidraw)
+
+What the diagram shows:
+
+- **Ingress** (yellow) -- TLS termination; the `/stream` route needs
+  SSE tuning (buffering off, 300 s read timeout, no gzip)
+- **agent-api Deployment** (blue) -- replicas 2-3 behind plain
+  round-robin; no sticky routing needed because P3.1 moved sessions,
+  turn locks, and checkpoints into shared Redis
+- **mcp-server Deployment** (green) -- replicas 2 with a CPU HPA;
+  stateless streamable-http means any pod answers any tool call; the
+  DuckDB cache is an emptyDir rebuilt from source (readiness-gated
+  ~10 s cold ingest)
+- **External services** (right) -- Azure OpenAI (the throughput wall:
+  quota, not pods, caps turns/minute), Azure Cache for Redis (the
+  P3.1 session store; plain commands, so any tier works), Azure
+  SQL/Postgres (the production entitlement source via DatabaseSource)
+- **Key Vault** (bottom) -- all secrets via the CSI driver; workload
+  identity retires the Azure OpenAI API key later
+
+Key points:
+- **Both tiers scale horizontally** -- the transport switch unlocked
+  the MCP tier, P3.1 unlocked the agent tier
+- **The cluster buys resilience and milliseconds; the quota owns the
+  seconds** -- ~95% of a turn is Azure OpenAI time, so E2E tuning
+  effort goes to the token axis (P1.1 result sizes, KEEP_LAST_N,
+  P1.3 prompt caching)
+- **Readiness vs liveness matters** -- /health pings Redis (right for
+  readiness, wrong for liveness: a Redis blip must not restart the
+  fleet)

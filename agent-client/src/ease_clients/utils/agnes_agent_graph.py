@@ -222,8 +222,8 @@ You are the Knowledgebase specialist for an Access Governance assistant. You ans
 === AVAILABLE TOOLS ===
 
 - list_topics — lists every available documentation topic and its document paths. Call this first if you have not seen the topic structure yet in this conversation.
-- search_docs(query) — full-text search across all documents. Returns ranked results with snippets and page_path values.
-- read_page(page_path) — retrieves the complete text of a document. The text contains [Page N] markers so you can identify exactly which PDF page each piece of information comes from.
+- search_docs(query) — full-text search across all documents at PAGE level. Each result names the specific page that matched (page_path + page number + a snippet from that page).
+- read_page(page_path, pages) — retrieves document text with [Page N] markers. PREFER passing pages: the page a search hit pointed at (pages='3') or a small range around it (pages='2-4'). Omit pages only when you genuinely need the entire document.
 - hand_off_to_router(reason) — hand the conversation back to the router if the user's question is outside your expertise.
 
 === WHEN TO HAND OFF ===
@@ -240,10 +240,10 @@ If the user's message contains BOTH a documentation question AND a data question
 === SEARCH STRATEGY ===
 
 1. Call search_docs with the user's question (try different phrasings if the first search returns few results).
-2. For every relevant result, call read_page to get the full content — snippets from search_docs are too short for a thorough answer.
-3. Read the [Page N] markers in the returned text to identify the exact pages that contain the answer.
-4. Synthesise a clear answer and cite every fact with its document and page number.
-5. If the answer spans multiple documents, read each one and combine the information.
+2. For every relevant result, call read_page with the hit page plus a little surrounding context (e.g. a hit on page 3 -> pages='2-4') — snippets alone are too short for a thorough answer, and whole documents waste context.
+3. If the returned pages reference other sections you need, read those pages too; fall back to the full document (omit pages) only when the ranges prove insufficient.
+4. Synthesise a clear answer and cite every fact with its document and page number (the [Page N] markers in the returned text).
+5. If the answer spans multiple documents, read the relevant pages of each and combine the information.
 
 === CITATIONS (MANDATORY) ===
 
@@ -257,7 +257,7 @@ Rules:
 - Cite immediately after each fact or paragraph.
 - If information spans multiple pages, cite the range.
 - If multiple documents are used, cite each one where referenced.
-- ALWAYS call read_page to get full content — search snippets alone are not sufficient for accurate page-level citations.
+- ALWAYS call read_page for the pages you cite — search snippets alone are not sufficient for accurate page-level citations.
 - Never omit citations for documentation-sourced information.
 
 === OUTPUT ===
@@ -821,20 +821,29 @@ def build_graph(llm, all_tools):
 def _get_mcp_server_config() -> dict:
     """Build MCP server connection config from env vars.
 
-    sse   -- needs MCP_SERVER_URL (e.g. http://host:8000/sse); when
-             MCP_SERVER_TOKEN is set it is sent as a bearer token so
-             the server can authenticate this agent deployment
+    streamable-http -- the default HTTP transport. Needs MCP_SERVER_URL
+             (e.g. http://host:8000/mcp); when MCP_SERVER_TOKEN is set
+             it is sent as a bearer token so the server can
+             authenticate this agent deployment
+    sse   -- legacy HTTP transport, kept for rollback. Same env vars
+             (URL path is /sse instead of /mcp)
     stdio -- needs MCP_SERVER_COMMAND + MCP_SERVER_ARGS (no auth: the
              server runs as a local child process)
+
+    MCP_TRANSPORT accepts hyphen or underscore spellings
+    (streamable-http / streamable_http); the adapter library itself
+    expects the underscore form in the connection dict.
     """
     server_name = os.environ.get("MCP_SERVER_NAME", "access-governance-docs")
-    transport = os.environ.get("MCP_TRANSPORT", "sse").lower()
+    transport = os.environ.get("MCP_TRANSPORT", "streamable-http").lower().replace("_", "-")
 
-    if transport == "sse":
-        url = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8000/sse")
+    if transport in ("streamable-http", "sse"):
+        default_path = "/mcp" if transport == "streamable-http" else "/sse"
+        url = os.environ.get("MCP_SERVER_URL", f"http://127.0.0.1:8000{default_path}")
         connection = {
             "url": url,
-            "transport": "sse",
+            # the adapter's literal is underscore-spelled: streamable_http
+            "transport": "streamable_http" if transport == "streamable-http" else "sse",
         }
         # this deployment's MCP credential -- the server identifies the
         # agent by which token it presents, so no name is sent here.
@@ -843,8 +852,8 @@ def _get_mcp_server_config() -> dict:
         if token:
             connection["headers"] = {"Authorization": f"Bearer {token}"}
         logger.info(
-            "MCP server=%s transport=sse url=%s auth=%s",
-            server_name, url, "bearer" if token else "off",
+            "MCP server=%s transport=%s url=%s auth=%s",
+            server_name, transport, url, "bearer" if token else "off",
         )
         return {server_name: connection}
 
@@ -867,7 +876,8 @@ def _get_mcp_server_config() -> dict:
         }
 
     raise ValueError(
-        f"Unsupported MCP_TRANSPORT={transport!r}. Use 'sse' or 'stdio'."
+        f"Unsupported MCP_TRANSPORT={transport!r}. "
+        "Use 'streamable-http', 'sse', or 'stdio'."
     )
 
 

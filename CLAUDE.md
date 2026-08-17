@@ -28,7 +28,7 @@ agent-client/data/
   Incidents.csv       — Sample ServiceNow-style incident data (12 incidents)
 
 mcp-server/src/mcp_docs_server/
-  server.py      — FastMCP server (12 tools over SSE/stdio)
+  server.py      — FastMCP server (12 tools over streamable-http/sse/stdio)
   auth.py        — per-agent bearer-token auth for HTTP transports (TokenVerifier)
   pdf_indexer.py — PDF → per-page BM25 index (DocIndex)
   csv_store.py   — CSV → in-memory DataFrame (CsvStore)
@@ -38,7 +38,13 @@ docs/
   agent_api.md    — beginner-oriented guide to the HTTP API layer
   entra_auth_guide.md — Entra ID implementation guide (client->agent + agent->MCP)
   PerformanceRecommendations.md — prod-scale performance analysis + prioritized plan
-  architecture_excalidraw.md + 0*.excalidraw — Excalidraw diagrams (05 = API flows)
+  aks.md          — AKS deployment analysis (topology, per-tier sizing, E2E latency budget)
+  deploy.md       — deployment plan: podman local builds (registry-free), Helm chart, GitLab CI kaniko, dev->test->uat->prod
+  async.md        — Python async IO tutorial (8 runnable samples) + walkthrough of the agent's async code (spinner, astream_events)
+  langgraph.md    — LangGraph tutorial (7 runnable samples, no Azure needed) + walkthrough of build_graph and the event stream
+  bm25.md         — PDF extraction + BM25 search tutorial (5 runnable samples) + walkthrough of pdf_indexer.py
+  duckdb.md       — parquet/DuckDB/MCP-tools tutorial (6 runnable samples) + walkthrough of the data path
+  architecture_excalidraw.md + 0*.excalidraw — Excalidraw diagrams (05 = API flows, 06 = AKS topology)
 ```
 
 ## Architecture
@@ -98,7 +104,10 @@ Required env vars: `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENA
 All config is read from the single gitignored `agent-client/.env`; `.env.example`
 is the complete committed template (agent + API settings).
 
-MCP transport: SSE (default, set `MCP_SERVER_URL`) or stdio (set `MCP_SERVER_COMMAND` + `MCP_SERVER_ARGS`)
+MCP transport: streamable-http (default, set `MCP_SERVER_URL` to the /mcp
+endpoint; stateless mode via `MCP_STATELESS_HTTP=true` so replicas can sit
+behind a load balancer), sse (legacy HTTP, kept for rollback), or stdio (set
+`MCP_SERVER_COMMAND` + `MCP_SERVER_ARGS`). See docs/streamable-http.md.
 
 MCP auth: the server requires a bearer token per agent on HTTP transports
 (`MCP_AUTH=static` fail-closed, `MCP_AUTH_TOKENS=name:token,...`; `none` to
@@ -141,6 +150,16 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
 - Added beginner-oriented API guide (docs/agent_api.md) and Excalidraw API-flow diagram (docs/05_agent_api_flow.excalidraw)
 - Merged the API layer into the main manifests: fastapi/uvicorn deps + agent-api script in pyproject.toml, API settings in .env.example (the temporary pyproject_api.toml / .env_api supersets were removed)
 - Restructured the package to match the server deployment: agent_client -> ease_clients, shared internals moved to ease_clients/utils (llm.py, scanner.py, incident_sources.py, and agent.py renamed to agnes_agent_graph.py); entry points and loggers renamed accordingly
+- Switched the default MCP transport from sse to streamable-http (branch streamable-http): client _get_mcp_server_config gains a streamable_http branch (default URL /mcp, same bearer-token header), server passes MCP_STATELESS_HTTP (default true) to FastMCP so replicas can run behind a load balancer, sse kept as legacy rollback, auth unchanged (the gate already covered both HTTP transports). See docs/streamable-http.md. tests_api now 40
+- Implemented P0 performance work (docs/P0.md, branch Performance-P0, rebased onto streamable-http): CsvStore reworked onto embedded DuckDB (persisted MCP_DB_PATH file, warm starts skip ingest, atomic fingerprint-based refresh + background sweeper, size-gated BM25 via MCP_SEARCH_MAX_ROWS), pluggable ingestion in data_sources.py (CsvDataSource + DatabaseSource stub for Azure SQL/Postgres), per-tool took=ms logging on the server, per-node/per-turn timing in AgentService. All 5M-row acceptance targets met (25ms filtered group-by, 0.04s warm start, 108MB RSS). mcp-server tests now 35
+- Added ParquetDataSource -- the production data path (docs/P0.md section 11.9): Spark/Databricks parquet exports staged locally from Azure Storage (az cli, service principal) load via MCP_DATA_SOURCE=parquet + MCP_PARQUET_SOURCES=Name=glob pairs. Datasets are folder-of-part-files globs (markers excluded), every column cast to VARCHAR so the string-based tool contract is unchanged, mtime/size fingerprints drive the same atomic refresh cycle; az:// URLs accepted for a future direct-read mode (duckdb azure extension -- blocked in the dev pod, bake into the AKS image later). Verified live over streamable-http + auth. mcp-server tests now 53 (18 new)
+- Implemented P1.1 page-level PDF retrieval (docs/P1.1.md, branch P1.1, based on Performance-P0): DocIndex indexes one BM25 entry per page, search_docs hits carry the page number with page-local snippets, read_page gains a pages selection ("3" / "2-5", empty = full document for back compat), KNOWLEDGEBASE_PROMPT steers to page ranges. Measured 40.4x smaller tool results for single-page reads on a 40-page doc. mcp-server tests now 52
+- Added AKS deployment analysis (docs/aks.md + Excalidraw diagram 06): two-tier topology on managed AKS against the full P1.1 stack -- agent-api replicas 2-3 (unlocked by P3.1, plain round-robin), mcp-server replicas 2 + CPU HPA (unlocked by stateless streamable-http), Azure Cache for Redis, ingress SSE tuning, readiness-vs-liveness probe guidance, hop-by-hop E2E latency budget (Azure OpenAI quota owns ~95% of turn time; topology buys ms + resilience), sizing starting point, and the follow-up register (P1.2, P1.3, P3.2, /livez)
+- Added deployment implementation plan (docs/deploy.md, plan only): RHEL processes stay the dev loop (no docker-compose ever); images built without Docker (podman locally for smoke tests, az acr build / GitLab CI kaniko for real artifacts); ONE Helm chart + four values files (dev/test/uat/prod) with the values-vs-Key-Vault mapping for every env var; GitLab CI pipeline (test -> build -> deploy with manual gates, same chart+SHA promoted through all clusters, environment-scoped credentials); per-environment validation incl. the in-cluster P3.1 rig; helm rollback story
+- Added async IO tutorial (docs/async.md): part 1 builds the concepts for a novice (coroutines/await, event loop + gather, tasks, cancellation, async generators, async with, asyncio.Lock, never-block-the-loop) with 8 standalone runnable samples -- all verified; part 2 maps each concept onto agnes_agent_graph.py line by line (cli.py's asyncio.run entry, ainvoke in nodes, the astream_events consumer, the Spinner's create_task / polite sleep / cancel-then-await lifecycle, the single-thread spinner+tokens timeline) plus the API-layer parallels (composed async generators to SSE, the per-session lock, the sweeper task)
+- Added LangGraph tutorial (docs/langgraph.md, companion to async.md): part 1 builds StateGraph concepts with 7 standalone runnable samples needing no Azure/MCP (state + partial updates, the messages reducer, conditional edges, the tool-loop cycle, checkpointer/thread_id sessions, astream, astream_events with GenericFakeChatModel producing real token events offline) -- all verified; part 2 walks build_graph line by line (AgentState's two merge behaviors, node factories incl. the never-executed routing/handoff tool trick, the tool split, every edge mapped to its design decision, supersteps/checkpoints, and the event-emission model: metadata.langgraph_node inheritance vs the event name filter the P0 timing keys on)
+- Added PDF/BM25 tutorial (docs/bm25.md, third volume after async.md and langgraph.md): part 1 builds the concepts with 5 standalone runnable samples in the mcp-server env (PDF-as-drawing-instructions + blank-page numbering, the regex tokenizer and the no-stemming lexical gap, hand-rolled TF-IDF, BM25's saturation and length-normalization fixes shown empirically, and the whole-doc-vs-page granularity demo that motivates P1.1) -- all verified; part 2 walks pdf_indexer.py (extraction, the parallel corpus/_index_keys lists, the density-window snippet, fuzzy path resolution, page-range reads with LLM-facing structured errors) and closes on the scale story + the lexical boundary that vector.md's hybrid design addresses
+- Added parquet/DuckDB/MCP-tools tutorial (docs/duckdb.md, fourth volume): part 1 builds the data-side concepts with 6 standalone runnable samples in the mcp-server env (embedded file-backed DuckDB, querying parquet in place, Spark part-file globs + the COLUMNS(*)::VARCHAR cast, atomic CREATE OR REPLACE swaps gated by mtime/size fingerprints, the two SQL-safety rules for LLM-supplied input, and a minimal FastMCP tool with an error-message-as-instruction) -- all verified; part 2 walks data_sources.py (the DataSource split, ParquetDataSource hardening), csv_store.py (threads-not-asyncio concurrency, cursor-per-call, the LIMIT max+1 truncation trick, the size-gated BM25 sidecar), and server.py (docstrings as prompt engineering, _caller audit identity, the _timed half of the P0 instrumentation), closing on the measured P0 numbers
 
 ## General instructions
 

@@ -41,14 +41,21 @@ def _chunk_event(text):
 
 
 def _node_start_event(node):
-    """A chain start event for a graph node."""
-    return {"event": "on_chain_start", "metadata": {"langgraph_node": node}, "data": {}}
+    """A chain start event for a graph node.
+
+    name == the node name marks the node's own runnable (child
+    runnables inherit the metadata but carry their own name), which is
+    what the per-node timing keys on.
+    """
+    return {"event": "on_chain_start", "name": node,
+            "metadata": {"langgraph_node": node}, "data": {}}
 
 
 def _node_end_event(node, messages):
     """A chain end event carrying a completed node's output messages."""
     return {
         "event": "on_chain_end",
+        "name": node,
         "metadata": {"langgraph_node": node},
         "data": {"output": {"messages": messages}},
     }
@@ -303,9 +310,12 @@ def test_stream_file_logs_graph_execution(tmp_path):
     assert f"--- turn" in text and f"session {sid}" in text  # turn header
     assert f"[HumanMessage]  (node: input, session: {sid})" in text
     assert "hello there" in text
-    assert f"[AIMessage]  (node: knowledgebase_agent, session: {sid})" in text
+    # the end event is paired with its start, so the entry carries a duration
+    assert f"[AIMessage]  (node: knowledgebase_agent, session: {sid}, took=" in text
     assert "-> tool_call: search_docs(" in text
     assert "final answer" in text
+    # per-turn summary with the agent-vs-tools split
+    assert "--- turn done in" in text and "agent nodes" in text
 
 
 def test_stream_file_reset_on_service_start(tmp_path):
@@ -346,6 +356,51 @@ def test_mcp_config_without_token_sends_no_headers(monkeypatch):
     monkeypatch.delenv("MCP_SERVER_TOKEN", raising=False)
     connection = _get_mcp_server_config()["access-governance-docs"]
     assert "headers" not in connection
+
+
+def test_mcp_config_defaults_to_streamable_http(monkeypatch):
+    # no MCP_TRANSPORT set -> streamable-http on the /mcp endpoint;
+    # the connection dict uses the adapter's underscore spelling
+    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+
+    monkeypatch.delenv("MCP_TRANSPORT", raising=False)
+    monkeypatch.delenv("MCP_SERVER_URL", raising=False)
+    monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
+    monkeypatch.delenv("MCP_SERVER_TOKEN", raising=False)
+    connection = _get_mcp_server_config()["access-governance-docs"]
+    assert connection["transport"] == "streamable_http"
+    assert connection["url"] == "http://127.0.0.1:8000/mcp"
+
+
+def test_mcp_config_streamable_http_attaches_bearer_token(monkeypatch):
+    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+
+    monkeypatch.setenv("MCP_TRANSPORT", "streamable-http")
+    monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
+    monkeypatch.setenv("MCP_SERVER_TOKEN", "tok123")
+    connection = _get_mcp_server_config()["access-governance-docs"]
+    assert connection["transport"] == "streamable_http"
+    assert connection["headers"] == {"Authorization": "Bearer tok123"}
+
+
+def test_mcp_config_accepts_underscore_spelling(monkeypatch):
+    # MCP_TRANSPORT=streamable_http (underscore) is normalized
+    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+
+    monkeypatch.setenv("MCP_TRANSPORT", "streamable_http")
+    monkeypatch.delenv("MCP_SERVER_URL", raising=False)
+    monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
+    connection = _get_mcp_server_config()["access-governance-docs"]
+    assert connection["transport"] == "streamable_http"
+    assert connection["url"].endswith("/mcp")
+
+
+def test_mcp_config_rejects_unknown_transport(monkeypatch):
+    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+
+    monkeypatch.setenv("MCP_TRANSPORT", "carrier-pigeon")
+    with pytest.raises(ValueError, match="streamable-http"):
+        _get_mcp_server_config()
 
 
 # -- Authenticators --
