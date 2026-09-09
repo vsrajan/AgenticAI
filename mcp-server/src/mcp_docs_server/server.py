@@ -271,7 +271,8 @@ def search_dataset(dataset: str, query: str, max_results: int = 10) -> list[dict
 
 @mcp.tool()
 @_timed
-def filter_dataset(dataset: str, filters: dict[str, str], max_results: int = 100) -> list[dict]:
+def filter_dataset(dataset: str, filters: dict[str, str], max_results: int = 100,
+                   columns: list[str] | None = None) -> list[dict]:
     """Filter rows in a CSV dataset by exact column values (case-insensitive).
 
     Returns up to max_results matching rows. When the total matches exceed
@@ -281,20 +282,31 @@ def filter_dataset(dataset: str, filters: dict[str, str], max_results: int = 100
 
     Use get_column_values first to discover valid filter values.
 
+    PASS columns whenever you only need a few fields. Rows otherwise carry
+    every column, and in a per-assignment dataset the person's attributes
+    repeat identically on every row — asking for the 3 fields you will
+    show is far smaller than the whole row.
+
     Args:
         dataset: Name of the dataset (from list_datasets).
         filters: Column-value pairs to match, e.g. {"ou": "Finance", "location": "London"}.
         max_results: Maximum rows to return (default 100).
+        columns: Optional list of columns to return, e.g.
+                 ["ResourceID", "ResourceName"]. Omit for every column.
+                 An unknown name is an error listing the valid columns.
     """
-    logger.info("filter_dataset caller=%s dataset=%r filters=%r max_results=%d", _caller(), dataset, filters, max_results)
-    results = csv_store.filter_rows(dataset, max_results=max_results, **filters)
+    logger.info("filter_dataset caller=%s dataset=%r filters=%r max_results=%d columns=%r",
+                _caller(), dataset, filters, max_results, columns)
+    results = csv_store.filter_rows(dataset, max_results=max_results,
+                                    columns=columns, **filters)
     logger.info("filter_dataset returned %d rows", len(results))
     return results
 
 
 @mcp.tool()
 @_timed
-def filter_dataset_fuzzy(dataset: str, filters: dict[str, str], max_results: int = 100) -> list[dict]:
+def filter_dataset_fuzzy(dataset: str, filters: dict[str, str], max_results: int = 100,
+                         columns: list[str] | None = None) -> list[dict]:
     """Filter rows in a CSV dataset using regex pattern matching (case-insensitive).
 
     Unlike filter_dataset (exact match), this performs regex matching so partial
@@ -314,9 +326,14 @@ def filter_dataset_fuzzy(dataset: str, filters: dict[str, str], max_results: int
         dataset: Name of the dataset (from list_datasets).
         filters: Column-regex pairs to match, e.g. {"JOBTITLE": "finance", "OU": "london"}.
         max_results: Maximum rows to return (default 100).
+        columns: Optional list of columns to return, e.g.
+                 ["ResourceID", "ResourceName"]. Omit for every column.
+                 An unknown name is an error listing the valid columns.
     """
-    logger.info("filter_dataset_fuzzy caller=%s dataset=%r filters=%r max_results=%d", _caller(), dataset, filters, max_results)
-    results = csv_store.filter_rows_fuzzy(dataset, max_results=max_results, **filters)
+    logger.info("filter_dataset_fuzzy caller=%s dataset=%r filters=%r max_results=%d columns=%r",
+                _caller(), dataset, filters, max_results, columns)
+    results = csv_store.filter_rows_fuzzy(dataset, max_results=max_results,
+                                          columns=columns, **filters)
     logger.info("filter_dataset_fuzzy returned %d rows", len(results))
     return results
 
@@ -324,7 +341,7 @@ def filter_dataset_fuzzy(dataset: str, filters: dict[str, str], max_results: int
 @mcp.tool()
 @_timed
 def count_by_column(
-    dataset: str, column: str, filters: dict[str, str] | None = None,
+    dataset: str, column: str | list[str], filters: dict[str, str] | None = None,
     fuzzy: bool = False,
 ) -> list[dict] | dict:
     """Count occurrences of each distinct value in a column, with optional filtering.
@@ -334,6 +351,14 @@ def count_by_column(
     or "how many people have job title Y?" — it returns summary counts instead
     of full rows, keeping responses small.
 
+    column may be a LIST to group by several columns at once, which is how you
+    get an identifier and its label in ONE call instead of counting by id and
+    then looking the names up separately. For example
+    column=["ResourceID", "ResourceName"] returns
+    [{"ResourceID": ..., "ResourceName": ..., "count": N}, ...].
+    Group by several columns only when they describe the same thing (an id and
+    its name); unrelated columns multiply the groups.
+
     When fuzzy=False (default), filters use exact matching.
     When fuzzy=True, filters use regex pattern matching (same as
     filter_dataset_fuzzy), so partial terms and patterns like
@@ -341,7 +366,8 @@ def count_by_column(
 
     Args:
         dataset: Name of the dataset (from list_datasets).
-        column: Column to group and count by (e.g. "SEGMENTNAME", "ResourceID").
+        column: Column to group and count by (e.g. "SEGMENTNAME", "ResourceID"),
+                or a list of columns, e.g. ["ResourceID", "ResourceName"].
         filters: Optional column-value pairs to filter before counting,
                  e.g. {"JOBTITLE": "Software Engineer", "OU": "Finance"}.
         fuzzy: If True, apply regex pattern matching on filter values

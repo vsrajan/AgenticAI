@@ -259,12 +259,36 @@ class CsvStore:
         cols = [d[0] for d in result.description]
         return [dict(zip(cols, row)) for row in result.fetchall()]
 
+    def _select_list(self, dataset: str, columns: list[str] | None) -> str | dict:
+        """Build the SELECT list for a projection, or an error dict.
+
+        columns=None -> "*" (every column, the historical behavior).
+        Unknown names are an ERROR here, deliberately unlike _where,
+        which skips unknown filter columns: a filter that quietly does
+        nothing returns too many rows, but a projection that quietly
+        drops a column would hide data the caller asked for.
+        """
+        if columns is None:
+            return "*"
+        known = self._columns[dataset]
+        unknown = [c for c in columns if c not in known]
+        if unknown:
+            return {"error": f"Column(s) not found: {', '.join(unknown)}",
+                    "available_columns": known}
+        if not columns:
+            return "*"
+        return ", ".join(_quote(c) for c in columns)
+
     def _run_filter(self, dataset_name: str, max_results: int, criteria: dict,
-                    fuzzy: bool, hint: str) -> list[dict]:
+                    fuzzy: bool, hint: str,
+                    columns: list[str] | None = None) -> list[dict]:
         """Shared body of filter_rows / filter_rows_fuzzy."""
         if dataset_name not in self._columns:
             return [{"error": f"Dataset not found: {dataset_name}",
                      "available": self.dataset_names}]
+        select = self._select_list(dataset_name, columns)
+        if isinstance(select, dict):
+            return [select]
         cursor = self._con.cursor()
         try:
             where, params = self._where(dataset_name, criteria, fuzzy)
@@ -272,7 +296,7 @@ class CsvStore:
             try:
                 # LIMIT max+1: one extra row cheaply detects truncation
                 result = cursor.execute(
-                    f"SELECT * FROM {table}{where} LIMIT {int(max_results) + 1}",
+                    f"SELECT {select} FROM {table}{where} LIMIT {int(max_results) + 1}",
                     params,
                 )
                 rows = self._rows_to_dicts(result)
@@ -283,7 +307,7 @@ class CsvStore:
                 where, params = self._where(dataset_name, criteria, fuzzy,
                                             literal=True)
                 result = cursor.execute(
-                    f"SELECT * FROM {table}{where} LIMIT {int(max_results) + 1}",
+                    f"SELECT {select} FROM {table}{where} LIMIT {int(max_results) + 1}",
                     params,
                 )
                 rows = self._rows_to_dicts(result)
@@ -356,45 +380,81 @@ class CsvStore:
         return results
 
     def filter_rows(self, dataset_name: str, max_results: int = 100,
+                    columns: list[str] | None = None,
                     **criteria: str) -> list[dict]:
-        """Exact-match filter (case-insensitive), AND across columns."""
+        """Exact-match filter (case-insensitive), AND across columns.
+
+        columns projects the result to those fields only; None returns
+        every column.
+        """
         return self._run_filter(
             dataset_name, max_results, criteria, fuzzy=False,
             hint=("Use count_by_column for compact summaries, "
                   "or add more filter columns to narrow results."),
+            columns=columns,
         )
 
     def filter_rows_fuzzy(self, dataset_name: str, max_results: int = 100,
+                          columns: list[str] | None = None,
                           **criteria: str) -> list[dict]:
-        """Regex filter (case-insensitive); literal fallback on bad regex."""
+        """Regex filter (case-insensitive); literal fallback on bad regex.
+
+        columns projects the result to those fields only; None returns
+        every column.
+        """
         return self._run_filter(
             dataset_name, max_results, criteria, fuzzy=True,
             hint=("Use count_by_column with fuzzy=True for compact "
                   "summaries, or add more filter columns to narrow results."),
+            columns=columns,
         )
 
-    def count_by_column(self, dataset_name: str, column: str,
+    def count_by_column(self, dataset_name: str, column: str | list[str],
                         fuzzy: bool = False, **criteria: str) -> list[dict] | dict:
-        """Group-count a column after optional filters -- one GROUP BY."""
+        """Group-count one or more columns after optional filters.
+
+        A single column keeps the historical shape: [{value, count}].
+        A list groups by every column and names each field, e.g.
+        ["ResourceID", "ResourceName"] -> [{ResourceID, ResourceName,
+        count}]. Grouping by several columns is how one call returns an
+        identifier together with its label (they are 1:1), instead of
+        needing a second lookup to resolve names.
+        """
         if dataset_name not in self._columns:
             return {"error": f"Dataset not found: {dataset_name}",
                     "available": self.dataset_names}
-        if column not in self._columns[dataset_name]:
-            return {"error": f"Column not found: {column}",
+        multi = not isinstance(column, str)
+        cols = list(column) if multi else [column]
+        if not cols:
+            return {"error": "No column given",
+                    "available_columns": self._columns[dataset_name]}
+        unknown = [c for c in cols if c not in self._columns[dataset_name]]
+        if unknown:
+            return {"error": f"Column(s) not found: {', '.join(unknown)}",
                     "available_columns": self._columns[dataset_name]}
         cursor = self._con.cursor()
         try:
-            q = _quote(column)
+            quoted = [_quote(c) for c in cols]
+            group_by = ", ".join(quoted)
+            # the FIRST column carries the non-empty guard: it is the one
+            # being counted over, and the historical single-column
+            # behavior skipped its empty values
+            first = quoted[0]
+            if multi:
+                select = ", ".join(f"{q} AS {_quote(c)}"
+                                   for q, c in zip(quoted, cols))
+            else:
+                select = f"{first} AS value"
 
             def run(literal: bool):
                 where, params = self._where(dataset_name, criteria, fuzzy, literal)
                 # skip empty values, like the previous implementation
                 where += (" AND " if where else " WHERE ")
-                where += f"({q} IS NOT NULL AND {q} <> '')"
+                where += f"({first} IS NOT NULL AND {first} <> '')"
                 return cursor.execute(
-                    f"SELECT {q} AS value, count(*) AS count "
+                    f"SELECT {select}, count(*) AS count "
                     f"FROM {_quote(dataset_name)}{where} "
-                    f"GROUP BY {q} ORDER BY count DESC, value",
+                    f"GROUP BY {group_by} ORDER BY count DESC, {first}",
                     params,
                 ).fetchall()
 
@@ -404,6 +464,8 @@ class CsvStore:
                 if not fuzzy:
                     raise
                 rows = run(literal=True)
+            if multi:
+                return [dict(zip(cols + ["count"], row)) for row in rows]
             return [{"value": value, "count": count} for value, count in rows]
         finally:
             cursor.close()

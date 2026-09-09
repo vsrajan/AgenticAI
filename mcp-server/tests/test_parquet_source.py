@@ -199,3 +199,43 @@ def test_build_data_source_rejects_unknown_mode(tmp_path, monkeypatch):
     monkeypatch.setenv("MCP_DATA_SOURCE", "carrier-pigeon")
     with pytest.raises(ValueError, match="csv.*parquet|parquet.*csv"):
         build_data_source(tmp_path)
+
+
+def test_enriched_columns_survive_the_varchar_cast(tmp_path):
+    """Denormalized ResourceName / RequestingSystem load and project.
+
+    The Spark export carries the resource label inline on every
+    assignment row so the agent never has to look it up (docs/P0.md
+    section 11.10). They are ordinary string columns, but this pins
+    that the COLUMNS(*)::VARCHAR ingest keeps them intact and that
+    projection + multi-column grouping work over parquet, not just CSV.
+    """
+    folder = tmp_path / "entitlement.parquet"
+    folder.mkdir(parents=True)
+    con = duckdb.connect()
+    con.execute(
+        "COPY (SELECT (1000+i)::BIGINT AS EmployeeID, "
+        "'R-'||(i%3)::VARCHAR AS ResourceID, "
+        "'Resource '||(i%3)::VARCHAR AS ResourceName, "
+        "CASE WHEN i%3=0 THEN 'Murex' ELSE 'SAP' END AS RequestingSystem "
+        f"FROM range(9) t(i)) TO '{folder}/part-00000-tid-x.parquet' (FORMAT parquet)"
+    )
+    con.close()
+    (folder / "_SUCCESS").write_text("")
+
+    source = ParquetDataSource({"Entitlements": str(folder)})
+    store = CsvStore(tmp_path, db_path=str(tmp_path / "p.duckdb"),
+                     refresh_minutes=0, source=source)
+
+    cols = store.list_datasets()["datasets"]["Entitlements"]["columns"]
+    assert "ResourceName" in cols and "RequestingSystem" in cols
+
+    # one call gives the person's access with its label -- no second lookup
+    rows = store.filter_rows("Entitlements", EmployeeID="1000",
+                             columns=["ResourceID", "ResourceName", "RequestingSystem"])
+    assert rows == [{"ResourceID": "R-0", "ResourceName": "Resource 0",
+                     "RequestingSystem": "Murex"}]
+
+    grouped = store.count_by_column("Entitlements", ["ResourceID", "ResourceName"])
+    assert grouped[0]["count"] == 3
+    assert grouped[0]["ResourceName"].startswith("Resource ")

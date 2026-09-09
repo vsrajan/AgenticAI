@@ -240,3 +240,84 @@ def test_concurrent_reads_during_refresh(tmp_path):
     for t in threads:
         t.join()
     assert errors == []
+
+
+# -- projection and multi-column grouping (denormalized Entitlements) --
+#
+# A separate fixture on purpose: the shared `store` above deliberately
+# has no ResourceName, so the tests that rely on it keep covering the
+# pre-denormalization shape (and the agent's fallback path).
+
+ENRICHED_CSV = """\
+EmployeeID,ResourceID,ResourceName,RequestingSystem,JOBTITLE,AREANAME
+1234,R001,Trade Blotter Read,Murex,Senior Software Engineer,Markets
+1234,R002,GL Posting,SAP,Senior Software Engineer,Markets
+9999,R001,Trade Blotter Read,Murex,Risk Analyst,Risk
+8888,R001,Trade Blotter Read,Murex,Senior Software Engineer,Markets
+"""
+
+
+@pytest.fixture()
+def enriched(tmp_path):
+    """Entitlements carrying ResourceName / RequestingSystem inline."""
+    (tmp_path / "Entitlements.csv").write_text(ENRICHED_CSV)
+    return CsvStore(tmp_path, db_path=str(tmp_path / "enriched.duckdb"),
+                    refresh_minutes=0)
+
+
+def test_projection_returns_only_requested_columns(enriched):
+    rows = enriched.filter_rows("Entitlements", EmployeeID="1234",
+                                columns=["ResourceID", "ResourceName"])
+    assert len(rows) == 2
+    assert all(set(r) == {"ResourceID", "ResourceName"} for r in rows)
+    assert {r["ResourceName"] for r in rows} == {"Trade Blotter Read", "GL Posting"}
+
+
+def test_projection_omitted_returns_every_column(enriched):
+    rows = enriched.filter_rows("Entitlements", EmployeeID="1234")
+    assert len(rows[0]) == 6  # unchanged SELECT * behavior
+
+
+def test_projection_unknown_column_is_an_error(enriched):
+    # deliberately unlike filters, where an unknown column is skipped:
+    # a projection that silently dropped a field would hide data
+    rows = enriched.filter_rows("Entitlements", EmployeeID="1234",
+                                columns=["ResourceID", "Nope"])
+    assert "Nope" in rows[0]["error"]
+    assert "ResourceID" in rows[0]["available_columns"]
+
+
+def test_projection_works_with_fuzzy_filters(enriched):
+    rows = enriched.filter_rows_fuzzy("Entitlements", JOBTITLE="engineer",
+                                      columns=["ResourceName"])
+    assert len(rows) == 3
+    assert all(set(r) == {"ResourceName"} for r in rows)
+
+
+def test_count_by_multiple_columns_pairs_id_with_name(enriched):
+    # the whole point: id + label + count in ONE call
+    rows = enriched.count_by_column("Entitlements",
+                                    ["ResourceID", "ResourceName"],
+                                    JOBTITLE="Senior Software Engineer")
+    assert rows == [
+        {"ResourceID": "R001", "ResourceName": "Trade Blotter Read", "count": 2},
+        {"ResourceID": "R002", "ResourceName": "GL Posting", "count": 1},
+    ]
+
+
+def test_count_by_single_column_shape_unchanged(enriched):
+    rows = enriched.count_by_column("Entitlements", "ResourceID")
+    assert rows == [{"value": "R001", "count": 3}, {"value": "R002", "count": 1}]
+
+
+def test_count_by_multiple_columns_unknown_is_an_error(enriched):
+    result = enriched.count_by_column("Entitlements", ["ResourceID", "Bad"])
+    assert "Bad" in result["error"]
+
+
+def test_count_by_multiple_columns_honours_fuzzy_filters(enriched):
+    rows = enriched.count_by_column("Entitlements",
+                                    ["ResourceID", "ResourceName"],
+                                    fuzzy=True, JOBTITLE="engineer|analyst")
+    counts = {r["ResourceID"]: r["count"] for r in rows}
+    assert counts == {"R001": 3, "R002": 1}
