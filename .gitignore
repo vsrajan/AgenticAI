@@ -9,3 +9,7 @@ build/
 .env
 *.duckdb
 *.duckdb.wal
+
+# transient git worktrees created by tooling -- scratch checkouts of this
+# same repo, never project content
+.claude/worktrees/
