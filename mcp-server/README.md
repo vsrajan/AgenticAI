@@ -60,8 +60,18 @@ retrievable for AI agents. Built with
 |---|---|
 | `list_datasets()` | Lists all loaded CSV datasets with their column names and row counts. |
 | `search_dataset(dataset, query, max_results=10)` | Full-text BM25 search across all columns of a named dataset. Returns matching rows ranked by relevance. |
-| `filter_dataset(dataset, filters)` | Filters rows by exact column values (case-insensitive). Accepts a dict of column-value pairs. |
+| `filter_dataset(dataset, filters, max_results=100, columns=None)` | Filters rows by exact column values (values are matched case-insensitively). Accepts a dict of column-value pairs, and an optional `columns` projection. |
+| `filter_dataset_fuzzy(dataset, filters, max_results=100, columns=None)` | Same, but filter values are regex patterns (`"finance\|accounting"`, `"senior.*engineer"`). |
+| `count_by_column(dataset, column, filters=None, fuzzy=False)` | Group-counts one column, or a list of columns, after optional filters. Returns compact `{value, count}` summaries -- prefer it over the filter tools for discovery. |
 | `get_column_values(dataset, column)` | Lists all distinct values in a column. Useful for discovering available OUs, locations, categories, etc. |
+
+Column names are **case-sensitive and validated** everywhere they are
+accepted -- in `filters`, in `columns`, and in `count_by_column`'s
+grouping. An unknown name returns an error naming it plus
+`available_columns`, and no data. It is never silently skipped: a
+filter that quietly did nothing would return every row, which in an
+access-governance answer is one person's entitlements presented as
+another's.
 
 ## Prerequisites
 

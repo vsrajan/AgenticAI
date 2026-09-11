@@ -163,7 +163,12 @@ mcp = FastMCP(
         "summaries instead of full rows. Set fuzzy=True for regex matching. "
         "Only use filter_dataset / filter_dataset_fuzzy when you need "
         "actual row data (e.g. to inspect individual records). "
-        "Use get_column_values to discover what values exist in a column."
+        "Use get_column_values to discover what values exist in a column. "
+        "Column names in filters, projections and grouping are "
+        "CASE-SENSITIVE and are validated: an unknown name returns an "
+        "error naming it plus available_columns, and no data. Take the "
+        "correct name from available_columns and retry the same call -- "
+        "do not drop the filter and do not report 'nothing found'."
     ),
 )
 
@@ -290,6 +295,10 @@ def filter_dataset(dataset: str, filters: dict[str, str], max_results: int = 100
     Args:
         dataset: Name of the dataset (from list_datasets).
         filters: Column-value pairs to match, e.g. {"ou": "Finance", "location": "London"}.
+                 Column names are CASE-SENSITIVE and must exist in the
+                 dataset: an unknown name is an error naming it and
+                 listing the valid columns, and NO rows are returned.
+                 Correct the name and retry -- never drop the filter.
         max_results: Maximum rows to return (default 100).
         columns: Optional list of columns to return, e.g.
                  ["ResourceID", "ResourceName"]. Omit for every column.
@@ -325,6 +334,12 @@ def filter_dataset_fuzzy(dataset: str, filters: dict[str, str], max_results: int
     Args:
         dataset: Name of the dataset (from list_datasets).
         filters: Column-regex pairs to match, e.g. {"JOBTITLE": "finance", "OU": "london"}.
+                 Column names are CASE-SENSITIVE and must exist in the
+                 dataset: an unknown name is an error naming it and
+                 listing the valid columns, and NO rows are returned.
+                 Correct the name and retry -- never drop the filter.
+                 (The case-insensitivity is in the VALUES matched, not
+                 in the column names.)
         max_results: Maximum rows to return (default 100).
         columns: Optional list of columns to return, e.g.
                  ["ResourceID", "ResourceName"]. Omit for every column.
@@ -370,6 +385,12 @@ def count_by_column(
                 or a list of columns, e.g. ["ResourceID", "ResourceName"].
         filters: Optional column-value pairs to filter before counting,
                  e.g. {"JOBTITLE": "Software Engineer", "OU": "Finance"}.
+                 Column names are CASE-SENSITIVE and must exist in the
+                 dataset: an unknown name is an error naming it and
+                 listing the valid columns, and NO counts are returned.
+                 Correct the name and retry -- never drop the filter,
+                 or the counts would cover everyone instead of the
+                 group you asked about.
         fuzzy: If True, apply regex pattern matching on filter values
                instead of exact matching (default False).
     """

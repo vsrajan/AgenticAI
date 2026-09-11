@@ -18,6 +18,19 @@ in one transaction, so readers see the complete old data until the
 commit, then the complete new data. A background sweeper re-checks
 the fingerprint every MCP_DATA_REFRESH_MINUTES.
 
+CONNECTION RULE: a duckdb handle -- the connection OR a cursor --
+must never be used by two threads at once. Both failure modes are
+silent: two threads sharing one handle get each other's result rows
+back, with plausible row counts and no exception. So after __init__,
+self._con is a FACTORY only. Every query runs on its own cursor
+(cursors are ~6us, leak-free, and release the GIL, so they also let
+tool calls genuinely overlap), and the refresh transaction gets a
+dedicated cursor of its own for the whole BEGIN..COMMIT span --
+transaction control is per-connection state, so the BEGIN, the
+source's CREATE OR REPLACE statements and the COMMIT must share one
+handle. Cursors do not see the refresh's uncommitted writes, which
+is what makes the swap atomic from a reader's point of view.
+
 Full-text search is size-gated: BM25 indexes exist only for datasets
 with at most MCP_SEARCH_MAX_ROWS rows (the Resources catalogue).
 Larger datasets (Entitlements at production volume) get a guidance
@@ -34,6 +47,7 @@ import os
 import re
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import duckdb
@@ -100,12 +114,16 @@ class CsvStore:
         # data_sources.build_data_source
         self._source: DataSource = source or build_data_source(docs_dir)
 
-        # refresh writes are serialised by this lock; reads run on
-        # per-call cursors (duckdb allows those concurrently and reads
-        # see committed data only)
+        # refresh WRITERS are serialised by this lock (a foreground
+        # startup refresh vs the sweeper thread). Readers never take
+        # it -- duckdb's MVCC isolation is what protects them, and
+        # making them wait would stall every tool call for the length
+        # of a multi-second rebuild.
         self._refresh_lock = threading.RLock()
 
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        # after this constructor, self._con is only ever used to make
+        # cursors -- see the CONNECTION RULE in the module docstring
         self._con = duckdb.connect(str(db_path))
         self._con.execute(
             "CREATE TABLE IF NOT EXISTS _sync_info "
@@ -130,44 +148,74 @@ class CsvStore:
             )
             thread.start()
 
+    # -- cursors --
+
+    @contextmanager
+    def _cursor(self):
+        """A private duckdb handle for one caller, closed afterwards.
+
+        Every read takes one of these. Never cache or pool the result:
+        a cursor shared between threads corrupts results exactly like a
+        shared connection does (see the module docstring).
+        """
+        cursor = self._con.cursor()
+        try:
+            yield cursor
+        finally:
+            cursor.close()
+
     # -- refresh --
 
     def refresh_if_stale(self) -> bool:
         """Reload from the source if its fingerprint changed.
 
         Returns True when a reload happened. The load runs in one
-        transaction: readers see the old tables until the commit.
+        transaction on a dedicated cursor: readers, who are on cursors
+        of their own, see the old tables until the commit.
         """
         new_fingerprint = self._source.fingerprint()
-        with self._refresh_lock:
-            stored = self._con.execute(
+        with self._refresh_lock, self._cursor() as con:
+            stored = con.execute(
                 "SELECT fingerprint FROM _sync_info").fetchone()
             if stored is not None and stored[0] == new_fingerprint:
                 return False
 
             start = time.perf_counter()
-            self._con.execute("BEGIN")
+            con.execute("BEGIN")
             try:
-                loaded = self._source.load(self._con)
-                # drop datasets that disappeared from the source
-                existing = [r[0] for r in self._con.execute(
+                loaded = self._source.load(con)
+                # drop datasets that disappeared from the source. this
+                # stays INSIDE the transaction: an uncommitted drop is
+                # invisible to readers, so they never hit the window
+                # where the table does not exist
+                existing = [r[0] for r in con.execute(
                     "SELECT table_name FROM information_schema.tables "
                     "WHERE table_schema = 'main'").fetchall()]
                 for table in existing:
                     if not table.startswith("_") and table not in loaded:
-                        self._con.execute(f"DROP TABLE {_quote(table)}")
-                self._con.execute("DELETE FROM _sync_info")
-                self._con.execute(
+                        con.execute(f"DROP TABLE {_quote(table)}")
+                con.execute("DELETE FROM _sync_info")
+                con.execute(
                     "INSERT INTO _sync_info VALUES (?, current_timestamp)",
                     [new_fingerprint],
                 )
-                self._con.execute("COMMIT")
+                con.execute("COMMIT")
             except Exception:
-                self._con.execute("ROLLBACK")
+                con.execute("ROLLBACK")
                 raise
 
-            self._load_schema()
-            self._build_search_indexes()
+            # the data is committed, but our in-memory view of it is
+            # not rebuilt yet. if that rebuild fails, clear the stored
+            # fingerprint so the next sweep retries -- otherwise it
+            # would see "already current" and serve a stale schema and
+            # search index until the source happens to change again
+            try:
+                self._load_schema()
+                self._build_search_indexes()
+            except Exception:
+                con.execute("DELETE FROM _sync_info")
+                raise
+
             logger.info(
                 "Data refresh complete in %.2fs: %s",
                 time.perf_counter() - start,
@@ -188,10 +236,11 @@ class CsvStore:
     # -- schema --
 
     def _load_schema(self) -> None:
-        rows = self._con.execute(
-            "SELECT table_name, column_name FROM information_schema.columns "
-            "WHERE table_schema = 'main' ORDER BY table_name, ordinal_position"
-        ).fetchall()
+        with self._cursor() as cursor:
+            rows = cursor.execute(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                "WHERE table_schema = 'main' ORDER BY table_name, ordinal_position"
+            ).fetchall()
         columns: dict[str, list[str]] = {}
         for table, column in rows:
             if table.startswith("_"):
@@ -202,27 +251,37 @@ class CsvStore:
     def _build_search_indexes(self) -> None:
         """Build BM25 sidecars for datasets under the size gate."""
         indexes: dict[str, _SearchIndex] = {}
-        for name in self._columns:
-            count = self._row_count(name)
-            if count > self._search_max_rows:
-                logger.info(
-                    "No search index for %s: %d rows > MCP_SEARCH_MAX_ROWS=%d",
-                    name, count, self._search_max_rows,
-                )
-                continue
-            result = self._con.execute(f"SELECT * FROM {_quote(name)}")
-            cols = [d[0] for d in result.description]
-            rows = [dict(zip(cols, r)) for r in result.fetchall()]
-            indexes[name] = _SearchIndex(rows)
-            logger.info("BM25 index built for %s: %d rows", name, count)
+        with self._cursor() as cursor:
+            for name in self._columns:
+                count = self._row_count(name, cursor)
+                if count > self._search_max_rows:
+                    logger.info(
+                        "No search index for %s: %d rows > MCP_SEARCH_MAX_ROWS=%d",
+                        name, count, self._search_max_rows,
+                    )
+                    continue
+                result = cursor.execute(f"SELECT * FROM {_quote(name)}")
+                cols = [d[0] for d in result.description]
+                rows = [dict(zip(cols, r)) for r in result.fetchall()]
+                indexes[name] = _SearchIndex(rows)
+                logger.info("BM25 index built for %s: %d rows", name, count)
         self._search = indexes
 
-    def _row_count(self, name: str) -> int:
-        return self._con.execute(
-            f"SELECT count(*) FROM {_quote(name)}").fetchone()[0]
+    def _row_count(self, name: str, cursor=None) -> int:
+        """Row count for one dataset, on the caller's cursor or a fresh one."""
+        if cursor is not None:
+            return cursor.execute(
+                f"SELECT count(*) FROM {_quote(name)}").fetchone()[0]
+        with self._cursor() as own:
+            return own.execute(
+                f"SELECT count(*) FROM {_quote(name)}").fetchone()[0]
 
-    def _synced_at(self) -> str | None:
-        row = self._con.execute("SELECT synced_at FROM _sync_info").fetchone()
+    def _synced_at(self, cursor=None) -> str | None:
+        """When the data was last ingested, or None before the first load."""
+        if cursor is None:
+            with self._cursor() as own:
+                return self._synced_at(own)
+        row = cursor.execute("SELECT synced_at FROM _sync_info").fetchone()
         return row[0].isoformat() if row and row[0] else None
 
     @property
@@ -231,16 +290,40 @@ class CsvStore:
 
     # -- query building --
     # values are ALWAYS bound parameters; identifiers are validated
-    # against the schema (unknown filter columns are silently ignored,
-    # matching the previous implementation) and quoted
+    # against the schema and quoted. an unknown name -- in a filter, a
+    # projection, or a group-by -- is an ERROR, never a silent skip: a
+    # filter that quietly does nothing returns EVERY row, which in an
+    # access governance answer presents one person's entitlements as
+    # another's, indistinguishably from a correct result
+
+    def _unknown_filter_columns(self, dataset: str, criteria: dict) -> list[str]:
+        """Filter column names that do not exist on the dataset."""
+        known = self._columns[dataset]
+        return [column for column in criteria if column not in known]
+
+    def _filter_column_error(self, dataset: str, unknown: list[str]) -> dict:
+        """The error payload for unknown filter columns.
+
+        Shaped as an instruction, not just a complaint: naming the bad
+        column and listing the real ones is what lets an agent correct
+        the call instead of reporting "nothing found" or, worse,
+        retrying without the filter.
+        """
+        return {
+            "error": f"Filter column(s) not found: {', '.join(unknown)}",
+            "available_columns": self._columns[dataset],
+            "hint": ("Column names are case-sensitive. Correct the name "
+                     "from available_columns and retry the same call -- "
+                     "do not drop the filter."),
+        }
 
     def _where(self, dataset: str, criteria: dict, fuzzy: bool,
                literal: bool = False) -> tuple[str, list]:
+        """Build the WHERE clause. Callers validate the column names
+        first (_unknown_filter_columns), so every key here is known."""
         clauses: list[str] = []
         params: list = []
         for column, value in criteria.items():
-            if column not in self._columns[dataset]:
-                continue
             q = _quote(column)
             if not fuzzy:
                 clauses.append(f"lower({q}) = lower(?)")
@@ -263,10 +346,10 @@ class CsvStore:
         """Build the SELECT list for a projection, or an error dict.
 
         columns=None -> "*" (every column, the historical behavior).
-        Unknown names are an ERROR here, deliberately unlike _where,
-        which skips unknown filter columns: a filter that quietly does
-        nothing returns too many rows, but a projection that quietly
-        drops a column would hide data the caller asked for.
+        Unknown names are an ERROR here, the same rule filter columns
+        follow: a projection that quietly dropped a column would hide
+        data the caller asked for, and a filter that quietly did
+        nothing would return rows the caller never asked for.
         """
         if columns is None:
             return "*"
@@ -286,11 +369,19 @@ class CsvStore:
         if dataset_name not in self._columns:
             return [{"error": f"Dataset not found: {dataset_name}",
                      "available": self.dataset_names}]
+        # validate before running anything, so the literal-regex retry
+        # below cannot reach _where with an unvalidated column either.
+        # single-element LIST, not a bare dict: filter_dataset is typed
+        # -> list[dict], and FastMCP validates tool output against that
+        # annotation -- a bare dict becomes a protocol-level ToolError
+        # that aborts the turn instead of a message the agent can act on
+        unknown = self._unknown_filter_columns(dataset_name, criteria)
+        if unknown:
+            return [self._filter_column_error(dataset_name, unknown)]
         select = self._select_list(dataset_name, columns)
         if isinstance(select, dict):
             return [select]
-        cursor = self._con.cursor()
-        try:
+        with self._cursor() as cursor:
             where, params = self._where(dataset_name, criteria, fuzzy)
             table = _quote(dataset_name)
             try:
@@ -325,10 +416,8 @@ class CsvStore:
                     ),
                 })
             return rows
-        finally:
-            cursor.close()
 
-    # -- public query surface (contracts unchanged) --
+    # -- public query surface --
 
     def list_datasets(self) -> dict:
         """Metadata for all datasets, plus data freshness.
@@ -336,19 +425,24 @@ class CsvStore:
         Output shape matches the previous implementation, with one
         addition: synced_at reports when the data was last ingested.
         """
-        if not self._columns:
+        # one snapshot of the schema dict, so the names, their columns
+        # and their counts all describe the same generation of the data
+        # even if a refresh commits while this call is running
+        columns = self._columns
+        if not columns:
             return {"message": "No CSV files found in the docs directory."}
-        return {
-            "datasets": {
-                name: {
-                    "columns": self._columns[name],
-                    "row_count": self._row_count(name),
-                }
-                for name in self.dataset_names
-            },
-            "total_datasets": len(self._columns),
-            "synced_at": self._synced_at(),
-        }
+        with self._cursor() as cursor:
+            return {
+                "datasets": {
+                    name: {
+                        "columns": columns[name],
+                        "row_count": self._row_count(name, cursor),
+                    }
+                    for name in sorted(columns)
+                },
+                "total_datasets": len(columns),
+                "synced_at": self._synced_at(cursor),
+            }
 
     def search(self, dataset_name: str, query: str, max_results: int = 10) -> list[dict]:
         """BM25 search -- size-gated (see module docstring)."""
@@ -432,8 +526,15 @@ class CsvStore:
         if unknown:
             return {"error": f"Column(s) not found: {', '.join(unknown)}",
                     "available_columns": self._columns[dataset_name]}
-        cursor = self._con.cursor()
-        try:
+        # the FILTER columns need the same check as the group-by ones
+        # above. this is the call the peer-recommendation flow leans on,
+        # so a skipped filter here would count the whole company as the
+        # user's peer group. bare dict, matching this method's other
+        # errors and its -> list[dict] | dict annotation
+        unknown_filters = self._unknown_filter_columns(dataset_name, criteria)
+        if unknown_filters:
+            return self._filter_column_error(dataset_name, unknown_filters)
+        with self._cursor() as cursor:
             quoted = [_quote(c) for c in cols]
             group_by = ", ".join(quoted)
             # the FIRST column carries the non-empty guard: it is the one
@@ -467,8 +568,6 @@ class CsvStore:
             if multi:
                 return [dict(zip(cols + ["count"], row)) for row in rows]
             return [{"value": value, "count": count} for value, count in rows]
-        finally:
-            cursor.close()
 
     def get_distinct_values(self, dataset_name: str, column: str) -> list[str] | dict:
         """Sorted distinct non-empty values of a column."""
@@ -478,13 +577,10 @@ class CsvStore:
         if column not in self._columns[dataset_name]:
             return {"error": f"Column not found: {column}",
                     "available_columns": self._columns[dataset_name]}
-        cursor = self._con.cursor()
-        try:
+        with self._cursor() as cursor:
             q = _quote(column)
             rows = cursor.execute(
                 f"SELECT DISTINCT {q} FROM {_quote(dataset_name)} "
                 f"WHERE {q} IS NOT NULL AND {q} <> '' ORDER BY {q}"
             ).fetchall()
             return [row[0] for row in rows]
-        finally:
-            cursor.close()

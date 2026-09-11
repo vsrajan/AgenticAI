@@ -10,6 +10,7 @@ Run:
 
 import os
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -67,10 +68,37 @@ def test_filter_ands_multiple_columns(store):
     assert rows[0]["CITY"] == "Paris"
 
 
-def test_filter_ignores_unknown_columns(store):
-    # matches the previous implementation: unknown filter columns are skipped
+def test_filter_unknown_column_is_an_error(store):
+    # fail closed. skipping the unknown column used to drop the filter
+    # silently and return EVERY row -- one person's access presented as
+    # another's, with no signal that anything went wrong
     rows = store.filter_rows("Entitlements", NOT_A_COLUMN="x", OU="HR")
-    assert len(rows) == 2
+    assert len(rows) == 1
+    assert "NOT_A_COLUMN" in rows[0]["error"]
+    assert rows[0]["available_columns"] == ["ResourceID", "JOBTITLE", "OU", "CITY"]
+    assert "case-sensitive" in rows[0]["hint"]
+
+
+def test_filter_unknown_column_error_is_list_wrapped(store):
+    # filter_dataset is annotated -> list[dict] and FastMCP validates
+    # tool output against that annotation: a bare dict here would be a
+    # protocol-level ToolError that kills the turn, instead of a message
+    # the agent can read and correct
+    rows = store.filter_rows("Entitlements", NOPE="x")
+    assert isinstance(rows, list) and isinstance(rows[0], dict)
+
+
+def test_filter_fuzzy_unknown_column_is_an_error(store):
+    rows = store.filter_rows_fuzzy("Entitlements", JobTitle="analyst")
+    assert len(rows) == 1
+    assert "JobTitle" in rows[0]["error"]  # right name, wrong case
+
+
+def test_filter_unknown_column_wins_over_the_regex_fallback(store):
+    # the invalid-regex retry must not re-enter the query with an
+    # unvalidated column name
+    rows = store.filter_rows_fuzzy("Entitlements", NOT_A_COLUMN="(")
+    assert "NOT_A_COLUMN" in rows[0]["error"]
 
 
 def test_filter_truncation_metadata(store):
@@ -130,6 +158,28 @@ def test_count_by_column_errors(store):
     assert "error" in store.count_by_column("Nope", "JOBTITLE")
     result = store.count_by_column("Entitlements", "NOPE")
     assert "error" in result and "available_columns" in result
+
+
+def test_count_by_column_unknown_filter_column_is_an_error(store):
+    # count_by_column shares _where, so it had the same silent skip.
+    # this is the peer-recommendation call: a dropped filter here
+    # counts the whole company as the user's peer group
+    result = store.count_by_column("Entitlements", "ResourceID", OU_TYPO="Finance")
+    assert "OU_TYPO" in result["error"]
+    assert "available_columns" in result
+
+
+def test_count_by_column_filter_error_is_a_bare_dict(store):
+    # count_by_column is annotated -> list[dict] | dict, and its other
+    # errors are bare dicts; the filter error must match that shape
+    result = store.count_by_column("Entitlements", "ResourceID", NOPE="x")
+    assert isinstance(result, dict) and "error" in result
+
+
+def test_count_by_column_fuzzy_unknown_filter_column_is_an_error(store):
+    result = store.count_by_column("Entitlements", "ResourceID",
+                                   fuzzy=True, jobtitle="analyst")
+    assert "jobtitle" in result["error"]
 
 
 # -- distinct values --
@@ -202,6 +252,40 @@ def test_removed_csv_drops_dataset(tmp_path):
     assert store.dataset_names == ["Entitlements"]
 
 
+def test_failed_index_rebuild_is_retried_on_the_next_sweep(tmp_path):
+    """A rebuild that fails after the commit must not look 'current'.
+
+    The fingerprint is stored inside the load transaction, so a failure
+    in the in-memory rebuild that follows would otherwise leave the data
+    committed, the fingerprint matching, and the schema and search index
+    stale until the source happened to change again.
+    """
+    csv_path = tmp_path / "Entitlements.csv"
+    csv_path.write_text(ENTITLEMENTS_CSV)
+    store = CsvStore(tmp_path, db_path=str(tmp_path / "t.duckdb"),
+                     refresh_minutes=0)
+
+    csv_path.write_text(ENTITLEMENTS_CSV + "R009,New Role,IT,Oslo\n")
+    os.utime(csv_path)
+
+    real = store._build_search_indexes
+    calls = {"n": 0}
+
+    def failing_once():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        return real()
+
+    store._build_search_indexes = failing_once
+    with pytest.raises(RuntimeError):
+        store.refresh_if_stale()
+
+    # the next sweep must actually redo the work, not skip it
+    assert store.refresh_if_stale() is True
+    assert len(store.filter_rows("Entitlements", ResourceID="R009")) == 1
+
+
 def test_empty_csv_is_skipped(tmp_path):
     (tmp_path / "Empty.csv").write_text("a,b,c\n")
     (tmp_path / "Resources.csv").write_text(RESOURCES_CSV)
@@ -225,6 +309,9 @@ def test_concurrent_reads_during_refresh(tmp_path):
             try:
                 store.count_by_column("Entitlements", "OU")
                 store.filter_rows("Entitlements", OU="Finance")
+                # list_datasets is the path that used to run on the
+                # SHARED connection -- it is the reason this test exists
+                store.list_datasets()
             except Exception as exc:  # pragma: no cover - failure path
                 errors.append(exc)
                 return
@@ -240,6 +327,115 @@ def test_concurrent_reads_during_refresh(tmp_path):
     for t in threads:
         t.join()
     assert errors == []
+
+
+# -- thread safety: every handle is private to one caller --
+#
+# Sharing a duckdb handle across threads fails SILENTLY far more often
+# than it raises: threads get each other's result rows back, with
+# plausible row counts and no exception. Asserting "no exception" is
+# therefore not enough -- these tests assert OWNERSHIP of every row
+# returned, which is the property that actually matters here.
+
+OWNERSHIP_CSV_HEADER = "EMPLOYEEID,ResourceID,OU\n"
+OWNERSHIP_ROWS = "".join(
+    f"E{emp:03d},R{emp:03d}-{n},Finance\n"
+    for emp in range(1, 21) for n in range(5)
+)
+
+
+def test_concurrent_filters_never_return_another_callers_rows(tmp_path):
+    """Different filters on different threads, with refreshes running.
+
+    The regression this guards: with a shared handle, roughly a quarter
+    of these calls came back holding a DIFFERENT employee's rows -- full
+    result sets, correct row counts, no exception raised.
+    """
+    csv_path = tmp_path / "Entitlements.csv"
+    csv_path.write_text(OWNERSHIP_CSV_HEADER + OWNERSHIP_ROWS)
+    store = CsvStore(tmp_path, db_path=str(tmp_path / "own.duckdb"),
+                     refresh_minutes=0)
+
+    failures: list[str] = []
+    stop = threading.Event()
+
+    def refresher():
+        i = 0
+        while not stop.is_set():
+            # only ever touches employee 9999, so every assertion below
+            # stays stable while the data underneath is rebuilt
+            csv_path.write_text(
+                OWNERSHIP_CSV_HEADER + OWNERSHIP_ROWS + f"E9999,RX-{i},IT\n")
+            os.utime(csv_path)
+            try:
+                store.refresh_if_stale()
+            except Exception as exc:  # pragma: no cover - failure path
+                failures.append(f"refresh raised {exc!r}")
+                return
+            i += 1
+
+    def reader(employee: str):
+        for _ in range(150):
+            if failures:
+                return
+            try:
+                rows = store.filter_rows(
+                    "Entitlements", EMPLOYEEID=employee,
+                    columns=["EMPLOYEEID", "ResourceID"])
+                owners = {r.get("EMPLOYEEID") for r in rows}
+                if owners != {employee}:
+                    failures.append(
+                        f"{employee} got rows owned by {sorted(owners)}")
+                    return
+                if len(rows) != 5:
+                    failures.append(f"{employee} got {len(rows)} rows, want 5")
+                    return
+
+                counts = store.count_by_column(
+                    "Entitlements", "ResourceID", EMPLOYEEID=employee)
+                if not isinstance(counts, list) or len(counts) != 5:
+                    failures.append(f"{employee} count shape {counts!r}")
+                    return
+
+                meta = store.list_datasets()
+                if "Entitlements" not in meta.get("datasets", {}):
+                    failures.append(f"list_datasets lost the dataset: {meta!r}")
+                    return
+            except Exception as exc:  # pragma: no cover - failure path
+                failures.append(f"{employee} raised {exc!r}")
+                return
+
+    sweeper = threading.Thread(target=refresher)
+    sweeper.start()
+    readers = [
+        threading.Thread(target=reader, args=(f"E{emp:03d}",))
+        for emp in (1, 7, 13, 19)
+    ]
+    for t in readers:
+        t.start()
+    for t in readers:
+        t.join()
+    stop.set()
+    sweeper.join()
+
+    assert failures == []
+
+
+def test_shared_connection_is_only_a_cursor_factory(tmp_path):
+    """No query may run on self._con after construction.
+
+    A structural guard: the silent-corruption failure mode is invisible
+    in a passing functional test, so this pins the invariant in the
+    source itself.
+    """
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src" / "mcp_docs_server" / "csv_store.py"
+    ).read_text()
+    body = source.split("def _cursor", 1)[1]
+    assert "self._con.execute" not in body, (
+        "queries must run on a per-call cursor, not the shared connection"
+    )
 
 
 # -- projection and multi-column grouping (denormalized Entitlements) --
@@ -279,8 +475,8 @@ def test_projection_omitted_returns_every_column(enriched):
 
 
 def test_projection_unknown_column_is_an_error(enriched):
-    # deliberately unlike filters, where an unknown column is skipped:
-    # a projection that silently dropped a field would hide data
+    # same rule filters follow: an unknown column fails closed rather
+    # than silently changing what the caller asked for
     rows = enriched.filter_rows("Entitlements", EmployeeID="1234",
                                 columns=["ResourceID", "Nope"])
     assert "Nope" in rows[0]["error"]
