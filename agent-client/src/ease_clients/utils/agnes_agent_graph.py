@@ -24,6 +24,7 @@ import logging
 import os
 import sys
 import uuid
+from contextlib import AsyncExitStack
 
 from langchain_core.messages import (
     AIMessage,
@@ -33,6 +34,7 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
@@ -1096,56 +1098,65 @@ async def run_agent_loop(on_response=None):
     logger.info("Connecting to MCP server …")
 
     client = MultiServerMCPClient(mcp_config)
-    tools = await client.get_tools()
+    # one held session, not one per tool call -- over stdio the adapter
+    # would otherwise spawn a fresh server subprocess for every call
+    # (docs/single-container-stdio.md section 4.2)
+    stack = AsyncExitStack()
+    session = await stack.enter_async_context(
+        client.session(next(iter(mcp_config))))
+    tools = await load_mcp_tools(session)
     logger.info("Loaded %d MCP tools", len(tools))
 
-    checkpointer = MemorySaver()
-    graph = build_graph(llm, tools)
-    agent = graph.compile(checkpointer=checkpointer)
+    try:
+        checkpointer = MemorySaver()
+        graph = build_graph(llm, tools)
+        agent = graph.compile(checkpointer=checkpointer)
 
-    # unique thread per CLI session for conversation tracking
-    thread_id = uuid.uuid4().hex
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 50}
+        # unique thread per CLI session for conversation tracking
+        thread_id = uuid.uuid4().hex
+        config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 50}
 
-    # reset the stream file for this session so it doesn't grow unboundedly
-    with open(STREAM_FILE, "w", encoding="utf-8") as fh:
-        fh.write(f"Agent stream log -- {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
-        fh.write("=" * 60 + "\n")
+        # reset the stream file for this session so it doesn't grow unboundedly
+        with open(STREAM_FILE, "w", encoding="utf-8") as fh:
+            fh.write(f"Agent stream log -- {datetime.datetime.now():%Y-%m-%d %H:%M:%S}\n")
+            fh.write("=" * 60 + "\n")
 
-    print("\nAccess Governance Assistant")
-    print("=" * 40)
-    print('Type your question below. Type "exit" to quit.\n')
+        print("\nAccess Governance Assistant")
+        print("=" * 40)
+        print('Type your question below. Type "exit" to quit.\n')
 
-    while True:
-        try:
-            user_input = input("🧑 You: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye!")
-            break
+        while True:
+            try:
+                user_input = input("🧑 You: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nGoodbye!")
+                break
 
-        if not user_input:
-            continue
-        if user_input.lower() == "exit":
-            print("Goodbye!")
-            break
+            if not user_input:
+                continue
+            if user_input.lower() == "exit":
+                print("Goodbye!")
+                break
 
-        logger.info("User query: %s", user_input)
+            logger.info("User query: %s", user_input)
 
-        try:
-            answer, streamed = await _stream_response(agent, user_input, config)
-            logger.debug("Agent response: %s", answer)
-            # only print if the answer wasn't already streamed
-            if not streamed:
-                on_response(f"\n🤖 Assistant: {answer}\n")
-        except Exception:
-            logger.exception("Error processing query")
-            on_response(
-                "\nAssistant: Sorry, an error occurred while "
-                "processing your question. Please try again.\n"
-            )
+            try:
+                answer, streamed = await _stream_response(agent, user_input, config)
+                logger.debug("Agent response: %s", answer)
+                # only print if the answer wasn't already streamed
+                if not streamed:
+                    on_response(f"\n🤖 Assistant: {answer}\n")
+            except Exception:
+                logger.exception("Error processing query")
+                on_response(
+                    "\nAssistant: Sorry, an error occurred while "
+                    "processing your question. Please try again.\n"
+                )
 
-    # dump full (untrimmed) history on exit
-    await _dump_history(agent, config)
+        # dump full (untrimmed) history on exit
+        await _dump_history(agent, config)
+    finally:
+        await stack.aclose()
 
 
 async def _stream_response(agent, user_input: str, config: dict) -> tuple[str, bool]:

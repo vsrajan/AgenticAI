@@ -27,7 +27,7 @@ import logging
 import os
 import time
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import AsyncIterator
 
@@ -37,6 +37,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
@@ -106,7 +107,11 @@ class AgentService:
 
     def __init__(self, agent, tool_count: int, checkpointer=None,
                  session_ttl_seconds: float = 3600, max_sessions: int = 500,
-                 stream_file: str = "", store=None):
+                 stream_file: str = "", store=None, mcp_stack=None):
+        # holds the open MCP session (and, on stdio, the server
+        # subprocess). None when the caller supplied its own tools --
+        # the tests do this with a fake agent and never touch MCP.
+        self._mcp_stack = mcp_stack
         self._agent = agent
         self.tool_count = tool_count
         self._checkpointer = checkpointer
@@ -164,9 +169,31 @@ class AgentService:
 
         logger.info("Connecting to MCP server ...")
         client = MultiServerMCPClient(mcp_config)
-        tools = await client.get_tools()
-        logger.info("Loaded %d MCP tools", len(tools))
+        # ONE session held for the life of this process, not one per
+        # tool call. The adapter creates a session on the fly whenever
+        # none is supplied, which is what client.get_tools() does -- over
+        # streamable-http that is a cheap HTTP session, but over stdio it
+        # SPAWNS A FRESH SERVER SUBPROCESS for every tool call, re-running
+        # PDF extraction and the DuckDB open each time. Holding the
+        # session boots the server once, at startup, and every tool call
+        # reuses it. See docs/single-container-stdio.md section 4.2-4.3.
+        # aclose() releases it at shutdown.
+        stack = AsyncExitStack()
+        try:
+            server_name = next(iter(mcp_config))
+            session = await stack.enter_async_context(client.session(server_name))
+            tools = await load_mcp_tools(session)
+            logger.info("Loaded %d MCP tools", len(tools))
+            return await cls._assemble(llm, tools, checkpointer, stack)
+        except BaseException:
+            # never leak the subprocess when later setup fails -- the
+            # Redis fail-fast below raises on an unreachable REDIS_URL
+            await stack.aclose()
+            raise
 
+    @classmethod
+    async def _assemble(cls, llm, tools, checkpointer, mcp_stack) -> "AgentService":
+        """Build the graph and the service around already-loaded tools."""
         ttl_minutes = float(os.environ.get("AGENT_API_SESSION_TTL_MINUTES", "60"))
         max_sessions = int(os.environ.get("AGENT_API_MAX_SESSIONS", "500"))
         stream_file = os.environ.get("AGENT_API_STREAM_FILE", "agent_api_stream.txt")
@@ -188,7 +215,20 @@ class AgentService:
                    session_ttl_seconds=ttl_minutes * 60,
                    max_sessions=max_sessions,
                    stream_file=stream_file,
-                   store=store)
+                   store=store,
+                   mcp_stack=mcp_stack)
+
+    async def aclose(self) -> None:
+        """Release the held MCP session; on stdio this stops the server.
+
+        Called by the app's lifespan handler at shutdown. A prompt close
+        also releases the DuckDB file the server holds, which matters
+        when something else in the container wants it. Safe and a no-op
+        when no session was held (tests, or an injected service).
+        """
+        if self._mcp_stack is not None:
+            stack, self._mcp_stack = self._mcp_stack, None
+            await stack.aclose()
 
     # -- session lifecycle --
 
@@ -558,6 +598,9 @@ def create_app(
             await sweeper
         except asyncio.CancelledError:
             pass
+        # close the MCP session last: the sweeper is gone, so nothing
+        # can still be mid-tool-call when the server goes away
+        await app.state.service.aclose()
 
     app = FastAPI(title="Access Governance Agent API", lifespan=lifespan)
 

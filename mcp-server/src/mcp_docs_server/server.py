@@ -44,14 +44,20 @@ from mcp_docs_server.csv_store import CsvStore
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 # ---------------------------------------------------------------------------
-# Logging — stdout handler with configurable level
+# Logging — stderr handler with configurable level
 # ---------------------------------------------------------------------------
+# stderr, NOT stdout: under the stdio transport stdout carries the
+# JSON-RPC message stream, so a log line written there lands in the
+# middle of a protocol frame and corrupts it. stderr is inherited by
+# the parent process and captured by the container runtime, so the
+# per-tool took=ms audit lines survive either way. Unconditional --
+# the HTTP transports do not use stdout for anything either.
 LOG_LEVEL = os.environ.get("MCP_LOG_LEVEL", "INFO").upper()
 
 logging.basicConfig(
     level=LOG_LEVEL,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[logging.StreamHandler(sys.stderr)],
 )
 logger = logging.getLogger("mcp_docs_server")
 

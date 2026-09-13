@@ -130,6 +130,10 @@ the protocol. This is safe on every transport: HTTP transports do not
 use stdout for anything either, so the change is unconditional and needs
 no branching.
 
+**DONE and verified live**: a real stdio subprocess loaded 12 tools and
+answered 4 tool calls with no protocol corruption, and 22 server log
+lines were captured on the parent's stderr.
+
 ### 4.2 A session is created PER TOOL CALL, which would spawn a server per call
 
 `langchain_mcp_adapters/tools.py` builds each tool so that:
@@ -180,6 +184,18 @@ the same treatment around its loop.
 One subprocess then lives for the life of the agent process. With the
 one-uvicorn-worker-per-pod rule from aks.md section 8, that is exactly
 one MCP server per pod.
+
+**DONE and verified live**, including the counterfactual. Counting
+"Data store ready" in the server's own log over a run that loads the
+tools and then makes 4 tool calls:
+
+| | server boots |
+|---|---|
+| held session (`client.session` + `load_mcp_tools`) | **1** |
+| per-call session (`client.get_tools()`) | **5** |
+
+N+1 boots for N calls, exactly as predicted -- one for the tool load
+and one for every call after it.
 
 ### 4.3 Worked example: one real turn, both ways
 
@@ -396,10 +412,12 @@ stderr logging change should stay likewise.
 ## 11. Work items
 
 1. **stderr logging** in `mcp-server/.../server.py`.
-   - [ ] done
+   - [x] done -- verified live (section 4.1)
 2. **Persistent MCP session** in `agent_api.py` and
    `agnes_agent_graph.py`, with lifecycle tied to service start/shutdown.
-   - [ ] done
+   - [x] done -- `AsyncExitStack` held on `AgentService`, released by a
+     new `aclose()` called from the lifespan's shutdown half; the CLI
+     wraps its loop in try/finally. Verified 1 boot vs 5 (section 4.2)
 3. **Subprocess supervision** decision + implementation (section 12).
    - [ ] done
 4. **Combined Dockerfile**, both projects, agent as entry point.
