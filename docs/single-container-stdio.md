@@ -181,6 +181,91 @@ One subprocess then lives for the life of the agent process. With the
 one-uvicorn-worker-per-pod rule from aks.md section 8, that is exactly
 one MCP server per pod.
 
+### 4.3 Worked example: one real turn, both ways
+
+A measured turn from the streamable-http rig -- "I'm on the same team as
+GPN 43410835" -- made four tool calls:
+
+```
+list_datasets                                       1.45s
+filter_dataset    (EMPLOYEEID + 9 projected cols)   2.63s
+count_by_column   ([ResourceID, ResourceName])      1.50s
+count_by_column   ([ResourceID, ResourceName, ...]) 1.56s
+                                        tool total  7.1s   of a 171.6s turn
+```
+
+**What those numbers are made of today.** The DuckDB work inside them is
+milliseconds -- P0 measured a filtered group-by at 25 ms over 5M rows.
+So roughly 95% of each duration is transport: `create_session()` opening
+an HTTP connection and running the `initialize` handshake, once per
+call. Wasteful over HTTP, and nothing worse.
+
+**The same four calls under stdio, with the session-per-call bug.**
+`create_session()` on a stdio connection does not open a socket, it
+SPAWNS THE PROCESS. Each of the four calls becomes:
+
+```
+spawn: uv run --no-sync mcp-docs-server
+  -> python interpreter start
+  -> import duckdb, pymupdf, rank_bm25, mcp SDK
+  -> server.py module level, top to bottom:
+       load_dotenv(...)               line 44
+       mcp = FastMCP(...)             line 142
+       index = DocIndex(DOCS_DIR)     line 170   <- extracts EVERY PDF
+       csv_store = CsvStore(DOCS_DIR) line 173   <- opens DuckDB
+  -> MCP initialize handshake over the pipes
+  -> answer the ONE tool call
+  -> exit, discarding all of it
+```
+
+Everything at module level runs before the server can answer anything --
+that is what makes this expensive rather than merely clumsy. `DocIndex`
+re-extracts the whole PDF corpus on every spawn, because persisting
+extraction is still open work (P1.2); it is exactly the boot cost aks.md
+section 4 refers to when it says a fresh pod "still extracts PDFs at
+boot". P0's warm start helps only the other half: `MCP_DB_PATH` lets
+`CsvStore` find a current fingerprint and skip ingestion, 0.04 s instead
+of 10.2 s.
+
+So the turn goes from four ~1.5 s tool calls to FOUR COMPLETE SERVER
+BOOTS. There is no firm figure for one boot because PDF extraction has
+never been measured in isolation -- interpreter plus imports alone is a
+second or two before extraction starts. The perverse result: tool time
+is currently 4% of this turn, and the bug would make the cheapest part
+of the turn one of the most expensive, for nothing.
+
+**The same four calls with one held session.**
+
+```
+agent starts (pod readiness, BEFORE any user turn)
+  -> spawn mcp-docs-server ONCE
+  -> one boot: imports, PDF extraction, DuckDB open
+  -> handshake once, session held open
+
+turn: list_datasets    -> write to the open pipe, read the reply
+      filter_dataset   -> same pipe
+      count_by_column  -> same pipe
+      count_by_column  -> same pipe
+```
+
+The boot leaves the turn entirely and joins the work the pod already
+does before going Ready, alongside parquet staging.
+
+And the four calls should end up FASTER than they are over HTTP. Take
+the per-call connect and `initialize` out of 1.45 / 2.63 / 1.50 / 1.56 s
+and what is left is the query itself -- tens of milliseconds each, over
+a pipe that is already open. The 7.1 s of tool time plausibly drops
+under a second. It does not move the headline number (7.1 s of 171.6 s),
+but it means the stdio path has a small genuine upside on tool latency
+rather than being purely a concession to section 1.
+
+**A hazard this example surfaces.** Every spawned process opens
+`MCP_DB_PATH`, and DuckDB permits a single writer. Sequential spawns are
+safe because the previous one has exited -- but anything running the
+scanner or the CLI alongside the API in the same container spawns its
+own server and contends for the same file. Decide whether those get a
+separate `MCP_DB_PATH` (section 12).
+
 ## 5. Code changes
 
 | Change | File | Why |
