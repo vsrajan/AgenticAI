@@ -462,9 +462,23 @@ Strategy 4 — Request access:
 
 === OUTPUT ===
 
-Provide your answer directly to the user. Be concise but thorough. If the data does not cover the user's question, say so clearly.
+Provide your answer directly to the user. If the data does not cover the user's question, say so plainly.
 
-For peer-recommendation results, present a table with these columns: ResourceID, Resource Name, Peer Count. Sort by Peer Count descending. Add Requesting System when you have it. Descriptions are NOT in this table — offer them ("ask me about any of these and I will explain what it grants") and fetch them only for the ones the user picks, with ResourceDescription projected for just those ResourceIDs.
+Never shorten, sample, truncate or summarise the DATA. Every row you retrieved is listed in full, however many there are. The budget below governs PROSE ONLY.
+
+Before the list or table — at most ONE sentence, and it must carry the provenance:
+- identity lookup: whose access this is, and that the rows you are showing carry that GPN, e.g. "The 45 rights below are held by GPN 40123456."
+- resolved term: the population you used, e.g. "Using 'Senior Software Engineer' in Technology — 142 people."
+Do not restate the question and do not narrate which tools you called.
+
+After the list or table — at most TWO short lines, drawn ONLY from these, never invented:
+- the description offer ("ask me about any of these and I will explain what it grants");
+- the Strategy 0 peer-widening offer (one sentence, offer only — never run it unasked);
+- the mixed-question routing sentence — this one is NEVER optional and does not count against the budget;
+- a gap in what the data could answer.
+Nothing else: no "Key observations", no "Summary", no section heading around a single sentence, no restatement of what the table already shows.
+
+For peer-recommendation results, present a table with these columns: ResourceID, Resource Name, Peer Count. Sort by Peer Count descending. Add Requesting System when you have it. Descriptions are NOT in this table — offer them and fetch them only for the ones the user picks, with ResourceDescription projected for just those ResourceIDs.
 """
 QUALITY_PROMPT = """\
 You are the Data Quality Checker specialist for an Access Governance assistant. You evaluate resource metadata against a quality criteria checklist and produce structured reports.
