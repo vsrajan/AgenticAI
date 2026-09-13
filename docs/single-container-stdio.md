@@ -425,7 +425,12 @@ stderr logging change should stay likewise.
      first. Chart must move liveness from tcpSocket to httpGet /livez
      (work item 5)
 4. **Combined Dockerfile**, both projects, agent as entry point.
-   - [ ] done
+   - [x] done -- root-level `Dockerfile` + `.dockerignore`; build
+     context is the REPO ROOT (`podman build -t agnes:local .`). Two
+     projects, two virtualenvs, one interpreter. Verified by simulating
+     the /app layout: both sync steps run, and the real
+     `_get_mcp_server_config()` parsed the image's `MCP_SERVER_ARGS`,
+     spawned the server from its own project env and loaded 12 tools
 5. **Chart**: fold MCP into the agent Deployment, delete the MCP tier
    objects, merge env and volumes.
    - [ ] done
@@ -453,8 +458,10 @@ stderr logging change should stay likewise.
   serving from a half-initialised store.
 - **Where does the child's stderr go?** It should reach container logs so
   the per-tool `took=ms` lines stay queryable in Container Insights.
-- **Python version unification** -- both projects should resolve to 3.12
-  in one image.
+- **Python version unification -- CLOSED.** The image pins 3.12 (what
+  `mcp-server/.python-version` already declared). agent-client had no
+  pin and resolved to 3.11 locally; its full dependency set was
+  verified to install cleanly on 3.12, so one interpreter serves both.
 - **Does `/health` need to check the child?** Today it pings Redis. A
   dead MCP child is just as fatal to a turn, and readiness is the right
   place to surface it.

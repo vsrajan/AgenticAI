@@ -1,0 +1,53 @@
+# Build context for the combined image is the REPO ROOT, so this file
+# has to exclude everything both projects would otherwise drag in.
+
+# never ship secrets or local state
+.env
+*/.env
+
+# git and CI metadata
+.git
+.github
+.gitlab-ci.yml
+
+# virtualenvs and caches (rebuilt inside the image from the lockfiles)
+.venv
+*/.venv
+__pycache__
+*/__pycache__
+*.pyc
+.pytest_cache
+*/.pytest_cache
+.ruff_cache
+.claude
+
+# the DuckDB cache is disposable and lives INSIDE mcp-server/docs by
+# default, so without these lines COPY docs/ would bake it in
+*.duckdb
+*.duckdb.wal
+mcp-server/docs/.mcp_data.duckdb
+
+# locally staged parquet exports (gigabytes; staged at runtime in AKS)
+mcp-data
+*/mcp-data
+
+# local run artifacts
+agent_api_stream.txt
+agent_stream.txt
+scan_results.csv
+*/agent_api_stream.txt
+*/agent_stream.txt
+*/scan_results.csv
+
+# not part of the runtime image
+docs
+deploy
+mcp-server/tests
+mcp-server/tester.py
+mcp-server/indexer.md
+agent-client/tests_api
+agent-client/data
+agent-client/webclient_api.html
+agent-client/README_api.md
+README.md
+CLAUDE.md
