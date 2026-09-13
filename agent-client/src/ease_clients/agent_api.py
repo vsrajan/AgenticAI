@@ -107,11 +107,13 @@ class AgentService:
 
     def __init__(self, agent, tool_count: int, checkpointer=None,
                  session_ttl_seconds: float = 3600, max_sessions: int = 500,
-                 stream_file: str = "", store=None, mcp_stack=None):
+                 stream_file: str = "", store=None, mcp_stack=None,
+                 mcp_session=None):
         # holds the open MCP session (and, on stdio, the server
         # subprocess). None when the caller supplied its own tools --
         # the tests do this with a fake agent and never touch MCP.
         self._mcp_stack = mcp_stack
+        self._mcp_session = mcp_session
         self._agent = agent
         self.tool_count = tool_count
         self._checkpointer = checkpointer
@@ -184,7 +186,7 @@ class AgentService:
             session = await stack.enter_async_context(client.session(server_name))
             tools = await load_mcp_tools(session)
             logger.info("Loaded %d MCP tools", len(tools))
-            return await cls._assemble(llm, tools, checkpointer, stack)
+            return await cls._assemble(llm, tools, checkpointer, stack, session)
         except BaseException:
             # never leak the subprocess when later setup fails -- the
             # Redis fail-fast below raises on an unreachable REDIS_URL
@@ -192,7 +194,8 @@ class AgentService:
             raise
 
     @classmethod
-    async def _assemble(cls, llm, tools, checkpointer, mcp_stack) -> "AgentService":
+    async def _assemble(cls, llm, tools, checkpointer, mcp_stack,
+                        mcp_session=None) -> "AgentService":
         """Build the graph and the service around already-loaded tools."""
         ttl_minutes = float(os.environ.get("AGENT_API_SESSION_TTL_MINUTES", "60"))
         max_sessions = int(os.environ.get("AGENT_API_MAX_SESSIONS", "500"))
@@ -216,7 +219,29 @@ class AgentService:
                    max_sessions=max_sessions,
                    stream_file=stream_file,
                    store=store,
-                   mcp_stack=mcp_stack)
+                   mcp_stack=mcp_stack,
+                   mcp_session=mcp_session)
+
+    async def mcp_alive(self) -> bool:
+        """Is the MCP server still answering?
+
+        A protocol-level ping down the held session. On stdio that is a
+        round-trip to the child process, so a dead child fails here --
+        which nothing else notices: the agent's own port stays open, so
+        a tcpSocket liveness probe sees a healthy pod serving broken
+        turns. This is what /livez turns into a restart.
+
+        True when no session is held (tests, injected services): there
+        is no child to be dead.
+        """
+        if self._mcp_session is None:
+            return True
+        try:
+            await self._mcp_session.send_ping()
+            return True
+        except Exception:
+            logger.exception("MCP session ping failed -- server unreachable")
+            return False
 
     async def aclose(self) -> None:
         """Release the held MCP session; on stdio this stops the server.
@@ -665,6 +690,15 @@ def create_app(
     @app.get("/health")
     async def health():
         service = app.state.service
+        # READINESS. Covers everything a turn needs, including external
+        # dependencies: failing here removes the pod from rotation but
+        # must NOT restart it (a Redis blip would otherwise restart the
+        # whole fleet -- docs/aks.md section 3).
+        body = {"status": "ok", "tools": service.tool_count if service else 0}
+        if service is not None and not await service.mcp_alive():
+            raise HTTPException(status_code=503, detail="MCP server unreachable.")
+        if service is not None and service._mcp_session is not None:
+            body["mcp"] = "ok"
         # in Redis mode an instance that cannot reach Redis cannot serve
         # any session -- report 503 so an orchestrator's readiness probe
         # takes it out of rotation (see docs/P3.1.md section 12)
@@ -676,9 +710,27 @@ def create_app(
                 raise HTTPException(
                     status_code=503, detail="Session store unreachable.",
                 )
-            return {"status": "ok", "tools": service.tool_count,
-                    "session_store": "redis"}
-        return {"status": "ok", "tools": service.tool_count if service else 0}
+            body["session_store"] = "redis"
+        return body
+
+    @app.get("/livez")
+    async def livez():
+        """LIVENESS -- is THIS pod broken in a way a restart would fix?
+
+        Deliberately narrower than /health: it checks only the MCP child
+        process, which this pod owns, and never Redis or any other
+        external dependency. A dead child is fatal to every turn and is
+        not self-healing, so the honest response is to let the probe
+        fail and have Kubernetes replace the pod
+        (docs/single-container-stdio.md section 12).
+
+        The tcpSocket probe it replaces cannot see this: the agent's own
+        port stays open while every tool call fails.
+        """
+        service = app.state.service
+        if service is not None and not await service.mcp_alive():
+            raise HTTPException(status_code=503, detail="MCP server dead.")
+        return {"status": "ok"}
 
     @app.post("/sessions")
     async def create_session(principal: Principal = Depends(current_principal)):

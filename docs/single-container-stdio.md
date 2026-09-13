@@ -418,8 +418,12 @@ stderr logging change should stay likewise.
    - [x] done -- `AsyncExitStack` held on `AgentService`, released by a
      new `aclose()` called from the lifespan's shutdown half; the CLI
      wraps its loop in try/finally. Verified 1 boot vs 5 (section 4.2)
-3. **Subprocess supervision** decision + implementation (section 12).
-   - [ ] done
+3. **Subprocess supervision**: crash the pod, let Kubernetes restart it.
+   - [x] done -- `mcp_alive()` pings the held session; `/livez` fails
+     when the child is dead so the probe restarts the pod; `/health`
+     reports `mcp` and 503s too, so readiness pulls it from rotation
+     first. Chart must move liveness from tcpSocket to httpGet /livez
+     (work item 5)
 4. **Combined Dockerfile**, both projects, agent as entry point.
    - [ ] done
 5. **Chart**: fold MCP into the agent Deployment, delete the MCP tier
@@ -435,12 +439,18 @@ stderr logging change should stay likewise.
 
 ## 12. Open questions
 
-- **Supervision.** If the MCP child dies, the held session is dead and
-  every subsequent tool call fails. Crash the pod and let Kubernetes
-  restart it (simple, honest, loses in-flight turns) or restart the
-  child in-process (kinder, more code, risks a half-initialised store)?
-  The tcpSocket liveness probe will NOT catch this -- the agent's port
-  stays open with a dead child.
+- **Supervision -- DECIDED: crash the pod, let Kubernetes restart it.**
+  Implemented as a readiness/liveness split, because the tcpSocket probe
+  cannot see a dead child (the agent's own port stays open while every
+  tool call fails):
+  - `/health` (readiness) pings the MCP session AND Redis. Failing it
+    takes the pod out of rotation without restarting it -- a Redis blip
+    must never restart the fleet (aks.md section 3).
+  - `/livez` (liveness) pings ONLY the MCP child, which this pod owns
+    and which a restart genuinely fixes. This is the `/livez` endpoint
+    aks.md section 9 already listed as a follow-up.
+  In-process restart of the child was rejected: more code, and it risks
+  serving from a half-initialised store.
 - **Where does the child's stderr go?** It should reach container logs so
   the per-tool `took=ms` lines stay queryable in Container Insights.
 - **Python version unification** -- both projects should resolve to 3.12
@@ -449,5 +459,7 @@ stderr logging change should stay likewise.
   dead MCP child is just as fatal to a turn, and readiness is the right
   place to surface it.
 - **Scanner and CLI** share `_get_mcp_server_config()` and get stdio for
-  free, but each spawns its own server -- fine for batch runs, worth
-  knowing before running the scanner alongside a live API.
+  free, and each spawns its own server. DECIDED: neither runs inside the
+  container, so the `MCP_DB_PATH` single-writer contention noted in 4.3
+  does not arise in the deployed image. It still applies on a dev box
+  running the CLI and the API side by side.

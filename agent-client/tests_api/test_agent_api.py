@@ -585,3 +585,65 @@ def test_cors_preflight_allows_browser_clients():
     )
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "*"
+
+
+# -- MCP liveness: /livez and the readiness split (stdio supervision) --
+#
+# The MCP server is a child PROCESS on the stdio path, so a dead child
+# is fatal to every turn while the agent's own port stays open. These
+# pin the split: /health (readiness) covers everything including
+# external dependencies; /livez covers only what a restart would fix.
+# See docs/single-container-stdio.md section 12.
+
+
+class _DeadSession:
+    """A held MCP session whose server has gone away."""
+
+    async def send_ping(self):
+        raise ConnectionError("child process is gone")
+
+
+class _LiveSession:
+    async def send_ping(self):
+        return {}
+
+
+def test_livez_is_ok_when_no_session_is_held():
+    # tests and the in-process paths hold no session: there is no child
+    # to be dead, so liveness must not fail
+    client = make_client()
+    assert client.get("/livez").status_code == 200
+
+
+def test_livez_503_when_the_mcp_child_is_dead():
+    service = make_service([])
+    service._mcp_session = _DeadSession()
+    client = TestClient(create_app(service=service, authenticator=NoAuthAuthenticator()))
+    response = client.get("/livez")
+    assert response.status_code == 503
+    assert "MCP" in response.json()["detail"]
+
+
+def test_livez_ignores_redis_so_a_blip_never_restarts_the_pod():
+    # the whole point of the split: Redis is external and not something
+    # restarting this pod fixes (docs/aks.md section 3)
+    class _BrokenStore:
+        async def ping(self):
+            raise ConnectionError("redis down")
+
+    service = make_service([])
+    service._store = _BrokenStore()
+    service._mcp_session = _LiveSession()
+    client = TestClient(create_app(service=service, authenticator=NoAuthAuthenticator()))
+    assert client.get("/livez").status_code == 200      # liveness: fine
+    assert client.get("/health").status_code == 503     # readiness: out of rotation
+
+
+def test_health_reports_mcp_and_503_when_the_child_is_dead():
+    service = make_service([])
+    service._mcp_session = _LiveSession()
+    client = TestClient(create_app(service=service, authenticator=NoAuthAuthenticator()))
+    assert client.get("/health").json()["mcp"] == "ok"
+
+    service._mcp_session = _DeadSession()
+    assert client.get("/health").status_code == 503

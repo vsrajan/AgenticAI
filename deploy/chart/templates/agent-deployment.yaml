@@ -84,10 +84,18 @@ spec:
               path: /health
               port: http
             periodSeconds: 10
+          # liveness = /livez, which pings ONLY the in-container MCP
+          # child -- never Redis. A dead child fails every turn while
+          # this port stays open, so tcpSocket cannot see it; a restart
+          # is the fix, and that is what a failing liveness probe does.
+          # External dependencies stay on readiness above, so a Redis
+          # blip still cannot restart the fleet.
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /livez
               port: http
             periodSeconds: 20
+            failureThreshold: 3
           resources:
             {{- toYaml .Values.agent.resources | nindent 12 }}
           volumeMounts:
