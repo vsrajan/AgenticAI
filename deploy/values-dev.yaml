@@ -1,6 +1,6 @@
 # dev cluster overrides. Placeholders marked <...> are filled during
 # AKS onboarding (docs/deploy.md section 6); everything else falls
-# back to deploy/chart/values.yaml. No secrets here, ever -- the five
+# back to deploy/chart/values.yaml. No secrets here, ever -- the three
 # secret values live in the dev Key Vault.
 
 image:
@@ -17,15 +17,6 @@ keyVault:
   tenantId: "<tenant-id>"
 
 mcp:
-  # single replica in dev; HPA off; smallest useful footprint
-  replicas: 1
-  resources:
-    requests:
-      cpu: 250m
-      memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 512Mi
   parquet:
     storageAccount: "<dev-storage-account>"
     container: "<dev-container>"
@@ -36,13 +27,15 @@ agent:
   # docs/deploy.md section 8 step 4) needs a second replica. Redis
   # mode is on, so 2 is legal.
   replicas: 2
+  # smallest footprint that still fits BOTH halves in one container --
+  # the agent plus its MCP child, which extracts PDFs and opens DuckDB
   resources:
     requests:
-      cpu: 250m
-      memory: 512Mi
-    limits:
       cpu: 500m
       memory: 1Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi
   azureOpenAI:
     endpoint: "<https://dev-aoai-resource.openai.azure.com/>"
     deployment: "<gpt-4o-deployment-name>"
@@ -55,5 +48,6 @@ ingress:
   tlsSecretName: ""
 
 pdb:
-  # pointless with dev's single mcp replica
+  # dev runs 2 agent replicas for the P3.1 check, but a budget adds
+  # nothing on a single-node dev cluster
   enabled: false

@@ -1,6 +1,6 @@
-# uat cluster overrides -- prod-shaped on purpose (same topology,
-# HPA on) so uat rehearses exactly what prod runs. Placeholders <...>
-# are filled during AKS onboarding. No secrets here, ever.
+# uat cluster overrides -- prod-shaped on purpose so uat rehearses
+# exactly what prod runs. Placeholders <...> are filled during AKS
+# onboarding. No secrets here, ever.
 
 image:
   registry: "<registry-base>"
@@ -14,8 +14,6 @@ keyVault:
   tenantId: "<tenant-id>"
 
 mcp:
-  hpa:
-    enabled: true
   parquet:
     storageAccount: "<uat-storage-account>"
     container: "<uat-container>"

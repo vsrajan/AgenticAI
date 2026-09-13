@@ -1,8 +1,8 @@
-# prod cluster overrides -- the docs/aks.md section 7 sizing:
-# agent 3 fixed replicas (IO-bound on Azure OpenAI quota; scale by
-# raising TPM quota before adding replicas beyond 3), mcp 2 + HPA
-# 2->6 at 70% CPU. Placeholders <...> are filled during AKS
-# onboarding. No secrets here, ever.
+# prod cluster overrides. 3 fixed replicas of the single workload:
+# turns are IO-bound on Azure OpenAI quota, so raise TPM quota before
+# adding replicas beyond 3. There is no separate MCP tier to scale on
+# this branch -- the server is a child process of each agent pod.
+# Placeholders <...> are filled during AKS onboarding. No secrets ever.
 
 image:
   registry: "<registry-base>"
@@ -16,8 +16,6 @@ keyVault:
   tenantId: "<tenant-id>"
 
 mcp:
-  hpa:
-    enabled: true
   parquet:
     storageAccount: "<prod-storage-account>"
     container: "<prod-container>"

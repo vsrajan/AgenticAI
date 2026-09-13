@@ -6,6 +6,10 @@ metadata:
     {{- include "agnes.labels" . | nindent 4 }}
     app.kubernetes.io/component: agent
 spec:
+  # the ONLY workload in this chart: the container runs the agent, and
+  # the agent runs the MCP server as a child process over stdio. The
+  # two halves therefore scale together -- there is no separate MCP
+  # Deployment or HPA to tune (docs/single-container-stdio.md s7-8).
   replicas: {{ .Values.agent.replicas }}
   selector:
     matchLabels:
@@ -32,14 +36,46 @@ spec:
       terminationGracePeriodSeconds: 300
       affinity:
         {{- include "agnes.antiAffinity" (dict "component" "agent") | nindent 8 }}
+      {{- if .Values.mcp.parquet.enabled }}
+      initContainers:
+        # stage the Spark parquet exports from Azure Storage onto the
+        # /data emptyDir before anything starts (P0 section 11.9). This
+        # moved here from the mcp Deployment: the MCP server is now a
+        # child process of this pod's container, so the data it reads
+        # has to be staged into THIS pod. One copy per agent replica.
+        # Auth is the pod's workload identity (needs Storage Blob Data
+        # Reader) -- the AZURE_* env vars come from the webhook.
+        - name: stage-parquet
+          image: {{ .Values.mcp.parquet.stagingImage }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              az login --service-principal \
+                -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" \
+                --federated-token "$(cat "$AZURE_FEDERATED_TOKEN_FILE")" \
+                --allow-no-subscriptions -o none
+              az storage blob download-batch \
+                --auth-mode login \
+                --account-name {{ required "set mcp.parquet.storageAccount" .Values.mcp.parquet.storageAccount | quote }} \
+                --source {{ required "set mcp.parquet.container" .Values.mcp.parquet.container | quote }} \
+                --pattern '{{ .Values.mcp.parquet.prefix }}/*' \
+                --destination /data
+              echo "staged:" && find /data -name '*.parquet' | head
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      {{- end }}
       containers:
-        - name: agent-api
-          image: {{ include "agnes.agentImage" . }}
+        - name: agnes
+          image: {{ include "agnes.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
               containerPort: 8080
               protocol: TCP
+          # ONE env block configures both halves: the MCP server is a
+          # child process and inherits this environment (there is no
+          # .env in the image at all). See single-container-stdio.md s5.
           envFrom:
             - configMapRef:
                 name: {{ include "agnes.agentName" . }}-config
@@ -54,11 +90,6 @@ spec:
                 secretKeyRef:
                   name: {{ include "agnes.secretName" . }}
                   key: AGENT_API_TOKEN
-            - name: MCP_SERVER_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "agnes.secretName" . }}
-                  key: MCP_SERVER_TOKEN
             {{- if .Values.agent.redis.enabled }}
             - name: REDIS_URL
               valueFrom:
@@ -66,30 +97,32 @@ spec:
                   name: {{ include "agnes.secretName" . }}
                   key: REDIS_URL
             {{- end }}
-          # readiness = /health: it pings Redis in Redis mode, so a
-          # pod with a broken Redis connection stops RECEIVING new
-          # traffic. liveness = plain TCP on purpose: a Redis blip
-          # must take pods out of rotation, not restart the whole
-          # fleet (docs/aks.md section 5 -- never point liveness at
-          # a dependency-checking endpoint).
+          # MCP_SERVER_TOKEN is gone: stdio has no HTTP layer to
+          # authenticate, which is the reason this topology exists.
+          #
+          # startup now covers MORE than it did when MCP was its own
+          # pod: spawning the child, its PDF extraction, the DuckDB
+          # open, and loading the 12 tools all happen before the app
+          # answers. Budget generously and set this from the real
+          # measurement (work item 7) rather than from this guess.
           startupProbe:
             httpGet:
               path: /health
               port: http
-            # startup includes connecting to MCP and loading 12 tools
-            failureThreshold: 30
+            failureThreshold: 60
             periodSeconds: 5
+          # readiness = /health: pings the MCP child AND Redis. Failing
+          # it removes the pod from rotation but must NOT restart it --
+          # a Redis blip would otherwise restart the fleet (aks.md s5).
           readinessProbe:
             httpGet:
               path: /health
               port: http
             periodSeconds: 10
-          # liveness = /livez, which pings ONLY the in-container MCP
-          # child -- never Redis. A dead child fails every turn while
-          # this port stays open, so tcpSocket cannot see it; a restart
-          # is the fix, and that is what a failing liveness probe does.
-          # External dependencies stay on readiness above, so a Redis
-          # blip still cannot restart the fleet.
+          # liveness = /livez: pings ONLY the in-container MCP child,
+          # never an external dependency. A dead child fails every turn
+          # while this port stays open, so tcpSocket cannot see it, and
+          # a restart is the fix.
           livenessProbe:
             httpGet:
               path: /livez
@@ -99,12 +132,24 @@ spec:
           resources:
             {{- toYaml .Values.agent.resources | nindent 12 }}
           volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: duckdb
+              mountPath: /duckdb
             # mounting the CSI volume is what triggers the Key Vault
             # -> k8s Secret sync; the file mount itself is unused
             - name: kv
               mountPath: /mnt/kv
               readOnly: true
       volumes:
+        # staged parquet + the DuckDB cache are pod-local and
+        # disposable -- both rebuild from source. They moved here with
+        # the MCP server, so every agent replica now carries its own
+        # copy (single-container-stdio.md section 8).
+        - name: data
+          emptyDir: {}
+        - name: duckdb
+          emptyDir: {}
         - name: kv
           csi:
             driver: secrets-store.csi.k8s.io

@@ -1,5 +1,5 @@
 # test cluster overrides. From test upward: exact CORS origin, no
-# stream file, both tiers at 2 replicas. Placeholders <...> are
+# stream file, 2 replicas of the one workload. Placeholders <...> are
 # filled during AKS onboarding. No secrets here, ever.
 
 image:
@@ -14,7 +14,6 @@ keyVault:
   tenantId: "<tenant-id>"
 
 mcp:
-  replicas: 2
   parquet:
     storageAccount: "<test-storage-account>"
     container: "<test-container>"

@@ -433,7 +433,12 @@ stderr logging change should stay likewise.
      spawned the server from its own project env and loaded 12 tools
 5. **Chart**: fold MCP into the agent Deployment, delete the MCP tier
    objects, merge env and volumes.
-   - [ ] done
+   - [x] done -- 13 objects -> 7 (prod). Deleted mcp-deployment,
+     mcp-service, hpa-mcp and networkpolicy; the stage-parquet
+     initContainer and both emptyDirs moved onto the agent pod; one
+     ConfigMap now carries both halves' env; PDB is a single budget;
+     Key Vault drops to three secrets; `image.repository` replaces the
+     two repositories. Lints and renders across all four values files
 6. **Tests**: a stdio-transport test that asserts one subprocess serves
    many tool calls (the 4.2 regression), and that no log output reaches
    stdout (the 4.1 regression).

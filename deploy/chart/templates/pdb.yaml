@@ -1,20 +1,8 @@
 {{- if .Values.pdb.enabled }}
-# keep at least one pod of each tier through voluntary disruptions
-# (node drains, cluster upgrades). Pointless with single replicas --
-# dev disables this.
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: {{ include "agnes.mcpName" . }}
-  labels:
-    {{- include "agnes.labels" . | nindent 4 }}
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: mcp
----
+# keep at least one pod up through voluntary disruptions (node drains,
+# cluster upgrades). One budget now, not two: the MCP server is a child
+# process of this pod, so there is no second workload to protect.
+# Pointless with a single replica -- dev disables this.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
