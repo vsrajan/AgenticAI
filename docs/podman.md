@@ -192,12 +192,76 @@ chmod -R a+rX "$AGNES_DATA"
 `a+rX` -- capital X -- adds execute only to directories and to files
 that already had it, which is exactly what you want for a data tree.
 
-Verify from inside a container before you build anything real:
+Verify from inside a container before you build anything real. Note
+the `2>&1`: `ls` reports a missing path on STDERR, and losing that is
+how a failed mount reads as "no output" rather than as an error.
 
 ```bash
 podman run --rm -v "$AGNES_DATA":/data:z "$BASE_IMAGE" \
-  sh -c 'id; ls -la /data/export'
+  sh -c 'id; echo "--- /data ---"; ls -la /data; ls -la /data/export' 2>&1
 ```
+
+You want `id` to print, `/data` to list the `export` directory, and
+`/data/export` to list `Resource.parquet` and `Entitlement.parquet`.
+
+### 3.2.1 When the mount looks empty
+
+If `id` prints but the listings do not, the container ran fine and the
+problem is the MOUNT. Work through these three in order -- they are
+cheap, and each rules out a different cause.
+
+**1. Is the host path what you think it is?** Check in the same shell
+that runs podman:
+
+```bash
+echo "AGNES_DATA=[$AGNES_DATA]"
+ls -la "$AGNES_DATA"
+ls -la "$AGNES_DATA/export"
+```
+
+If THIS is empty or errors, the variable is wrong and nothing else
+matters. Worth knowing: podman CREATES a missing source directory and
+mounts it empty rather than refusing, so a typo in the path produces
+exactly the silent-empty-`/data` symptom instead of a loud error.
+
+**2. What filesystem is it on?** This matters more than usual here,
+because the RHEL machine is itself a pod -- `/projects` is quite
+likely a mounted volume rather than local disk:
+
+```bash
+findmnt -T "$AGNES_DATA"
+getenforce
+```
+
+If `FSTYPE` comes back **nfs**, **nfs4**, **cifs** or **fuse**, then
+`:z` cannot do its job. SELinux relabelling writes an extended
+attribute, and those filesystems do not carry one -- so the relabel
+silently does nothing and the container is denied. Mount without it
+and disable label confinement for that container instead:
+
+```bash
+podman run --rm --security-opt label=disable \
+  -v "$AGNES_DATA":/data "$BASE_IMAGE" \
+  sh -c 'ls -la /data; ls -la /data/export' 2>&1
+```
+
+If that works, use `--security-opt label=disable` and drop the `:z`
+suffix in EVERY `podman run` below, including both agent containers.
+Be clear about what it does: it turns SELinux confinement off for that
+container rather than pretending a relabel succeeded. That is the
+standard answer for a network-filesystem mount, not a workaround to
+feel bad about.
+
+**3. Is SELinux actually denying it?** On a LOCAL filesystem (xfs,
+ext4) with `getenforce` reporting `Enforcing`, re-run the failing
+command and then look for the denial it produced:
+
+```bash
+sudo ausearch -m AVC -ts recent | tail -20
+```
+
+A denial naming your path confirms a labelling problem; no denial
+means look back at steps 1 and 2.
 
 ### 3.3 SELinux: `:z` lowercase, not `:Z`
 
@@ -790,6 +854,9 @@ podman logs agnes-a | grep -E 'took=' | tail -20
 | `COPY failed: no such file or directory` | build context was a project directory | build from `/projects/agnes-agent`, the parent holding BOTH `agent-client/` and `mcp-server/` |
 | `Data store ready: 0 datasets` | the child fell back to CSV mode | check the env file reached it: `podman exec agnes-a env \| grep MCP_`; check the paths are CONTAINER paths under `/data`; check the glob matches actual part files |
 | `permission denied` reading `/data` | rootless UID mapping (section 3.2) | `chmod -R a+rX "$AGNES_DATA"`, verify with `podman run --rm -v ...:z ... ls -la /data` |
+| `id` prints but `ls /data/export` shows nothing | a missing path reports on STDERR -- the listing did fail | re-run with `2>&1` (section 3.2), then work through 3.2.1 |
+| `/data` mounts EMPTY while the host path has files | wrong `$AGNES_DATA` (podman creates a missing source dir and mounts it empty), or a filesystem `:z` cannot relabel | section 3.2.1 steps 1 and 2 |
+| `/data` unreadable on an NFS/CIFS/fuse mount | `:z` needs an extended attribute those filesystems do not carry, so the relabel silently no-ops | drop `:z`, add `--security-opt label=disable` (section 3.2.1 step 2) |
 | Reads worked, then stopped after starting the second container | `:Z` private relabel, applied twice | use `:z` lowercase on both |
 | `IOException: Could not set lock on file` | two containers, one DuckDB file | one named volume per container at `/duckdb` |
 | `ModuleNotFoundError: No module named 'mcp_docs_server'` | stale build, or the package tree is wrong in the repo | confirm `src/mcp_docs_server/__init__.py` exists, then rebuild (the image has no editable-install pointer to go stale, so this is a source-layout problem) |
