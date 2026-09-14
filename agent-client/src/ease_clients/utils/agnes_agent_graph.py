@@ -983,6 +983,14 @@ def _get_mcp_server_config() -> dict:
                 "(e.g. MCP_SERVER_COMMAND=uv)"
             )
         args = args_str.split() if args_str else []
+        # the child runs in the MCP SERVER's project environment, not
+        # ours. VIRTUAL_ENV names the agent's venv, so forwarding it
+        # tells the child a virtualenv is active that it is not using:
+        # uv prints "VIRTUAL_ENV=... does not match the project
+        # environment path ... and will be ignored" on every spawn.
+        # Harmless (uv does ignore it and --project wins) but it is
+        # noise in exactly the logs you read when a spawn goes wrong.
+        child_env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
         logger.info("MCP server=%s transport=stdio command=%s args=%s", server_name, command, args)
         return {
             server_name: {
@@ -998,7 +1006,7 @@ def _get_mcp_server_config() -> dict:
                 # dir). Wrong data, no error. The child is our own
                 # process in our own trust domain, so the SDK's
                 # allowlist buys us nothing here.
-                "env": dict(os.environ),
+                "env": child_env,
             }
         }
 

@@ -423,6 +423,25 @@ def test_mcp_config_stdio_passes_environment_to_the_child(monkeypatch):
     assert set(child_env) - set(DEFAULT_INHERITED_ENV_VARS)
 
 
+def test_mcp_config_stdio_drops_virtual_env(monkeypatch):
+    # the child runs in the MCP server's project environment. Passing
+    # ours makes uv warn on every spawn that VIRTUAL_ENV does not match
+    # the project environment -- noise in the logs you read when a
+    # spawn goes wrong.
+    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+
+    monkeypatch.setenv("MCP_TRANSPORT", "stdio")
+    monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
+    monkeypatch.setenv("MCP_SERVER_COMMAND", "uv")
+    monkeypatch.setenv("VIRTUAL_ENV", "/home/me/agent-client/.venv")
+    monkeypatch.setenv("MCP_DOCS_DIR", "/app/mcp-server/docs")
+
+    child_env = _get_mcp_server_config()["access-governance-docs"]["env"]
+    assert "VIRTUAL_ENV" not in child_env
+    # everything else still travels
+    assert child_env["MCP_DOCS_DIR"] == "/app/mcp-server/docs"
+
+
 def test_mcp_config_http_does_not_pass_an_environment(monkeypatch):
     # env is meaningless over HTTP -- there is no child process to spawn
     from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
