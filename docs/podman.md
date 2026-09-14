@@ -214,18 +214,26 @@ and each rules out a different cause.
 the problem in half and depends on no theory at all. Every other step
 below is guesswork until you know the answer:
 
+Three separate one-liners, deliberately. A multi-line `sh -c '...'`
+block is easy to mangle when copied through a terminal or an ssh
+session -- lose the newlines and `stat` runs with no file arguments
+and reports `missing operand`. The first two invoke the binary
+DIRECTLY with no shell inside the container at all, so there is no
+nested quoting to break:
+
 ```bash
-podman run --rm -v "$AGNES_DATA":/data "$BASE_IMAGE" sh -c '
-  stat -c "dev=%d %n" / /data
-  echo "--- listing ---"
-  ls -la /data
-  echo "rc=$?"
-  echo "--- what the kernel sees ---"
-  cat /proc/self/mountinfo | grep -w /data || echo "NO MOUNT AT /data"
-' 2>&1
+podman run --rm -v "$AGNES_DATA":/data "$BASE_IMAGE" stat -c 'dev=%d %n' / /data
 ```
 
-Compare the two `dev=` numbers:
+```bash
+podman run --rm -v "$AGNES_DATA":/data "$BASE_IMAGE" ls -la /data
+```
+
+```bash
+podman run --rm -v "$AGNES_DATA":/data "$BASE_IMAGE" sh -c 'grep -w /data /proc/self/mountinfo || echo NO-MOUNT-AT-/data'
+```
+
+Compare the two `dev=` numbers from the first command:
 
 - **Different** -> the bind DID happen and `/data` is a separate
   filesystem. If it still lists nothing, you are mounting a real but
@@ -892,6 +900,7 @@ podman logs agnes-a | grep -E 'took=' | tail -20
 | `Data store ready: 0 datasets` | the child fell back to CSV mode | check the env file reached it: `podman exec agnes-a env \| grep MCP_`; check the paths are CONTAINER paths under `/data`; check the glob matches actual part files |
 | `permission denied` reading `/data` | rootless UID mapping (section 3.2) | `chmod -R a+rX "$AGNES_DATA"`, verify with `podman run --rm -v ...:z ... ls -la /data` |
 | `id` prints but `ls /data/export` shows nothing | a missing path reports on STDERR -- the listing did fail | re-run with `2>&1` (section 3.2), then work through 3.2.1 |
+| `stat: missing operand` | a multi-line `sh -c` block lost its newlines in transit, so stat got no file arguments | use the three one-liners in 3.2.1 step 0, which run the binary directly with no shell in the container |
 | `/data` mounts EMPTY while the host path has files | wrong `$AGNES_DATA` (podman creates a missing source dir and mounts it empty), or no bind happened at all | section 3.2.1 step 0 first -- the `dev=` comparison says which |
 | `/data` has the SAME `dev=` as `/` | no bind mount happened; `/data` is an empty dir in the image layer | section 3.2.1 step 0: check `podman inspect` Mounts, rootless-vs-sudo, and outer-container mount propagation |
 | `/data` unreadable on an NFS/CIFS/fuse mount | `:z` needs an extended attribute those filesystems do not carry, so the relabel silently no-ops | drop `:z`, add `--security-opt label=disable` (section 3.2.1 step 2) |
