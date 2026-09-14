@@ -7,15 +7,38 @@
 # they could only talk over localhost HTTP, which is the auth problem
 # this design exists to avoid.
 #
-# The build context is the REPO ROOT, not a project directory:
-#   podman build -t agnes:local -f Dockerfile .
+# The build context is the REPO ROOT (/projects/agnes-agent), not a
+# project directory -- this file copies from BOTH agent-client/ and
+# mcp-server/:
+#   podman build -t agnes:local -f Dockerfile \
+#     --build-arg BASE_IMAGE=<registry>/python:3.12-slim .
 #
 # Each project keeps its own virtualenv and its own locked dependency
 # tree; nothing is merged or resolved across the two. The only thing
 # they share is the interpreter.
-FROM mcr.microsoft.com/mirror/docker/library/python:3.12-slim
 
-# uv from PyPI, pinned so builds are reproducible end to end
+# -- base image --
+# PLACEHOLDER: replace the default with the firm's internal registry
+# path, or override per build:
+#   podman build --build-arg BASE_IMAGE=<registry>/python:3.12-slim ...
+# The CI pipeline passes it from the BASE_IMAGE variable so the value
+# lives in ONE place per environment.
+#
+# 3.12 is what mcp-server/.python-version pins; whatever image this
+# resolves to must carry that interpreter, because UV_PYTHON_DOWNLOADS
+# below forbids fetching a different one.
+ARG BASE_IMAGE=registry.internal.example.com/python:3.12-slim
+FROM ${BASE_IMAGE}
+
+# uv, pinned so builds are reproducible end to end.
+#
+# NOTE for a restricted network: this pulls from PyPI, and so does
+# every `uv sync` below. An internal container registry usually comes
+# with an internal PyPI mirror -- if PyPI itself is unreachable, set
+# PIP_INDEX_URL and UV_DEFAULT_INDEX to the firm's mirror here. They
+# are deliberately NOT parameterised: an empty index URL is worse than
+# no index URL, so this is an explicit edit rather than a build arg
+# that silently defaults to nothing.
 RUN pip install --no-cache-dir uv==0.8.17
 
 # non-root from the start; /app subdirectories created up front so

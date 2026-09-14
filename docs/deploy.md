@@ -36,10 +36,11 @@ The three decisions that shape everything here:
    registry at all.** Images are built and tested locally with podman
    on the MCP server machine (RHEL's daemonless, rootless builder --
    podman 5.6.0 confirmed there); they live in podman's local image
-   store and never leave the box. A registry enters the picture only
-   when AKS must PULL images -- a Phase B decision (GitLab Container
-   Registry vs a firm ACR; creating ACR resources is blocked by
-   corporate policy, so `az acr build` is not assumed anywhere).
+   store and never leave the box. A registry enters the picture in two
+   places: the BASE image every build pulls, and the built image AKS
+   must pull. Both are the firm's INTERNAL registry -- no public
+   registry is assumed anywhere, and creating ACR resources is blocked
+   by corporate policy, so `az acr build` is not part of the plan.
    Real pipeline artifacts come from GitLab CI (kaniko, also
    daemonless). All of these produce standard OCI images; AKS cannot
    tell the difference.
@@ -100,12 +101,12 @@ container-mode on AKS are behaviorally identical by construction.
 | Manifest management | Helm chart, from day one | four known environments; versioned releases, rollback, promotion of one artifact; conform to any existing firm chart/GitOps standard if one surfaces |
 | Image build, local | podman 5.6.0 on the MCP server machine (confirmed present) | daemonless/rootless; the local phase is fully REGISTRY-FREE -- build, run, and smoke-test the image from the local store; "first run in a container" happens on this machine, not in the cluster |
 | Image build, pipeline | GitLab CI + kaniko | daemonless, GitLab-native; `az acr build` is NOT assumed (creating ACR resources is blocked by corporate policy) -- it returns only if a firm ACR with Tasks enabled materialises |
-| Registry | DEFERRED to Phase B (first AKS deploy) | nothing local depends on one; `.gitlab-ci.yml` defaults `REGISTRY_BASE` to the project's GitLab Container Registry and overriding it to a firm ACR is a one-variable change; images stay environment-agnostic and git-SHA-tagged either way |
+| Registry | the firm's INTERNAL registry, for both the base image and ours | a local podman build still needs the BASE image, so "registry-free" means no PUSH, not no pull; `REGISTRY_BASE` (where ours goes) and `BASE_IMAGE`/`UV_IMAGE`/`KANIKO_IMAGE`/`AZCLI_IMAGE` (where the others come from) are all variables carrying PLACEHOLDER values to replace once; images stay environment-agnostic and git-SHA-tagged |
 | Image tags | `<git-sha>` per build | the SHA is the identity that moves through environments; the chart REFUSES to render without an explicit `image.tag`; never promote `latest` |
 | Secrets | per-environment Key Vault + CSI driver | values files are plain YAML in git -- they hold no secrets, ever (the .env.example vs .env rule, cluster edition) |
 | Azure identity | one user-assigned managed identity per environment, workload-identity-federated to the chart's service account | keyless access to Key Vault (CSI) and the parquet storage account (initContainer) -- same direction as the Entra auth roadmap (aks.md section 8) |
 | Redis | Azure Cache for Redis, OUTSIDE the cluster | nothing to run or template; `REDIS_URL` (embeds the key) comes from Key Vault; `rediss://` on 6380 when TLS is enforced |
-| Base image | `python:3.12-slim` via mcr.microsoft.com mirror | 3.12 is what `mcp-server/.python-version` pins (the doc originally said 3.11 -- corrected); the mirror is byte-identical with no Docker Hub rate limits; uv sync from the committed lockfiles gives identical dependency trees to the RHEL rig |
+| Base image | `python:3.12-slim` from the firm's INTERNAL registry, passed as the `BASE_IMAGE` build arg | 3.12 is what `mcp-server/.python-version` pins (the doc originally said 3.11 -- corrected); no public registry is assumed anywhere; uv sync from the committed lockfiles gives identical dependency trees to the RHEL rig. The Dockerfile and `.gitlab-ci.yml` carry PLACEHOLDER paths to replace once |
 | One chart or two? | ONE chart, ONE Deployment | on this branch there is only one workload to template: the MCP server is a child process of the agent container, so it has no Deployment, Service or HPA of its own |
 | One image or two? | ONE image carrying both projects | stdio needs a parent-child process relationship, which needs a shared filesystem; two containers in a pod share a network namespace, not a filesystem (single-container-stdio.md section 3) |
 
@@ -215,7 +216,8 @@ git status                     # repo is the source of truth, and a
 
 # from the REPO ROOT -- the context is the whole repo, and the
 # Dockerfile copies from both mcp-server/ and agent-client/
-podman build -t agnes:local -f Dockerfile .
+podman build -t agnes:local -f Dockerfile \
+  --build-arg BASE_IMAGE=registry.internal.example.com/python:3.12-slim .
 podman images                  # one image, local store only
 ```
 
@@ -231,9 +233,9 @@ may read them; without it every read fails with EACCES.
 # ONE container. It starts agent-api, which spawns the MCP server as a
 # child; there is no second container and no MCP token anywhere.
 podman run -d --network=host --name agnes \
-  -v /absolute/host/path/to/mcp-data:/data:Z \
+  -v /projects/agnes-agent/mcp-server/mcp-data:/data:Z \
   -e MCP_DATA_SOURCE=parquet \
-  -e MCP_PARQUET_SOURCES='Resources=/data/export/Resource.parquet/*.parquet,Entitlements=/data/export/entitlement.parquet/*.parquet' \
+  -e MCP_PARQUET_SOURCES='Resources=/data/export/Resource.parquet/*.parquet,Entitlements=/data/export/Entitlement.parquet/*.parquet' \
   -e MCP_DB_PATH=/tmp/mcp_data.duckdb \
   -e AZURE_OPENAI_API_KEY=... -e AZURE_OPENAI_ENDPOINT=... \
   -e AZURE_OPENAI_DEPLOYMENT=... \
@@ -267,9 +269,11 @@ Notes:
   labels, user permissions, and missing files surface here in
   minutes, and a Dockerfile iteration costs seconds. Record any fix
   back into the Dockerfiles (work item 2).
-- The ONE external touch: the first build pulls the base image from
-  mcr.microsoft.com once; it is cached afterwards. That is anonymous
-  consumption of a public registry, not a registry dependency.
+- The ONE registry touch during a local build: pulling the base image
+  from the firm's internal registry (`--build-arg BASE_IMAGE=...`),
+  cached afterwards. Nothing is PUSHED anywhere. The build does still
+  need a reachable PyPI index for `uv sync` -- see the note in the
+  Dockerfile if the firm mirrors PyPI internally too.
 - Config arrives via -e flags here (ad hoc); in AKS the same
   variables arrive from Secrets/ConfigMaps. Never bake a .env into an
   image.
@@ -431,8 +435,11 @@ What it does, job by job:
   time, not a build failure.
   `REGISTRY_BASE` defaults to `$CI_REGISTRY_IMAGE` (the project's
   GitLab Container Registry), for which the built-in job credentials
-  just work; Phase B's ACR alternative is a three-variable override
-  (`REGISTRY_BASE`, `REGISTRY_USER`, `REGISTRY_PASSWORD`).
+  just work; pointing it at the firm's internal registry is a
+  three-variable override (`REGISTRY_BASE`, `REGISTRY_USER`,
+  `REGISTRY_PASSWORD`). The job also passes `--build-arg
+  BASE_IMAGE="$BASE_IMAGE"` so the base comes from the same internal
+  registry rather than a public one.
 - **deploy:dev/test/uat/prod** -- azure-cli image, installs
   kubectl+kubelogin (`az aks install-cli`) and a pinned helm, logs in
   with the environment-scoped SP, converts kubeconfig with
@@ -454,8 +461,13 @@ GitLab specifics that matter:
   the firm supports it (`id_tokens` -> Entra workload identity
   federation) -- same keyless direction as the rest of the auth
   roadmap.
-- **Runner egress**: job images pull from ghcr.io (uv) and gcr.io
-  (kaniko); the Dockerfiles pull from mcr.microsoft.com; the deploy
+- **Runner egress**: every image is a PLACEHOLDER variable at the top
+  of `.gitlab-ci.yml` (`BASE_IMAGE`, `UV_IMAGE`, `KANIKO_IMAGE`,
+  `AZCLI_IMAGE`) pointing at the firm's internal registry -- replace
+  them once. Note `get.helm.sh` in the deploy job is still PUBLIC and
+  has been seen returning 403 from inside the network; if it is
+  blocked, bake helm and kubectl into an internal deploy image. The
+  builds also need a reachable PyPI index. The deploy
   job downloads helm from get.helm.sh. Confirm all are reachable from
   the firm's runners during onboarding and substitute the firm's
   mirror convention where they are not -- assume egress is blocked
@@ -498,12 +510,15 @@ Repo-side artifacts are done; environment-side work remains.
    (section 4.1 -- note the `-v ...:Z` parquet mount); record any
    path/permission fixes back into the Dockerfile.
    - [ ] done
-3. **Registry decision (Phase B gate)**: GitLab Container Registry vs
-   an existing firm ACR -- resolved during AKS onboarding. Then: push
-   access for CI, pull access for each cluster (imagePullSecret or
-   AcrPull), fill `image.registry` in the four values files. Decide
-   the PDFs-in-CI-images question (section 3 open point) at the same
-   time.
+3. **Registry wiring (Phase B gate)**: the firm's INTERNAL registry,
+   confirmed during AKS onboarding. Replace the placeholder paths --
+   `BASE_IMAGE`, `UV_IMAGE`, `KANIKO_IMAGE`, `AZCLI_IMAGE` in
+   `.gitlab-ci.yml`, the `BASE_IMAGE` default in the Dockerfile, and
+   `mcp.parquet.stagingImage` in `values.yaml`. Then: push access for
+   CI, pull access for each cluster (imagePullSecret), and fill
+   `image.registry` in the four values files. Confirm a PyPI index is
+   reachable from the runners, and decide the PDFs-in-CI-images
+   question (section 3 open point) at the same time.
    - [ ] done
 4. **`deploy/chart/`** per section 5, `values.yaml` fully commented.
    - [x] done -- lints + renders against all four values files

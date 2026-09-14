@@ -17,11 +17,16 @@
 # job token below just works. Point it at a firm ACR instead by
 # overriding REGISTRY_BASE + REGISTRY_USER + REGISTRY_PASSWORD.
 #
-# Egress note: job images pull from ghcr.io (uv) and gcr.io (kaniko);
-# the base image pulls from mcr.microsoft.com. Confirm all three are
-# reachable from the firm's runners during onboarding, and substitute
-# the firm's mirror convention if not (the extensions.duckdb.org
-# lesson: assume egress is blocked until proven otherwise).
+# Image note: every image here -- the two job images, the kaniko
+# executor, the azure-cli deploy image, and the Dockerfile's base --
+# comes from the firm's INTERNAL registry. The values below are
+# PLACEHOLDERS; replace them once, here, with the real paths. They are
+# variables rather than literals so a registry move is one edit.
+#
+# Do not assume public egress: the extensions.duckdb.org lesson is to
+# treat anything outside the firm's network as blocked until proven
+# otherwise. The image builds also need a PyPI index reachable from
+# the runners -- see the note in the root Dockerfile.
 
 stages: [test, build, deploy]
 
@@ -30,18 +35,25 @@ variables:
   REGISTRY_USER: $CI_REGISTRY_USER
   REGISTRY_PASSWORD: $CI_REGISTRY_PASSWORD
 
+  # -- PLACEHOLDERS: internal registry paths --
+  # BASE_IMAGE must carry Python 3.12 (mcp-server/.python-version).
+  BASE_IMAGE: registry.internal.example.com/python:3.12-slim
+  UV_IMAGE: registry.internal.example.com/astral-sh/uv:python3.12-bookworm
+  KANIKO_IMAGE: registry.internal.example.com/kaniko-project/executor:debug
+  AZCLI_IMAGE: registry.internal.example.com/azure-cli:latest
+
 # -- test: the same suites run at every feature checkpoint --
 
 test:mcp:
   stage: test
-  image: ghcr.io/astral-sh/uv:python3.12-bookworm
+  image: $UV_IMAGE
   script:
     - cd mcp-server
     - uv run --with pytest pytest tests/ -q
 
 test:agent:
   stage: test
-  image: ghcr.io/astral-sh/uv:python3.12-bookworm
+  image: $UV_IMAGE
   script:
     - cd agent-client
     - uv run --with pytest --with httpx --with 'fakeredis[lua]' pytest tests_api/ -q
@@ -51,7 +63,7 @@ test:agent:
 .kaniko: &kaniko
   stage: build
   image:
-    name: gcr.io/kaniko-project/executor:debug
+    name: $KANIKO_IMAGE
     entrypoint: [""]
   before_script:
     - mkdir -p /kaniko/.docker
@@ -79,16 +91,23 @@ build:image:
     - /kaniko/executor
       --context "$CI_PROJECT_DIR"
       --dockerfile "$CI_PROJECT_DIR/Dockerfile"
+      --build-arg BASE_IMAGE="$BASE_IMAGE"
       --destination "$REGISTRY_BASE/agnes:$CI_COMMIT_SHORT_SHA"
 
 # -- deploy: same chart + same SHA through all four clusters --
 
 .deploy: &deploy
   stage: deploy
-  image: mcr.microsoft.com/azure-cli
+  image: $AZCLI_IMAGE
   before_script:
     # az is in the image; add kubectl+kubelogin (az aks install-cli)
-    # and a pinned helm
+    # and a pinned helm.
+    #
+    # get.helm.sh is PUBLIC egress and has been observed returning 403
+    # from inside the firm's network. If it is blocked, bake helm and
+    # kubectl into an internal deploy image and drop these three lines
+    # -- do not work around it by resolving helm at deploy time from
+    # somewhere unpinned.
     - az aks install-cli
     - curl -fsSL https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz | tar -xz
     - mv linux-amd64/helm /usr/local/bin/helm

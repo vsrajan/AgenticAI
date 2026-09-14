@@ -16,9 +16,9 @@
 # Values files are plain YAML in git. They hold NO secrets, ever.
 
 image:
-  # registry base, e.g. registry.gitlab.com/<group>/<project> or
-  # <firm-acr>.azurecr.io -- the Phase B decision (deploy.md s2).
-  # Local podman smoke tests need no registry at all.
+  # registry base for OUR image -- the firm's internal registry, e.g.
+  # registry.internal.example.com/<group> (the Phase B decision,
+  # deploy.md s2). Local podman smoke tests need no registry at all.
   registry: ""
   # ONE image now: both projects in one container (Dockerfile at the
   # repo root, built with the repo root as context).
@@ -124,9 +124,13 @@ mcp:
     # dataset map handed to the server. ABSOLUTE container paths on the
     # /data volume -- the parquet lesson: never relative. A directory
     # auto-expands to dir/*.parquet and marker files are skipped.
-    sources: "Resources=/data/export/Resource.parquet,Entitlements=/data/export/entitlement.parquet"
-    # image that runs the az download; pin to a firm-approved tag
-    stagingImage: "mcr.microsoft.com/azure-cli:2.64.0"
+    # NOTE the exact export names: Resource.parquet and
+    # Entitlement.parquet, both SINGULAR, capitalised. The dataset
+    # NAMES the agent sees are the plurals on the left.
+    sources: "Resources=/data/export/Resource.parquet,Entitlements=/data/export/Entitlement.parquet"
+    # image that runs the az download. PLACEHOLDER: replace with the
+    # firm's internal registry path, and pin to a firm-approved tag.
+    stagingImage: "registry.internal.example.com/azure-cli:2.64.0"
 
 ingress:
   enabled: true

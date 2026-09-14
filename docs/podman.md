@@ -105,15 +105,39 @@ sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$(whoami)"
 podman system migrate        # re-creates the user namespace
 ```
 
-A quick end-to-end check that the engine works at all:
+**Set the base image once.** Images come from the firm's internal
+registry, not a public one. The Dockerfile takes it as a build arg with
+a placeholder default, so set it here and reuse it in every command
+below:
 
 ```bash
-podman run --rm mcr.microsoft.com/mirror/docker/library/python:3.12-slim python -V
+export BASE_IMAGE=registry.internal.example.com/python:3.12-slim   # REPLACE
 ```
 
-Using the mcr mirror here rather than Docker Hub is deliberate: it is
-the same registry the Dockerfile pulls from, so this doubles as an
-egress check for the one external dependency the build has.
+It must carry Python 3.12 -- what `mcp-server/.python-version` pins --
+because the Dockerfile sets `UV_PYTHON_DOWNLOADS=never` and will fail
+loudly rather than quietly fetch a different interpreter.
+
+A quick end-to-end check that the engine and the registry both work:
+
+```bash
+podman pull "$BASE_IMAGE"
+podman run --rm "$BASE_IMAGE" python -V      # -> Python 3.12.x
+```
+
+Do this before anything else. It is the only registry the build
+touches, and a pull failure here is a credentials or network problem,
+not an application problem. If the registry needs a login:
+
+```bash
+podman login registry.internal.example.com     # REPLACE
+```
+
+**The build also needs a PyPI index.** `pip install uv` and both
+`uv sync` runs resolve packages, so an internal container registry
+usually implies an internal PyPI mirror too. If PyPI is unreachable
+from this host, set `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` in the
+Dockerfile before building -- there is a comment marking the spot.
 
 ## 3. Prepare the host
 
@@ -125,16 +149,30 @@ mounted volume, never host paths. This is the container edition of the
 parquet lesson.
 
 ```bash
-export AGNES_DATA=/projects/agnes-agent/mcp-data     # host side
+export AGNES_DATA=/projects/agnes-agent/mcp-server/mcp-data    # host side
 ls -R "$AGNES_DATA" | head -20
 ```
 
-You should see the Spark export layout:
+You should see the Spark export layout -- each `.parquet` is a
+DIRECTORY of part files, not a file:
 
 ```
 export/Resource.parquet/part-00000-....parquet
-export/entitlement.parquet/part-00000-....parquet
+export/Entitlement.parquet/part-00000-....parquet
 ```
+
+Both export names are SINGULAR and capitalised (`Resource`,
+`Entitlement`); the dataset names the agent sees are the plurals
+(`Resources`, `Entitlements`), set on the left of each pair in
+`MCP_PARQUET_SOURCES`. Getting the case wrong is a silent
+`0 datasets`, because a glob that matches nothing is not an error.
+
+`mcp-data` sits beside `docs/` inside `mcp-server/`, and both are
+excluded from the build context by the root `.dockerignore` (`mcp-data`
+and `*/mcp-data`) -- the exports are mounted at runtime, never baked.
+If your `mcp-data` is one level up at `/projects/agnes-agent/mcp-data`
+instead, change `AGNES_DATA` and everything below follows, since every
+command references the variable.
 
 ### 3.2 Make the files readable by the container user
 
@@ -157,8 +195,7 @@ that already had it, which is exactly what you want for a data tree.
 Verify from inside a container before you build anything real:
 
 ```bash
-podman run --rm -v "$AGNES_DATA":/data:z \
-  mcr.microsoft.com/mirror/docker/library/python:3.12-slim \
+podman run --rm -v "$AGNES_DATA":/data:z "$BASE_IMAGE" \
   sh -c 'id; ls -la /data/export'
 ```
 
@@ -204,12 +241,17 @@ cannot reproduce or trace back to a SHA:
 
 ```bash
 cd /projects/agnes-agent          # THE REPO ROOT
+ls                                # -> agent-client  mcp-server  Dockerfile
 git status                        # should be clean
 git rev-parse --short HEAD        # the tag you would use in the chart
 ```
 
+`/projects/agnes-agent` holds both project folders plus the root
+`Dockerfile` and `.dockerignore`. That is the context the build needs.
+
 ```bash
-podman build -t agnes:local -f Dockerfile .
+podman build -t agnes:local -f Dockerfile \
+  --build-arg BASE_IMAGE="$BASE_IMAGE" .
 ```
 
 Two things about that command line matter:
@@ -344,7 +386,7 @@ REDIS_URL=redis://127.0.0.1:6379/0
 # -- MCP server settings, read by the CHILD process --
 # absolute CONTAINER paths on the mounted volume, never host paths
 MCP_DATA_SOURCE=parquet
-MCP_PARQUET_SOURCES=Resources=/data/export/Resource.parquet/*.parquet,Entitlements=/data/export/entitlement.parquet/*.parquet
+MCP_PARQUET_SOURCES=Resources=/data/export/Resource.parquet/*.parquet,Entitlements=/data/export/Entitlement.parquet/*.parquet
 MCP_DB_PATH=/duckdb/mcp_data.duckdb
 MCP_LOG_LEVEL=INFO
 MCP_DATA_REFRESH_MINUTES=15
@@ -745,7 +787,7 @@ podman logs agnes-a | grep -E 'took=' | tail -20
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `COPY failed: no such file or directory` | build context was a project directory | build from the REPO ROOT: `podman build -t agnes:local -f Dockerfile .` |
+| `COPY failed: no such file or directory` | build context was a project directory | build from `/projects/agnes-agent`, the parent holding BOTH `agent-client/` and `mcp-server/` |
 | `Data store ready: 0 datasets` | the child fell back to CSV mode | check the env file reached it: `podman exec agnes-a env \| grep MCP_`; check the paths are CONTAINER paths under `/data`; check the glob matches actual part files |
 | `permission denied` reading `/data` | rootless UID mapping (section 3.2) | `chmod -R a+rX "$AGNES_DATA"`, verify with `podman run --rm -v ...:z ... ls -la /data` |
 | Reads worked, then stopped after starting the second container | `:Z` private relabel, applied twice | use `:z` lowercase on both |
@@ -757,7 +799,8 @@ podman logs agnes-a | grep -E 'took=' | tail -20
 | Tokens arrive as one lump | proxy buffering | `proxy_buffering off;` in `lb.conf` |
 | `cannot set limit ... cgroup` | cgroups v1 rootless (RHEL 8 default) | drop `--memory`/`--cpus`, measure with `podman stats` |
 | `there might not be enough IDs available` | no subuid/subgid entries | section 2: `usermod --add-subuids ...` then `podman system migrate` |
-| Base image pull fails | egress to `mcr.microsoft.com` blocked | confirm with the section 2 probe; substitute the firm's mirror |
+| Base image pull fails | wrong internal registry path, or not logged in | `podman pull "$BASE_IMAGE"` on its own (section 2); `podman login <registry>` |
+| `pip`/`uv sync` cannot reach an index | PyPI blocked on this network | set `PIP_INDEX_URL` / `UV_DEFAULT_INDEX` to the firm's mirror in the Dockerfile (there is a comment marking the spot) |
 | nginx `/var/log/nginx/error.log` permission denied | cosmetic probe before the config is read | ignore, or add `-e nginx-lb-error.log` |
 
 **A general note on `podman logs`.** Both halves log to this one
