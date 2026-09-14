@@ -42,11 +42,25 @@ FROM ${BASE_IMAGE}
 RUN pip install --no-cache-dir uv==0.8.17
 
 # non-root from the start; /app subdirectories created up front so
-# COPY --chown never has to rewrite ownership of a large tree
-RUN useradd --create-home app \
-    && mkdir -p /app/mcp-server /app/agent-client \
-    && chown -R app:app /app
-USER app
+# COPY --chown never has to rewrite ownership of a large tree.
+#
+# The account is written straight into /etc/passwd rather than created
+# with useradd, because useradd is NOT present on every base an
+# internal registry might serve under a python:3.12 tag -- alpine ships
+# busybox adduser instead, and ubi-minimal has neither. Appending two
+# lines needs no package and works on all of them. Guarded so it is a
+# no-op if the base already defines uid 1000.
+#
+# HOME is set explicitly: a numeric USER with no home directory leaves
+# it unset, and uv then has nowhere to put its cache.
+RUN mkdir -p /app/mcp-server /app/agent-client /home/app \
+    && if ! getent passwd 1000 > /dev/null 2>&1; then \
+         printf 'app:x:1000:1000:app:/home/app:/sbin/nologin\n' >> /etc/passwd; \
+         printf 'app:x:1000:\n' >> /etc/group; \
+       fi \
+    && chown -R 1000:1000 /app /home/app
+ENV HOME=/home/app
+USER 1000:1000
 WORKDIR /app
 
 # 3.12 is what mcp-server/.python-version pins. agent-client had no pin
@@ -60,21 +74,21 @@ ENV UV_PYTHON_DOWNLOADS=never
 # manifests only, so editing source never re-installs dependencies.
 # --no-install-project skips each package itself; its source is not in
 # the layer yet.
-COPY --chown=app:app mcp-server/pyproject.toml mcp-server/uv.lock ./mcp-server/
+COPY --chown=1000:1000 mcp-server/pyproject.toml mcp-server/uv.lock ./mcp-server/
 RUN uv sync --frozen --no-install-project --no-dev --project /app/mcp-server
 
-COPY --chown=app:app agent-client/pyproject.toml agent-client/uv.lock ./agent-client/
+COPY --chown=1000:1000 agent-client/pyproject.toml agent-client/uv.lock ./agent-client/
 RUN uv sync --frozen --no-install-project --no-dev --project /app/agent-client
 
 # -- project layers --
 # mcp-server carries docs/ (PDFs + the config JSONs): immutable, fast,
 # per aks.md section 4. Parquet data does NOT bake in -- it is staged at
 # runtime by the initContainer (docs/P0.md section 11.9).
-COPY --chown=app:app mcp-server/src/ ./mcp-server/src/
-COPY --chown=app:app mcp-server/docs/ ./mcp-server/docs/
+COPY --chown=1000:1000 mcp-server/src/ ./mcp-server/src/
+COPY --chown=1000:1000 mcp-server/docs/ ./mcp-server/docs/
 RUN uv sync --frozen --no-dev --project /app/mcp-server
 
-COPY --chown=app:app agent-client/src/ ./agent-client/src/
+COPY --chown=1000:1000 agent-client/src/ ./agent-client/src/
 RUN uv sync --frozen --no-dev --project /app/agent-client
 
 # -- how the agent starts the server --

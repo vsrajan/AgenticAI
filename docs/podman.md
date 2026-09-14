@@ -114,9 +114,32 @@ below:
 export BASE_IMAGE=registry.internal.example.com/python:3.12-slim   # REPLACE
 ```
 
-It must carry Python 3.12 -- what `mcp-server/.python-version` pins --
-because the Dockerfile sets `UV_PYTHON_DOWNLOADS=never` and will fail
-loudly rather than quietly fetch a different interpreter.
+**What the base has to provide.** An internal registry may serve
+something quite different under a `python:3.12`-shaped tag, so check
+rather than assume:
+
+```bash
+podman run --rm "$BASE_IMAGE" cat /etc/os-release
+podman run --rm "$BASE_IMAGE" python -V
+podman run --rm "$BASE_IMAGE" python -c "import sysconfig; print(sysconfig.get_platform())"
+```
+
+Two requirements:
+
+- **Python 3.12** -- what `mcp-server/.python-version` pins. The
+  Dockerfile sets `UV_PYTHON_DOWNLOADS=never`, so a mismatch fails
+  loudly rather than quietly fetching a second interpreter.
+- **glibc, not musl.** `sysconfig.get_platform()` should say
+  `linux-x86_64` (a manylinux world). If it says something with
+  `musl` in it, the base is Alpine -- and `duckdb` and `pymupdf` are
+  compiled wheels. Where a musllinux wheel does not exist, uv falls
+  back to building from source, which needs a full toolchain that a
+  slim image does not have. Prefer a Debian- or UBI-based image.
+
+The Dockerfile does NOT require `useradd`: the unprivileged account is
+written straight into `/etc/passwd`, because alpine ships busybox
+`adduser` instead and ubi-minimal has neither. Any base with a shell
+and pip will build.
 
 A quick end-to-end check that the engine and the registry both work:
 
@@ -930,6 +953,8 @@ podman logs agnes-a | grep -E 'took=' | tail -20
 | Symptom | Cause | Fix |
 |---|---|---|
 | `COPY failed: no such file or directory` | build context was a project directory | build from `/projects/agnes-agent`, the parent holding BOTH `agent-client/` and `mcp-server/` |
+| `useradd: command not found` at the user step | the base is not Debian -- alpine has busybox `adduser`, ubi-minimal has neither | already handled: the Dockerfile writes the account into `/etc/passwd` directly. If you see this, your Dockerfile predates that fix -- pull the branch |
+| `uv sync` tries to BUILD duckdb or pymupdf from source | musl base (alpine): no matching compiled wheel, so uv falls back to source, and a slim image has no toolchain | use a glibc base (Debian/UBI); confirm with `sysconfig.get_platform()` in section 2 |
 | `Data store ready: 0 datasets` | the child fell back to CSV mode | check the env file reached it: `podman exec agnes-a env \| grep MCP_`; check the paths are CONTAINER paths under `/data`; check the glob matches actual part files |
 | `permission denied` reading `/data` | rootless UID mapping (section 3.2) | `chmod -R a+rX "$AGNES_DATA"`, verify with `podman run --rm -v ...:z ... ls -la /data` |
 | `id` prints but `ls /data/export` shows nothing | a missing path reports on STDERR -- the listing did fail | re-run with `2>&1` (section 3.2), then work through 3.2.1 |
