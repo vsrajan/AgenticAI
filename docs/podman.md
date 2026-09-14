@@ -207,8 +207,45 @@ You want `id` to print, `/data` to list the `export` directory, and
 ### 3.2.1 When the mount looks empty
 
 If `id` prints but the listings do not, the container ran fine and the
-problem is the MOUNT. Work through these three in order -- they are
-cheap, and each rules out a different cause.
+problem is the MOUNT. Work through these in order -- they are cheap,
+and each rules out a different cause.
+
+**0. Did the bind actually happen?** Ask this FIRST, because it splits
+the problem in half and depends on no theory at all. Every other step
+below is guesswork until you know the answer:
+
+```bash
+podman run --rm -v "$AGNES_DATA":/data "$BASE_IMAGE" sh -c '
+  stat -c "dev=%d %n" / /data
+  echo "--- listing ---"
+  ls -la /data
+  echo "rc=$?"
+  echo "--- what the kernel sees ---"
+  cat /proc/self/mountinfo | grep -w /data || echo "NO MOUNT AT /data"
+' 2>&1
+```
+
+Compare the two `dev=` numbers:
+
+- **Different** -> the bind DID happen and `/data` is a separate
+  filesystem. If it still lists nothing, you are mounting a real but
+  empty directory: go to step 1 and check the host path.
+- **THE SAME** -> no mount happened at all. `/data` is just an empty
+  directory inside the container's own image layer, which is why there
+  is no error: podman created the mount point and put nothing in it.
+  That is a podman-side problem, not a permissions or SELinux one --
+  `podman inspect` the container's `Mounts`, check whether podman is
+  running rootless as the same user that owns the path
+  (`podman info --format '{{.Host.Security.Rootless}}'`, and note
+  `sudo` does NOT carry `$AGNES_DATA` through), and check for an outer
+  container boundary: if this RHEL machine is itself a pod, a path that
+  is a volume mount in the OUTER container may not propagate into the
+  inner one.
+
+**A shortcut on the two SELinux steps below:** if `getenforce` says
+`Disabled`, podman ignores the `z` and `Z` suffixes entirely, so they
+can be neither the cause nor the cure. Skip steps 2 and 3 and spend
+the time on 0 and 1.
 
 **1. Is the host path what you think it is?** Check in the same shell
 that runs podman:
@@ -855,7 +892,8 @@ podman logs agnes-a | grep -E 'took=' | tail -20
 | `Data store ready: 0 datasets` | the child fell back to CSV mode | check the env file reached it: `podman exec agnes-a env \| grep MCP_`; check the paths are CONTAINER paths under `/data`; check the glob matches actual part files |
 | `permission denied` reading `/data` | rootless UID mapping (section 3.2) | `chmod -R a+rX "$AGNES_DATA"`, verify with `podman run --rm -v ...:z ... ls -la /data` |
 | `id` prints but `ls /data/export` shows nothing | a missing path reports on STDERR -- the listing did fail | re-run with `2>&1` (section 3.2), then work through 3.2.1 |
-| `/data` mounts EMPTY while the host path has files | wrong `$AGNES_DATA` (podman creates a missing source dir and mounts it empty), or a filesystem `:z` cannot relabel | section 3.2.1 steps 1 and 2 |
+| `/data` mounts EMPTY while the host path has files | wrong `$AGNES_DATA` (podman creates a missing source dir and mounts it empty), or no bind happened at all | section 3.2.1 step 0 first -- the `dev=` comparison says which |
+| `/data` has the SAME `dev=` as `/` | no bind mount happened; `/data` is an empty dir in the image layer | section 3.2.1 step 0: check `podman inspect` Mounts, rootless-vs-sudo, and outer-container mount propagation |
 | `/data` unreadable on an NFS/CIFS/fuse mount | `:z` needs an extended attribute those filesystems do not carry, so the relabel silently no-ops | drop `:z`, add `--security-opt label=disable` (section 3.2.1 step 2) |
 | Reads worked, then stopped after starting the second container | `:Z` private relabel, applied twice | use `:z` lowercase on both |
 | `IOException: Could not set lock on file` | two containers, one DuckDB file | one named volume per container at `/duckdb` |
