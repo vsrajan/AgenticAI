@@ -395,6 +395,44 @@ def test_mcp_config_accepts_underscore_spelling(monkeypatch):
     assert connection["url"].endswith("/mcp")
 
 
+def test_mcp_config_stdio_passes_environment_to_the_child(monkeypatch):
+    # REGRESSION: without an explicit env key the MCP SDK forwards only
+    # get_default_environment() -- HOME, LOGNAME, PATH, SHELL, TERM,
+    # USER -- so every MCP_* setting is dropped and the server starts on
+    # its built-in defaults: csv mode, db file beside the docs dir. No
+    # exception, no log line, just the wrong data. Assert the settings
+    # actually reach the child, not merely that the key exists.
+    from mcp.client.stdio import DEFAULT_INHERITED_ENV_VARS
+    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+
+    monkeypatch.setenv("MCP_TRANSPORT", "stdio")
+    monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
+    monkeypatch.setenv("MCP_SERVER_COMMAND", "uv")
+    monkeypatch.setenv("MCP_SERVER_ARGS", "run --project /app/mcp-server mcp-docs-server")
+    monkeypatch.setenv("MCP_DATA_SOURCE", "parquet")
+    monkeypatch.setenv("MCP_DB_PATH", "/duckdb/mcp_data.duckdb")
+
+    connection = _get_mcp_server_config()["access-governance-docs"]
+    assert connection["transport"] == "stdio"
+    assert connection["args"] == ["run", "--project", "/app/mcp-server", "mcp-docs-server"]
+
+    child_env = connection["env"]
+    assert child_env["MCP_DATA_SOURCE"] == "parquet"
+    assert child_env["MCP_DB_PATH"] == "/duckdb/mcp_data.duckdb"
+    # and it is a real environment, not just the SDK's safe allowlist
+    assert set(child_env) - set(DEFAULT_INHERITED_ENV_VARS)
+
+
+def test_mcp_config_http_does_not_pass_an_environment(monkeypatch):
+    # env is meaningless over HTTP -- there is no child process to spawn
+    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+
+    monkeypatch.setenv("MCP_TRANSPORT", "streamable-http")
+    monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
+    connection = _get_mcp_server_config()["access-governance-docs"]
+    assert "env" not in connection
+
+
 def test_mcp_config_rejects_unknown_transport(monkeypatch):
     from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
 

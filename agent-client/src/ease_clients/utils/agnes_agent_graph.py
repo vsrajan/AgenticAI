@@ -989,6 +989,16 @@ def _get_mcp_server_config() -> dict:
                 "command": command,
                 "args": args,
                 "transport": "stdio",
+                # pass our environment explicitly. The MCP SDK does NOT
+                # inherit it: when this key is absent it forwards only
+                # get_default_environment() -- HOME, LOGNAME, PATH,
+                # SHELL, TERM, USER -- and every MCP_* setting is
+                # dropped, so the server silently starts on its
+                # built-in defaults (csv mode, db file beside the docs
+                # dir). Wrong data, no error. The child is our own
+                # process in our own trust domain, so the SDK's
+                # allowlist buys us nothing here.
+                "env": dict(os.environ),
             }
         }
 
