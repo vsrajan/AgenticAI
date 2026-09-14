@@ -332,6 +332,14 @@ means look back at steps 1 and 2.
 
 ### 3.3 SELinux: `:z` lowercase, not `:Z`
 
+> **Nothing to run here.** If `getenforce` says `Disabled` (or
+> `Permissive`), podman ignores the `z` and `Z` suffixes and this
+> section is background only -- keep the `:z` in the commands anyway,
+> since it costs nothing and is correct the day this host is enforcing.
+> Read it once regardless: the distinction below decides whether your
+> SECOND agent container silently breaks the first, and the AKS nodes
+> are not this machine.
+
 On SELinux-enforcing RHEL a bind mount needs a relabel suffix or every
 read fails with EACCES. Which one matters:
 
