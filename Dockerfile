@@ -78,21 +78,30 @@ WORKDIR /app
 # verified to install on 3.12 (single-container-stdio.md section 12's
 # open question, now closed).
 #
-# UV_PYTHON pins the request explicitly instead of leaving it to
-# discovery. Without it uv asks whatever the PROJECT implies, and a
-# stray .python-version file or a .venv built elsewhere on a different
-# version makes it demand an interpreter this image does not have:
+# UV_PYTHON names the interpreter explicitly, so BOTH projects resolve
+# to the same one. Some bases carry several (UBI commonly has a system
+# python3 alongside the app-root one), and without this the two uv sync
+# runs can silently pick different interpreters.
 #
-#   error: no interpreter found for Python==3.11.* in managed
-#   installations or search path
+# It is an ARG, not a literal, because it has to track BASE_IMAGE: two
+# hardcoded versions that must agree is a trap, so a build that moves
+# to a 3.13 base passes both args together.
 #
-# agent-client resolved to 3.11 on the dev machine, so that is a live
-# hazard, not a hypothetical. UV_PYTHON overrides both sources.
+# It does NOT override project.requires-python, and cannot rescue a
+# pyproject.toml that excludes the image's interpreter. If you see
+#
+#   error: no interpreter found for Python==3.11.* ...
+#   error: The requested interpreter resolved to Python 3.12.x, which
+#   is incompatible with the project's Python requirement
+#
+# then requires-python is the thing to fix, not this. Both projects
+# declare >=3.10 on purpose.
 #
 # UV_PYTHON_DOWNLOADS=never keeps the failure loud: uv must use the
 # base image's interpreter, never quietly fetch a second one.
+ARG PYTHON_VERSION=3.12
 ENV UV_PYTHON_DOWNLOADS=never \
-    UV_PYTHON=3.12
+    UV_PYTHON=${PYTHON_VERSION}
 
 # -- dependency layers, both projects --
 # manifests only, so editing source never re-installs dependencies.
