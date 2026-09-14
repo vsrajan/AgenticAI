@@ -136,10 +136,19 @@ Two requirements:
   back to building from source, which needs a full toolchain that a
   slim image does not have. Prefer a Debian- or UBI-based image.
 
-The Dockerfile does NOT require `useradd`: the unprivileged account is
-written straight into `/etc/passwd`, because alpine ships busybox
-`adduser` instead and ubi-minimal has neither. Any base with a shell
-and pip will build.
+The Dockerfile does NOT require `useradd`, and does NOT assume the
+base builds as root. UBI runtime and minimal images drop shadow-utils
+and often declare a non-root `USER` of their own, so the Dockerfile
+sets `USER root` for the build and writes the unprivileged account
+into `/etc/passwd` directly. Any base with a shell and pip will build;
+a UBI python runtime image is a good choice, being glibc.
+
+Useful to know which user the base declares, since it explains a whole
+class of permission errors during a build:
+
+```bash
+podman inspect "$BASE_IMAGE" --format '{{.Config.User}}'
+```
 
 A quick end-to-end check that the engine and the registry both work:
 
@@ -953,7 +962,8 @@ podman logs agnes-a | grep -E 'took=' | tail -20
 | Symptom | Cause | Fix |
 |---|---|---|
 | `COPY failed: no such file or directory` | build context was a project directory | build from `/projects/agnes-agent`, the parent holding BOTH `agent-client/` and `mcp-server/` |
-| `useradd: command not found` at the user step | the base is not Debian -- alpine has busybox `adduser`, ubi-minimal has neither | already handled: the Dockerfile writes the account into `/etc/passwd` directly. If you see this, your Dockerfile predates that fix -- pull the branch |
+| `useradd: command not found` at the user step | the base is not Debian -- UBI runtime/minimal drop shadow-utils, alpine has busybox `adduser` | already handled: the Dockerfile writes the account into `/etc/passwd` directly. If you see this, your Dockerfile predates that fix -- pull the branch |
+| `permission denied` during a build step (pip, mkdir, /etc/passwd) | the base declares a non-root `USER`, common on UBI images | already handled by `USER root` at the top of the build. Check with `podman inspect "$BASE_IMAGE" --format '{{.Config.User}}'` |
 | `uv sync` tries to BUILD duckdb or pymupdf from source | musl base (alpine): no matching compiled wheel, so uv falls back to source, and a slim image has no toolchain | use a glibc base (Debian/UBI); confirm with `sysconfig.get_platform()` in section 2 |
 | `Data store ready: 0 datasets` | the child fell back to CSV mode | check the env file reached it: `podman exec agnes-a env \| grep MCP_`; check the paths are CONTAINER paths under `/data`; check the glob matches actual part files |
 | `permission denied` reading `/data` | rootless UID mapping (section 3.2) | `chmod -R a+rX "$AGNES_DATA"`, verify with `podman run --rm -v ...:z ... ls -la /data` |

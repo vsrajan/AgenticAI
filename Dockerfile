@@ -30,6 +30,14 @@
 ARG BASE_IMAGE=registry.internal.example.com/python:3.12-slim
 FROM ${BASE_IMAGE}
 
+# build as root explicitly. Several bases an internal registry serves
+# -- UBI python runtime images in particular -- declare a non-root USER
+# of their own, and then installing packages or writing /etc/passwd
+# below fails with permission denied. Harmless where the base is
+# already root. The final USER further down is what the container runs
+# as; this only covers the build.
+USER root
+
 # uv, pinned so builds are reproducible end to end.
 #
 # NOTE for a restricted network: this pulls from PyPI, and so does
@@ -46,10 +54,12 @@ RUN pip install --no-cache-dir uv==0.8.17
 #
 # The account is written straight into /etc/passwd rather than created
 # with useradd, because useradd is NOT present on every base an
-# internal registry might serve under a python:3.12 tag -- alpine ships
-# busybox adduser instead, and ubi-minimal has neither. Appending two
-# lines needs no package and works on all of them. Guarded so it is a
-# no-op if the base already defines uid 1000.
+# internal registry might serve under a python:3.12 tag -- UBI runtime
+# and minimal images drop shadow-utils, and alpine ships busybox
+# adduser instead. Appending two lines needs no package and works on
+# all of them. Guarded so it is a no-op if the base already defines
+# uid 1000 (UBI images commonly define 1001, not 1000, so the guard
+# usually does not fire).
 #
 # HOME is set explicitly: a numeric USER with no home directory leaves
 # it unset, and uv then has nowhere to put its cache.
