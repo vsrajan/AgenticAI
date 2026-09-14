@@ -192,34 +192,53 @@ chmod -R a+rX "$AGNES_DATA"
 `a+rX` -- capital X -- adds execute only to directories and to files
 that already had it, which is exactly what you want for a data tree.
 
-Verify from inside a container before you build anything real. Note
-the `2>&1`: `ls` reports a missing path on STDERR, and losing that is
-how a failed mount reads as "no output" rather than as an error.
+Verify from inside a container before you build anything real. Three
+separate commands, each running the binary DIRECTLY with no shell
+inside the container -- see the warning below for why that matters:
 
 ```bash
-podman run --rm -v "$AGNES_DATA":/data:z "$BASE_IMAGE" \
-  sh -c 'id; echo "--- /data ---"; ls -la /data; ls -la /data/export' 2>&1
+podman run --rm -v "$AGNES_DATA":/data:z "$BASE_IMAGE" id
+```
+
+```bash
+podman run --rm -v "$AGNES_DATA":/data:z "$BASE_IMAGE" ls -la /data
+```
+
+```bash
+podman run --rm -v "$AGNES_DATA":/data:z "$BASE_IMAGE" ls -la /data/export
 ```
 
 You want `id` to print, `/data` to list the `export` directory, and
 `/data/export` to list `Resource.parquet` and `Entitlement.parquet`.
 
+> **Do not fold these into one `sh -c '...'`.** Quoting is the most
+> fragile thing in this document, and losing it fails SILENTLY. If the
+> single quotes are stripped anywhere between the doc and your shell --
+> some terminals, clipboards, chat clients and ssh wrappers do this --
+> then `sh -c 'id; ls -la /data/export'` becomes `sh -c id` with the
+> rest as positional arguments. `id` runs, `ls` NEVER runs, and there
+> is no error, because nothing failed. That reads exactly like a broken
+> mount and sends you diagnosing the wrong thing. The same stripping
+> turns `sh -c 'grep -w /data ...'` into bare `grep` (`Usage: grep
+> [OPTION]...`) and a multi-line `sh -c` block into `stat: missing
+> operand`. One binary per `podman run` has no quotes to lose.
+
 ### 3.2.1 When the mount looks empty
 
-If `id` prints but the listings do not, the container ran fine and the
-problem is the MOUNT. Work through these in order -- they are cheap,
-and each rules out a different cause.
+If `id` prints but the listings do not, FIRST rule out the quoting
+trap in the 3.2 warning -- that symptom is far more often a stripped
+quote than a broken mount, and it was on the machine this section was
+written for. Once every command is a single binary with no `sh -c`,
+and the listings are still empty, the problem really is the MOUNT.
+Work through these in order -- they are cheap, and each rules out a
+different cause.
 
 **0. Did the bind actually happen?** Ask this FIRST, because it splits
 the problem in half and depends on no theory at all. Every other step
 below is guesswork until you know the answer:
 
-Three separate one-liners, deliberately. A multi-line `sh -c '...'`
-block is easy to mangle when copied through a terminal or an ssh
-session -- lose the newlines and `stat` runs with no file arguments
-and reports `missing operand`. The first two invoke the binary
-DIRECTLY with no shell inside the container at all, so there is no
-nested quoting to break:
+Separate one-liners, each running the binary directly -- for the
+reason in the 3.2 warning above. Do not combine them:
 
 ```bash
 podman run --rm -v "$AGNES_DATA":/data "$BASE_IMAGE" stat -c 'dev=%d %n' / /data
@@ -230,8 +249,12 @@ podman run --rm -v "$AGNES_DATA":/data "$BASE_IMAGE" ls -la /data
 ```
 
 ```bash
-podman run --rm -v "$AGNES_DATA":/data "$BASE_IMAGE" sh -c 'grep -w /data /proc/self/mountinfo || echo NO-MOUNT-AT-/data'
+podman run --rm -v "$AGNES_DATA":/data "$BASE_IMAGE" cat /proc/self/mountinfo | grep -w /data
 ```
+
+(The `grep` runs on the HOST, over the piped output -- so there is no
+shell inside the container and nothing to quote. No output from that
+grep means no mount at `/data`.)
 
 Compare the two `dev=` numbers from the first command:
 
@@ -286,8 +309,7 @@ and disable label confinement for that container instead:
 
 ```bash
 podman run --rm --security-opt label=disable \
-  -v "$AGNES_DATA":/data "$BASE_IMAGE" \
-  sh -c 'ls -la /data; ls -la /data/export' 2>&1
+  -v "$AGNES_DATA":/data "$BASE_IMAGE" ls -la /data/export
 ```
 
 If that works, use `--security-opt label=disable` and drop the `:z`
@@ -431,17 +453,20 @@ podman run --rm agnes:local \
 **No `.env` was baked in** (configuration must arrive from outside):
 
 ```bash
-podman run --rm agnes:local sh -c \
-  'ls /app/agent-client/.env /app/mcp-server/.env 2>&1 || echo "GOOD: no .env in the image"'
+podman run --rm agnes:local ls -la /app/agent-client/.env /app/mcp-server/.env
 ```
+
+You WANT this to fail with `No such file or directory` -- twice.
 
 **The PDFs are baked, the DuckDB cache is not:**
 
 ```bash
 podman run --rm agnes:local ls /app/mcp-server/docs
-podman run --rm agnes:local sh -c \
-  'ls /app/mcp-server/docs/.mcp_data.duckdb 2>&1 || echo "GOOD: no duckdb cache baked"'
+podman run --rm agnes:local ls -la /app/mcp-server/docs/.mcp_data.duckdb
 ```
+
+The first should list PDFs and the config JSONs; the second should
+fail with `No such file or directory`, which is the result you want.
 
 A locally built image includes whatever PDFs this machine has. A
 CI-built image only has what is COMMITTED -- today, the two config
@@ -900,7 +925,9 @@ podman logs agnes-a | grep -E 'took=' | tail -20
 | `Data store ready: 0 datasets` | the child fell back to CSV mode | check the env file reached it: `podman exec agnes-a env \| grep MCP_`; check the paths are CONTAINER paths under `/data`; check the glob matches actual part files |
 | `permission denied` reading `/data` | rootless UID mapping (section 3.2) | `chmod -R a+rX "$AGNES_DATA"`, verify with `podman run --rm -v ...:z ... ls -la /data` |
 | `id` prints but `ls /data/export` shows nothing | a missing path reports on STDERR -- the listing did fail | re-run with `2>&1` (section 3.2), then work through 3.2.1 |
-| `stat: missing operand` | a multi-line `sh -c` block lost its newlines in transit, so stat got no file arguments | use the three one-liners in 3.2.1 step 0, which run the binary directly with no shell in the container |
+| A command prints its FIRST part then stops, with no error | single quotes stripped in transit: `sh -c 'a; b'` ran as `sh -c a`, so only `a` executed and nothing failed | never use `sh -c` -- one binary per `podman run` (section 3.2) |
+| `stat: missing operand` | same cause: `stat` received its format but no file arguments | as above |
+| `Usage: grep [OPTION]... PATTERNS [FILE]...` | same cause: `sh -c 'grep ...'` ran as bare `grep` with no arguments | as above; or pipe the container's output to a grep on the HOST |
 | `/data` mounts EMPTY while the host path has files | wrong `$AGNES_DATA` (podman creates a missing source dir and mounts it empty), or no bind happened at all | section 3.2.1 step 0 first -- the `dev=` comparison says which |
 | `/data` has the SAME `dev=` as `/` | no bind mount happened; `/data` is an empty dir in the image layer | section 3.2.1 step 0: check `podman inspect` Mounts, rootless-vs-sudo, and outer-container mount propagation |
 | `/data` unreadable on an NFS/CIFS/fuse mount | `:z` needs an extended attribute those filesystems do not carry, so the relabel silently no-ops | drop `:z`, add `--security-opt label=disable` (section 3.2.1 step 2) |
