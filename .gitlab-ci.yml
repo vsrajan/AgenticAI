@@ -41,6 +41,13 @@ variables:
   UV_IMAGE: registry.internal.example.com/astral-sh/uv:python3.12-bookworm
   KANIKO_IMAGE: registry.internal.example.com/kaniko-project/executor:debug
   AZCLI_IMAGE: registry.internal.example.com/azure-cli:latest
+  # internal PyPI mirror for the one pip call in the image build.
+  # Leave empty where PyPI is reachable -- pip ignores an empty value.
+  # The uv sync runs need no index: --frozen fetches the exact URLs
+  # recorded in uv.lock, which must therefore be generated inside this
+  # network (a lock full of files.pythonhosted.org URLs is unusable
+  # where PyPI is blocked).
+  PIP_INDEX_URL: ""
 
 # -- test: the same suites run at every feature checkpoint --
 
@@ -92,6 +99,7 @@ build:image:
       --context "$CI_PROJECT_DIR"
       --dockerfile "$CI_PROJECT_DIR/Dockerfile"
       --build-arg BASE_IMAGE="$BASE_IMAGE"
+      --build-arg PIP_INDEX_URL="$PIP_INDEX_URL"
       --destination "$REGISTRY_BASE/agnes:$CI_COMMIT_SHORT_SHA"
 
 # -- deploy: same chart + same SHA through all four clusters --

@@ -165,11 +165,49 @@ not an application problem. If the registry needs a login:
 podman login registry.internal.example.com     # REPLACE
 ```
 
-**The build also needs a PyPI index.** `pip install uv` and both
-`uv sync` runs resolve packages, so an internal container registry
-usually implies an internal PyPI mirror too. If PyPI is unreachable
-from this host, set `PIP_INDEX_URL` and `UV_DEFAULT_INDEX` in the
-Dockerfile before building -- there is a comment marking the spot.
+**The build also needs a package index -- but only for one step.**
+`pip install uv` fetches from PyPI, so on a restricted network pass
+the firm's mirror:
+
+```bash
+export PIP_INDEX_URL=https://registry.internal.example.com/simple   # REPLACE
+podman build -t agnes:local -f Dockerfile \
+  --build-arg BASE_IMAGE="$BASE_IMAGE" \
+  --build-arg PIP_INDEX_URL="$PIP_INDEX_URL" .
+```
+
+Leave it unset where PyPI is reachable; pip ignores an empty value.
+
+The two `uv sync` runs need NO index configuration, because `--frozen`
+fetches the exact URLs recorded in `uv.lock`. That has a consequence
+worth stating plainly: **each `uv.lock` must be generated inside the
+network the image is built in.** A lock full of
+`files.pythonhosted.org` URLs is unusable where PyPI is blocked, and a
+lock full of internal URLs is unusable outside. Check which you have:
+
+```bash
+grep -c 'files.pythonhosted.org' agent-client/uv.lock mcp-server/uv.lock
+```
+
+To regenerate against the internal index, in EACH project directory:
+
+```bash
+cd /projects/agnes-agent/agent-client && uv lock
+cd /projects/agnes-agent/mcp-server   && uv lock
+```
+
+`uv lock` without `--upgrade` uses the existing lock as preferences,
+so versions do not drift -- it changes only what it must. Add
+`--default-index https://.../simple` if uv does not already know the
+mirror, or better, record it once in each `pyproject.toml` so CI and
+every developer resolve identically:
+
+```toml
+[[tool.uv.index]]
+name = "internal"
+url = "https://registry.internal.example.com/simple"
+default = true
+```
 
 ## 3. Prepare the host
 

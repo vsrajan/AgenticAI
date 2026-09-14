@@ -40,13 +40,19 @@ USER root
 
 # uv, pinned so builds are reproducible end to end.
 #
-# NOTE for a restricted network: this pulls from PyPI, and so does
-# every `uv sync` below. An internal container registry usually comes
-# with an internal PyPI mirror -- if PyPI itself is unreachable, set
-# PIP_INDEX_URL and UV_DEFAULT_INDEX to the firm's mirror here. They
-# are deliberately NOT parameterised: an empty index URL is worse than
-# no index URL, so this is an explicit edit rather than a build arg
-# that silently defaults to nothing.
+# On a restricted network this pip call needs the firm's internal PyPI
+# mirror, so it is a build arg:
+#   podman build --build-arg PIP_INDEX_URL=https://<mirror>/simple ...
+# Empty is safe -- pip ignores an empty PIP_INDEX_URL and uses its
+# default -- so the arg costs nothing when PyPI is reachable.
+#
+# The `uv sync` runs further down need NO index configuration: with
+# --frozen, uv fetches the exact URLs recorded in uv.lock. If that
+# lockfile was generated against an internal index, those URLs already
+# point there. That is also why each project's uv.lock must be
+# generated INSIDE the network it will be built in -- a lock full of
+# files.pythonhosted.org URLs is unusable where PyPI is blocked.
+ARG PIP_INDEX_URL=
 RUN pip install --no-cache-dir uv==0.8.17
 
 # non-root from the start; /app subdirectories created up front so
