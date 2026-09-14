@@ -5,14 +5,19 @@ no Docker anywhere) to AKS across four clusters: dev -> test -> uat
 -> prod. It builds on [aks.md](aks.md) (the topology, sizing, and
 probe decisions) and assumes its section 11 glossary.
 
-> **Status (branch AKS-DEPLOY):** the repo-side artifacts are now
-> IMPLEMENTED -- both Dockerfiles, the Helm chart, the four values
+> **Status (branch stdio):** the repo-side artifacts are IMPLEMENTED
+> -- ONE Dockerfile at the repo root, the Helm chart, the four values
 > files, and `.gitlab-ci.yml` are committed and referenced throughout
 > this doc. The chart lints and renders cleanly against all four
 > values files (`helm lint` + `helm template`, verified). What
-> remains is environment-side work: the podman smoke test on the MCP
-> server machine, the Phase B registry decision, Key Vaults, and the
-> actual cluster deploys. Section 9 tracks both halves.
+> remains is environment-side work: the podman smoke test, the Phase B
+> registry decision, Key Vaults, and the actual cluster deploys.
+> Section 9 tracks both halves.
+>
+> This branch deploys ONE workload, not two: the agent runs the MCP
+> server as a child process over stdio, so there is no mcp Deployment,
+> Service, HPA or NetworkPolicy and no MCP bearer token anywhere. Why,
+> and the way back: [single-container-stdio.md](single-container-stdio.md).
 
 The three decisions that shape everything here:
 
@@ -51,7 +56,7 @@ port (the RESP-over-TCP lesson, aks.md section 6).
 
 1. [The progression at a glance](#1-the-progression-at-a-glance)
 2. [Design decisions](#2-design-decisions)
-3. [The two images](#3-the-two-images)
+3. [The image](#3-the-image)
 4. [Building images without Docker](#4-building-images-without-docker)
 5. [The Helm chart](#5-the-helm-chart)
 6. [Configuration: values files vs Key Vault](#6-configuration-values-files-vs-key-vault)
@@ -67,12 +72,12 @@ port (the RESP-over-TCP lesson, aks.md section 6).
 ```
 RHEL hosts (uv processes, .env, redislite)     <- dev inner loop, unchanged forever
       |
-      v  Dockerfiles (committed: mcp-server/Dockerfile, agent-client/Dockerfile)
-build (local):  podman on the MCP server machine -- registry-free,
-                images in the local store, full stack smoke-tested there
+      v  ONE Dockerfile at the repo root (committed: Dockerfile)
+build (local):  podman, registry-free, image in the local store,
+                full stack smoke-tested there
 build (CI):     GitLab CI kaniko (committed: .gitlab-ci.yml) -> registry   <- Phase B
       |
-      v  images in the registry, tagged with the git SHA
+      v  one image in the registry, tagged with the git SHA
 Helm chart (committed: deploy/chart) + deploy/values-dev.yaml  ->  AKS dev
       |   validate: health, MCP tool round-trip, P3.1 rig semantics in-cluster
       v
@@ -93,7 +98,7 @@ container-mode on AKS are behaviorally identical by construction.
 |---|---|---|
 | Local multi-service orchestration | none (processes) | compose needs a Docker host that will never exist here; the redislite + two-terminal rig (P3.1.md section 15) already covers local integration |
 | Manifest management | Helm chart, from day one | four known environments; versioned releases, rollback, promotion of one artifact; conform to any existing firm chart/GitOps standard if one surfaces |
-| Image build, local | podman 5.6.0 on the MCP server machine (confirmed present) | daemonless/rootless; the local phase is fully REGISTRY-FREE -- build, run, and smoke-test both images from the local store; "first run in a container" happens on this machine, not in the cluster |
+| Image build, local | podman 5.6.0 on the MCP server machine (confirmed present) | daemonless/rootless; the local phase is fully REGISTRY-FREE -- build, run, and smoke-test the image from the local store; "first run in a container" happens on this machine, not in the cluster |
 | Image build, pipeline | GitLab CI + kaniko | daemonless, GitLab-native; `az acr build` is NOT assumed (creating ACR resources is blocked by corporate policy) -- it returns only if a firm ACR with Tasks enabled materialises |
 | Registry | DEFERRED to Phase B (first AKS deploy) | nothing local depends on one; `.gitlab-ci.yml` defaults `REGISTRY_BASE` to the project's GitLab Container Registry and overriding it to a firm ACR is a one-variable change; images stay environment-agnostic and git-SHA-tagged either way |
 | Image tags | `<git-sha>` per build | the SHA is the identity that moves through environments; the chart REFUSES to render without an explicit `image.tag`; never promote `latest` |
@@ -101,15 +106,39 @@ container-mode on AKS are behaviorally identical by construction.
 | Azure identity | one user-assigned managed identity per environment, workload-identity-federated to the chart's service account | keyless access to Key Vault (CSI) and the parquet storage account (initContainer) -- same direction as the Entra auth roadmap (aks.md section 8) |
 | Redis | Azure Cache for Redis, OUTSIDE the cluster | nothing to run or template; `REDIS_URL` (embeds the key) comes from Key Vault; `rediss://` on 6380 when TLS is enforced |
 | Base image | `python:3.12-slim` via mcr.microsoft.com mirror | 3.12 is what `mcp-server/.python-version` pins (the doc originally said 3.11 -- corrected); the mirror is byte-identical with no Docker Hub rate limits; uv sync from the committed lockfiles gives identical dependency trees to the RHEL rig |
-| One chart or two? | ONE chart containing both Deployments | the two services version and promote together today; split later only if their release cadences genuinely diverge |
+| One chart or two? | ONE chart, ONE Deployment | on this branch there is only one workload to template: the MCP server is a child process of the agent container, so it has no Deployment, Service or HPA of its own |
+| One image or two? | ONE image carrying both projects | stdio needs a parent-child process relationship, which needs a shared filesystem; two containers in a pod share a network namespace, not a filesystem (single-container-stdio.md section 3) |
 
-## 3. The two images
+## 3. The image
 
-Two committed Dockerfiles, one per service, living next to the code
-they package: [`mcp-server/Dockerfile`](../mcp-server/Dockerfile) and
-[`agent-client/Dockerfile`](../agent-client/Dockerfile), each with a
-[`.dockerignore`](../mcp-server/.dockerignore) beside it. Both follow
-the same pattern; the choices that need explaining:
+ONE committed Dockerfile, at the [repo root](../Dockerfile), with a
+[`.dockerignore`](../.dockerignore) beside it. It carries BOTH
+projects.
+
+This is the change this branch exists for. The agent runs the MCP
+server as a child process over stdio, which needs a parent-child
+process relationship and therefore a shared filesystem -- two
+containers in a pod share a network namespace, not a filesystem, so
+they could only talk over localhost HTTP, which is the auth problem
+the whole design avoids. The reasoning is
+[docs/single-container-stdio.md](single-container-stdio.md) sections 2
+and 3; the way back to two images is section 10 there, and the two
+per-service Dockerfiles it would restore are in the AKS-DEPLOY branch
+history.
+
+Two consequences worth stating plainly, because they are easy to get
+wrong:
+
+- **The build context is the repo root**, not a project directory:
+  `podman build -t agnes:local -f Dockerfile .`. The Dockerfile copies
+  from both `mcp-server/` and `agent-client/`.
+- **Each project keeps its own virtualenv and its own lockfile.**
+  Nothing is merged or resolved across the two -- they share only the
+  interpreter (3.12, what `mcp-server/.python-version` pins;
+  agent-client's full dependency set was verified to install on it).
+  Two `uv sync` invocations, two `--project` paths.
+
+The choices that need explaining:
 
 - **Two-step dependency install.** `uv sync` installs the project
   itself as well as its dependencies, so a naive
@@ -128,22 +157,31 @@ the same pattern; the choices that need explaining:
   as root. `/app` is created explicitly before `WORKDIR` so its
   ownership does not depend on builder quirks.
 - **Startup is `uv run --no-sync <console-script>`** -- the same
-  entry points as the RHEL rig (`mcp-docs-server`, `agent-api`);
-  `--no-sync` stops uv from re-resolving the environment on every
-  container start.
-- **What gets baked:** the MCP image carries `src/` and `docs/`
-  (PDFs + the config JSONs -- immutable, fast, per aks.md section 4);
-  the agent image carries `src/` only. Parquet data does NOT bake --
-  it is staged at runtime by an initContainer (P0 section 11.9).
-  No `.env` is ever copied into an image; configuration arrives from
-  the pod spec (section 6).
-- **The `.dockerignore` files matter more than usual.** The default
+  entry points as the RHEL rig; `--no-sync` stops uv from re-resolving
+  the environment on every container start. The CMD starts `agent-api`
+  only. The MCP server is started BY it, from the env the image sets:
+  `MCP_TRANSPORT=stdio`, `MCP_SERVER_COMMAND=uv`, and
+  `MCP_SERVER_ARGS=run --no-sync --project /app/mcp-server
+  mcp-docs-server`. The `--project` path is absolute on purpose: the
+  child must resolve the mcp-server environment regardless of the
+  parent's working directory.
+- **What gets baked:** both `src/` trees, plus `mcp-server/docs/`
+  (PDFs + the config JSONs -- immutable, fast, per aks.md section 4).
+  Parquet data does NOT bake -- it is staged at runtime by an
+  initContainer (P0 section 11.9). No `.env` is ever copied in;
+  configuration arrives from the pod spec (section 6), and the MCP
+  child inherits it because `_get_mcp_server_config` passes the
+  environment explicitly. (The MCP SDK does NOT do this by default --
+  left alone it forwards only HOME/PATH/SHELL/TERM/USER/LOGNAME, and
+  every `MCP_*` key is dropped, so the server starts healthy on csv
+  defaults and answers from the wrong data.)
+- **The `.dockerignore` matters more than usual.** The default
   `MCP_DB_PATH` puts the DuckDB cache INSIDE `docs/`, and the staged
   parquet lives in the repo tree on the MCP machine -- without the
   committed exclusions (`*.duckdb`, `mcp-data/`, `.venv`, `.env`),
   `COPY docs/` would bake gigabytes of disposable cache (or worse, a
   real `.env`) into the image.
-- **Open point -- PDFs in CI-built images.** `COPY docs/` bakes
+- **Open point -- PDFs in CI-built images.** `COPY mcp-server/docs/` bakes
   whatever the BUILD MACHINE has: local podman builds on the MCP
   machine include its PDFs; a GitLab runner only has what is
   committed (today: the two config JSONs). Before the first
@@ -163,14 +201,15 @@ podman is, from repo source). Everything happens in podman's LOCAL
 image store: no registry, no push, no credentials.
 
 ```bash
-# on the MCP server machine -- always build from committed source:
+# always build from committed source:
 git pull                       # NOT scp from the other machine; the
 git status                     # repo is the source of truth, and a
                                # clean tree = a reproducible image
 
-cd mcp-server  && podman build -t mcp-server:local .
-cd ../agent-client && podman build -t agent-api:local .
-podman images                  # both images, local store only
+# from the REPO ROOT -- the context is the whole repo, and the
+# Dockerfile copies from both mcp-server/ and agent-client/
+podman build -t agnes:local -f Dockerfile .
+podman images                  # one image, local store only
 ```
 
 Running the stack: the parquet exports live on the HOST filesystem,
@@ -182,37 +221,40 @@ volume, not the host paths. The `:Z` suffix is required on RHEL
 may read them; without it every read fails with EACCES.
 
 ```bash
-# 1. MCP server -- mount the staged exports at /data inside the
-#    container (mirrors what the initContainer does in AKS):
-podman run -d --network=host --name mcp \
+# ONE container. It starts agent-api, which spawns the MCP server as a
+# child; there is no second container and no MCP token anywhere.
+podman run -d --network=host --name agnes \
   -v /absolute/host/path/to/mcp-data:/data:Z \
-  -e MCP_TRANSPORT=streamable-http \
-  -e MCP_AUTH=static -e MCP_AUTH_TOKENS=agnes:smoketok \
   -e MCP_DATA_SOURCE=parquet \
   -e MCP_PARQUET_SOURCES='Resources=/data/export/Resource.parquet/*.parquet,Entitlements=/data/export/entitlement.parquet/*.parquet' \
-  mcp-server:local
-podman logs mcp                # MUST show 'Loaded parquet ... rows'
-                               # and 'Data store ready: 2 datasets' --
-                               # 0 datasets means the mount or the
-                               # container paths are wrong
-
-# 2. agent-api -- all three Azure OpenAI vars are required:
-podman run -d --network=host --name agent \
-  -e MCP_SERVER_URL=http://localhost:8000/mcp -e MCP_SERVER_TOKEN=smoketok \
+  -e MCP_DB_PATH=/tmp/mcp_data.duckdb \
   -e AZURE_OPENAI_API_KEY=... -e AZURE_OPENAI_ENDPOINT=... \
   -e AZURE_OPENAI_DEPLOYMENT=... \
   -e AGENT_API_AUTH=static -e AGENT_API_TOKEN=... \
-  agent-api:local
+  agnes:local
 
-# 3. containerized E2E: health, then one real turn
-curl -s http://localhost:8080/health
-podman rm -f mcp agent         # cleanup
+podman logs agnes              # the child's stderr lands here too.
+                               # MUST show 'Data store ready: 2
+                               # datasets' -- 0 datasets means the
+                               # mount, the container paths, or the
+                               # environment pass-through is wrong
+
+# containerized E2E: readiness, liveness, then one real turn
+curl -s http://localhost:8080/health   # MCP child + Redis
+curl -s http://localhost:8080/livez    # MCP child only
+podman exec agnes ps -ef       # ONE mcp-docs-server under agent-api,
+                               # and it stays at one across turns
+podman rm -f agnes             # cleanup
 ```
 
 Notes:
 
 - `--network=host` keeps the localhost URLs working exactly like the
-  process-based rig; both containers share the host's network.
+  process-based rig. Only the agent listens; the MCP server has no
+  port at all on this path.
+- `MCP_DB_PATH` is set away from the default (`<docs dir>/.mcp_data.duckdb`,
+  inside the image layer) for the same reason the chart mounts an
+  emptyDir at `/duckdb`.
 - The point: the first time this app runs inside a container happens
   on this machine, not in a shared cluster. Path assumptions, SELinux
   labels, user permissions, and missing files surface here in
@@ -314,8 +356,9 @@ helm upgrade --install agnes deploy/chart \
 
 Verified in-repo (no cluster needed): `helm lint` passes and
 `helm template` renders cleanly against each of the four values
-files -- dev produces 10 objects (no PDB, no HPA), test 12 (+2 PDBs),
-uat and prod 13 (+HPA).
+files -- dev produces 6 objects (no PDB), test, uat and prod 7 (+PDB).
+The MCP tier's Deployment, Service, HPA and NetworkPolicy are gone
+with the HTTP hop, which is where the drop from 13 comes from.
 
 ## 6. Configuration: values files vs Key Vault
 
@@ -328,30 +371,36 @@ topology truth it is fixed in the template.
 |---|---|---|
 | AZURE_OPENAI_API_KEY | Key Vault `azure-openai-api-key` | until workload identity retires it (aks.md s8) |
 | AGENT_API_TOKEN | Key Vault `agent-api-token` | leg-1 auth |
-| MCP_SERVER_TOKEN | Key Vault `mcp-server-token` | leg-2 auth, agent side |
-| MCP_AUTH_TOKENS | Key Vault `mcp-auth-tokens` | leg-2 auth, server side (`agnes:<token>[,other-agent:...]`) |
 | REDIS_URL | Key Vault `redis-url` | embeds the Azure Cache access key; `rediss://...:6380` under TLS |
 | AZURE_OPENAI_ENDPOINT / DEPLOYMENT / API_VERSION | values `agent.azureOpenAI.*` | dev/prod use different resources and quotas |
 | ingress hostname | values `ingress.host` | agnes-dev... -> agnes... |
-| replicas, HPA min/max, resources | values `mcp.*` / `agent.*` | dev 1 mcp + 2 agents -> prod per aks.md s7 |
+| replicas, resources | values `agent.*` | ONE replica count now -- both halves scale together (dev 2 agents for the in-cluster P3.1 check) |
 | MCP_PARQUET_SOURCES | values `mcp.parquet.sources` | ABSOLUTE container paths onto the staged /data volume |
 | parquet storage account/container (initContainer) | values `mcp.parquet.*` | per-environment data |
 | AGENT_API_CORS_ORIGINS | values `agent.corsOrigins` | permissive in dev, exact origin from test up |
 | AGENT_API_STREAM_FILE | values `agent.streamFile` | on in dev, "" from test upward (P4) |
 | AGENT_API_SESSION_TTL / MAX_SESSIONS / LOCK_TIMEOUT | values `agent.*` | defaults usually fine; P3.1.md s14 before touching the lock TTL |
 | KEEP_LAST_N_MSGS / MAX_TOOL_CONTENT_LEN / log levels | values | tuning knobs |
-| MCP_TRANSPORT / MCP_STATELESS_HTTP / MCP_HOST / ports | template (fixed) | topology truths |
-| MCP_SERVER_URL | template (derived) | in-cluster service DNS |
-| MCP_DATA_SOURCE / MCP_DB_PATH / MCP_DOCS_DIR | template (fixed) | parquet mode, emptyDir paths, baked docs dir |
+| MCP_TRANSPORT / MCP_SERVER_COMMAND / MCP_SERVER_ARGS | ConfigMap (fixed) | how the agent spawns the child; no URL, no port, no token |
+| MCP_DATA_SOURCE / MCP_DB_PATH / MCP_DOCS_DIR | ConfigMap (fixed) | parquet mode, emptyDir paths, baked docs dir |
+
+The MCP half has no secret of its own. `MCP_SERVER_TOKEN` and
+`MCP_AUTH_TOKENS` are gone with the HTTP hop -- stdio has no listener
+to authenticate, which is the entire reason for this topology. That
+is two fewer Key Vault objects to create and rotate per environment.
+
+Note that the MCP settings all arrive in ONE ConfigMap alongside the
+agent's. The child inherits the container's environment, so there is
+no second env block and no `.env` in the image.
 
 How the secret half works (all committed in
 `deploy/chart/templates/secretproviderclass.yaml`): each environment
-gets one Key Vault holding exactly five secrets with the FIXED names
+gets one Key Vault holding exactly THREE secrets with the FIXED names
 in the table above. The Secrets Store CSI driver reads them using the
 workload identity bound to the chart's service account, and syncs
 them into one k8s Secret the Deployments consume as env vars.
 (Mounting the CSI volume is what triggers that sync, which is why
-both Deployments mount it even though nothing reads the files.) The
+the Deployment mounts it even though nothing reads the files.) The
 identity needs two data-plane roles per environment: Key Vault
 secret get, and Storage Blob Data Reader on the parquet account for
 the initContainer.
@@ -367,8 +416,12 @@ What it does, job by job:
 
 - **test:mcp / test:agent** -- the exact per-branch suites run at
   every feature checkpoint, in a uv-equipped image.
-- **build:mcp / build:agent** -- kaniko (daemonless) builds each
-  Dockerfile and pushes `$REGISTRY_BASE/agnes/<name>:$CI_COMMIT_SHORT_SHA`.
+- **build:image** -- kaniko (daemonless) builds the root Dockerfile
+  with the REPO ROOT as context and pushes
+  `$REGISTRY_BASE/agnes:$CI_COMMIT_SHORT_SHA`. That destination has to
+  match what `agnes.image` renders from `image.registry` +
+  `image.repository`; a mismatch is an ImagePullBackOff at deploy
+  time, not a build failure.
   `REGISTRY_BASE` defaults to `$CI_REGISTRY_IMAGE` (the project's
   GitLab Container Registry), for which the built-in job credentials
   just work; Phase B's ACR alternative is a three-variable override
@@ -428,14 +481,15 @@ concrete):
 
 Repo-side artifacts are done; environment-side work remains.
 
-1. **`mcp-server/Dockerfile`** + **`agent-client/Dockerfile`** per
-   section 3, with `.dockerignore` files.
-   - [x] done -- committed on branch AKS-DEPLOY, incl. the two-step
-     uv sync, non-root user, and the duckdb/parquet ignore rules
-2. **podman build + full-stack smoke** of both images on the MCP
-   server machine, registry-free (section 4.1 -- note the `-v ...:Z`
-   parquet mount); record any path/permission fixes back into the
-   Dockerfiles.
+1. **One `Dockerfile` at the repo root** per section 3, with a
+   `.dockerignore` beside it.
+   - [x] done -- committed on branch stdio, incl. the two-step uv sync
+     per project, non-root user, and the duckdb/parquet ignore rules.
+     The two per-service Dockerfiles it replaces were removed; they
+     remain in AKS-DEPLOY history for the path back.
+2. **podman build + full-stack smoke** of the image, registry-free
+   (section 4.1 -- note the `-v ...:Z` parquet mount); record any
+   path/permission fixes back into the Dockerfile.
    - [ ] done
 3. **Registry decision (Phase B gate)**: GitLab Container Registry vs
    an existing firm ACR -- resolved during AKS onboarding. Then: push

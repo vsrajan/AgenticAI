@@ -1,6 +1,6 @@
 # GitLab CI: test -> build -> deploy (docs/deploy.md section 7).
 #
-# The promotion invariant: every deploy job uses the SAME images
+# The promotion invariant: every deploy job uses the SAME image
 # (tagged $CI_COMMIT_SHORT_SHA) and the SAME chart -- only the values
 # file differs per environment. Nothing is rebuilt between clusters.
 #
@@ -63,21 +63,23 @@ test:agent:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
-build:mcp:
+# ONE image carrying both projects. The agent runs the MCP server as a
+# child process over stdio, so they have to share a filesystem -- see
+# docs/single-container-stdio.md section 3. Note the context is the
+# REPO ROOT, not a project directory: the Dockerfile copies from both
+# mcp-server/ and agent-client/.
+#
+# The destination must match what the chart renders from
+# image.registry + image.repository (agnes) -- see agnes.image in
+# _helpers.tpl. A mismatch here is an ImagePullBackOff at deploy time,
+# not a build failure.
+build:image:
   <<: *kaniko
   script:
     - /kaniko/executor
-      --context "$CI_PROJECT_DIR/mcp-server"
-      --dockerfile "$CI_PROJECT_DIR/mcp-server/Dockerfile"
-      --destination "$REGISTRY_BASE/agnes/mcp-server:$CI_COMMIT_SHORT_SHA"
-
-build:agent:
-  <<: *kaniko
-  script:
-    - /kaniko/executor
-      --context "$CI_PROJECT_DIR/agent-client"
-      --dockerfile "$CI_PROJECT_DIR/agent-client/Dockerfile"
-      --destination "$REGISTRY_BASE/agnes/agent-api:$CI_COMMIT_SHORT_SHA"
+      --context "$CI_PROJECT_DIR"
+      --dockerfile "$CI_PROJECT_DIR/Dockerfile"
+      --destination "$REGISTRY_BASE/agnes:$CI_COMMIT_SHORT_SHA"
 
 # -- deploy: same chart + same SHA through all four clusters --
 
