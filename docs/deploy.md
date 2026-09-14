@@ -194,6 +194,13 @@ The choices that need explaining:
 
 ### 4.1 The local path: podman on the MCP server machine, registry-free
 
+> **Step-by-step version: [podman.md](podman.md).** This section is the
+> summary in context; podman.md is the full walkthrough -- checking the
+> engine exists, host preparation and the rootless UID/SELinux traps,
+> the build, image inspection, the two-container + Redis + nginx rig, a
+> verification checklist, and the measurements that set the startup
+> probe budget and resource requests.
+
 This is the PRIMARY local workflow. podman 5.6.0 is present on the
 MCP server machine; the agent machine needs nothing (podman is a
 build-host tool, not a service-host tool -- images are built wherever
