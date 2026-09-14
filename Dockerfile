@@ -73,12 +73,26 @@ ENV HOME=/home/app
 USER 1000:1000
 WORKDIR /app
 
-# 3.12 is what mcp-server/.python-version pins. agent-client had no pin
-# and resolved to 3.11 locally; both lockfiles declare requires-python
-# >=3.10 and agent-client's full dependency set was verified to install
-# on 3.12, so one interpreter serves both (section 12's open question,
-# now closed). Never silently download a different one.
-ENV UV_PYTHON_DOWNLOADS=never
+# One interpreter serves both projects. Both lockfiles declare
+# requires-python >=3.10, and agent-client's full dependency set was
+# verified to install on 3.12 (single-container-stdio.md section 12's
+# open question, now closed).
+#
+# UV_PYTHON pins the request explicitly instead of leaving it to
+# discovery. Without it uv asks whatever the PROJECT implies, and a
+# stray .python-version file or a .venv built elsewhere on a different
+# version makes it demand an interpreter this image does not have:
+#
+#   error: no interpreter found for Python==3.11.* in managed
+#   installations or search path
+#
+# agent-client resolved to 3.11 on the dev machine, so that is a live
+# hazard, not a hypothetical. UV_PYTHON overrides both sources.
+#
+# UV_PYTHON_DOWNLOADS=never keeps the failure loud: uv must use the
+# base image's interpreter, never quietly fetch a second one.
+ENV UV_PYTHON_DOWNLOADS=never \
+    UV_PYTHON=3.12
 
 # -- dependency layers, both projects --
 # manifests only, so editing source never re-installs dependencies.
