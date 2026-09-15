@@ -210,7 +210,7 @@ cd agent-client
 uv sync
 ```
 
-installs everything -- agent, scanner, and API -- into one shared
+installs everything -- agent and API -- into one shared
 environment. (Historical note: the API originally shipped with a
 separate `pyproject_api.toml` manifest to avoid touching any existing
 file; that constraint has since been lifted and the manifest merged.)
@@ -249,10 +249,11 @@ core produces neutral events and lets each consumer render them.
   list from the checkpointer; the history endpoint shapes it into the
   chat or debug view.
 
-Importantly, `agent_api.py` imports `build_graph` and friends FROM
-`utils/agnes_agent_graph.py` -- the graph, the prompts, the specialists,
-and the routing logic are all shared, not copied. This mirrors how
-`utils/scanner.py` already reuses the graph without modifying it.
+Importantly, `agent_api.py` imports `build_graph` and friends FROM the
+agent module -- the graph and the prompt are shared, not copied. On
+this branch that module is `utils/agnes_agent.py` (one agent, no
+router); the four names it imports kept their signatures through that
+change, so the API itself needed only the import line updated.
 
 ## 6. Authentication: how and why
 
@@ -580,7 +581,7 @@ The server logs
 `Starting Access Governance Agent API on 127.0.0.1:8080` and then
 `Agent API ready (12 tools)` once the MCP connection is up.
 
-The existing CLI and scanner are unaffected and run exactly as before.
+The interactive CLI is unaffected and runs exactly as before.
 
 ### Watching the graph work: the stream file
 
@@ -760,10 +761,10 @@ one. Once real identity exists, sessions can additionally be bound to
 
 ## 15. What was deliberately not changed
 
-- the agent logic itself: `utils/agnes_agent_graph.py` (formerly
-  `agent.py`), `cli.py`, `utils/scanner.py`, `scanner_cli.py`,
-  `utils/incident_sources.py`, `utils/llm.py` -- the API only imports
-  from them; the interactive CLI works as before
+- the agent logic itself: `utils/agnes_agent.py` (the live graph;
+  `agnes_agent_graph.py` is its frozen multi-agent predecessor),
+  `cli.py`, `utils/llm.py` -- the API only imports from them; the
+  interactive CLI works as before
 - the entire `mcp-server/` package -- untouched
 
 The API was originally built fully additively (no existing file

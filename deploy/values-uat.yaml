@@ -19,7 +19,7 @@ mcp:
     container: "<uat-container>"
 
 agent:
-  replicas: 2
+  replicas: 1
   azureOpenAI:
     endpoint: "<https://uat-aoai-resource.openai.azure.com/>"
     deployment: "<gpt-4o-deployment-name>"

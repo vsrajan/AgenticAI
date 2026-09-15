@@ -2,11 +2,15 @@
 # live in deploy/values-{dev,test,uat,prod}.yaml -- keep those small;
 # anything not overridden falls back to here.
 #
-# THIS BRANCH deploys ONE workload. The agent runs the MCP server as a
-# child process over stdio, so there is no mcp Deployment, Service,
-# HPA or NetworkPolicy, and no MCP bearer token anywhere. Why:
-# docs/single-container-stdio.md. The route back to the split topology
-# is section 10 of that doc.
+# THIS BRANCH deploys ONE workload, at ONE replica. The agent runs the
+# MCP server as a child process over stdio, so there is no mcp
+# Deployment, Service, HPA or NetworkPolicy, and no MCP bearer token
+# anywhere (docs/single-container-stdio.md; the route back is its
+# section 10). Sessions live in the pod's memory because there is no
+# Redis on the infrastructure, and THAT is what fixes the replica
+# count at 1 -- docs/single-agent.md. The agent itself is the Resource
+# specialist only; the router and the other two specialists are not in
+# this iteration.
 #
 # The rule from docs/deploy.md section 6 still holds:
 #   secret            -> the environment's Key Vault (secretproviderclass.yaml)
@@ -45,20 +49,25 @@ serviceAccount:
     clientId: ""
 
 keyVault:
-  # the environment's Azure Key Vault (one per cluster). THREE secrets
+  # the environment's Azure Key Vault (one per cluster). TWO secrets
   # now -- object names are fixed in secretproviderclass.yaml:
-  #   azure-openai-api-key, agent-api-token, redis-url
-  # (mcp-server-token and mcp-auth-tokens are gone with the HTTP hop)
+  #   azure-openai-api-key, agent-api-token
+  # (mcp-server-token and mcp-auth-tokens went with the HTTP hop;
+  # redis-url returns only when agent.redis.enabled is true)
   name: ""
   tenantId: ""
 
 agent:
-  # the only replica count in the chart. Both halves scale together:
-  # more replicas means more MCP servers too, each with its own staged
-  # parquet and its own DuckDB file. 2-3 is the aks.md figure, made
-  # legal by P3.1's shared Redis sessions. In-process session mode with
-  # replicas > 1 is the one forbidden combination.
-  replicas: 2
+  # ONE. Not a tuning choice: sessions live in this pod's memory, so a
+  # second replica would serve a user's next message from a pod that
+  # has never heard of their session (404, history gone). The chart
+  # REFUSES to render replicas > 1 while redis.enabled is false --
+  # see the guard in agent-deployment.yaml.
+  #
+  # Both halves scale together when this does become > 1: every replica
+  # carries its own MCP child, its own staged parquet and its own
+  # DuckDB file. 2-3 is the aks.md figure, and it needs Redis first.
+  replicas: 1
   # sized for BOTH halves, since they share one container's budget:
   # roughly the old agent (0.5 CPU / 1Gi) plus the old MCP tier
   # (0.5 CPU / 512Mi). The MCP child has its own interpreter and its
@@ -83,20 +92,31 @@ agent:
   # upward -- P4 in docs/PerformanceRecommendations.md)
   streamFile: ""
   sessionTtlMinutes: "60"
-  maxSessions: "500"
-  # distributed turn-lock TTL; must exceed the longest realistic turn
-  # -- see docs/P3.1.md section 14 before changing
+  # in-memory sessions all sit in this one pod's heap, and the stored
+  # history for a live session is not trimmed (KEEP_LAST_N only bounds
+  # what is SENT to the model). 150 with a 60 minute TTL is the
+  # starting point; raise it against a measured pod, not a guess.
+  maxSessions: "150"
+  # turn-lock timeout; must exceed the longest realistic turn -- see
+  # docs/P3.1.md section 14 before changing. In memory mode it bounds
+  # how long a second message waits for the running turn (503 after
+  # that) and when a held lock counts as stuck rather than running, so
+  # one wedged turn cannot pin a session forever.
   lockTimeoutSeconds: "300"
   # conversation-window trimming (docs/PerformanceRecommendations.md)
   keepLastNMsgs: "20"
   maxToolContentLen: "80000"
   redis:
-    # Redis lives OUTSIDE the cluster (Azure Cache for Redis; plain
-    # RESP over TCP, rediss:// for TLS on 6380). The URL embeds the
-    # access key, so it arrives from Key Vault, never from a values
-    # file. false = in-process sessions -- then agent.replicas MUST be
-    # 1 and sessions die on restart.
-    enabled: true
+    # FALSE on this branch: there is no Redis on the infrastructure.
+    # Sessions, turn locks and conversation checkpoints therefore live
+    # in the pod's memory -- they die on restart and on every deploy,
+    # and agent.replicas MUST stay 1 (the chart enforces it).
+    #
+    # true wires REDIS_URL in from Key Vault and restores P3.1's shared
+    # state: Redis lives OUTSIDE the cluster (Azure Cache for Redis;
+    # plain RESP over TCP, rediss:// for TLS on 6380) and the URL
+    # embeds the access key, so it never appears in a values file.
+    enabled: false
 
 # MCP settings still apply -- they are read by the CHILD PROCESS, which
 # inherits the container's environment. What is gone is the MCP tier's
@@ -145,6 +165,9 @@ ingress:
   annotations: {}
 
 pdb:
-  # keep at least one pod through voluntary disruptions (node drains);
-  # pointless with a single replica, so dev turns it off
-  enabled: true
+  # OFF at one replica, and that is not a formality: a budget of
+  # minAvailable 1 over a single pod refuses every eviction, so a node
+  # drain or cluster upgrade hangs instead of proceeding. The template
+  # uses maxUnavailable 1 for the same reason. Turn this on when
+  # Redis and replicas > 1 arrive.
+  enabled: false

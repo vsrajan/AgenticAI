@@ -3,6 +3,11 @@
 # here alongside the agent's -- there is no second workload and no .env
 # in the image (docs/single-container-stdio.md section 5).
 #
+# REDIS_URL is deliberately absent unless agent.redis.enabled: with it
+# unset the API keeps sessions, turn locks and checkpoints in process
+# memory (docs/single-agent.md). It is a Key Vault secret, never a
+# value here.
+#
 # Topology truths are literal; per-environment knobs come from values.
 # Secrets never appear here -- they are in
 # {{ include "agnes.secretName" . }} via the Key Vault CSI driver.

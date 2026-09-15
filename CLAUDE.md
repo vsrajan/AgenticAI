@@ -1,32 +1,34 @@
 # Access Governance AI
 
-LangGraph multi-agent system with an MCP tool server for documentation search,
-resource discovery, and entitlement management. Powered by Azure OpenAI (GPT-4o).
+LangGraph agent with an MCP tool server for documentation search, resource
+discovery, and entitlement management. Powered by Azure OpenAI (GPT-4o).
+
+On branch `ResourceAgentOnly` this runs as ONE agent (the Resource specialist,
+no router) with sessions in process memory and a single pod -- see
+`docs/single-agent.md`. The multi-agent graph is frozen in
+`agnes_agent_graph.py` and the rest of this file still describes it, because
+that is the shape to come back to.
 
 ## Repository structure
 
 ```
 agent-client/src/ease_clients/
   cli.py              — CLI entry point (interactive agent)
-  scanner_cli.py      — CLI entry point (batch scanner)
   agent_api.py        — AgentService (event-stream wrapper) + FastAPI app (HTTP API)
   auth_api.py         — pluggable API auth (static bearer token now, Entra OAuth2 later)
   cli_api.py          — API server entry point (runs uvicorn)
   redis_state.py      — Redis session state (P3.1): RedisSaver checkpointer + registry/locks
 
 agent-client/src/ease_clients/utils/
-  agnes_agent_graph.py — LangGraph StateGraph (router + 3 specialists + handoff)
+  agnes_agent.py       — LIVE agent: resource specialist only, 2-node ReAct graph
+  agnes_agent_graph.py — FROZEN reference: router + 3 specialists + handoff.
+                         Imported by nothing; see docs/single-agent.md
   llm.py               — Azure OpenAI config
-  incident_sources.py  — Incident dataclass + CSV/ServiceNow source classes
-  scanner.py           — Batch scan engine (reuses agent graph)
 
 agent-client/
   webclient_api.html  — POC single-page web client for the API (SSE streaming)
   tests_api/          — API test suite (fake agent; no Azure/MCP needed)
   README_api.md       — quick-reference for running the API
-
-agent-client/data/
-  Incidents.csv       — Sample ServiceNow-style incident data (12 incidents)
 
 mcp-server/src/mcp_docs_server/
   server.py      — FastMCP server (12 tools over streamable-http/sse/stdio)
@@ -35,6 +37,7 @@ mcp-server/src/mcp_docs_server/
   csv_store.py   — CSV → in-memory DataFrame (CsvStore)
 
 docs/
+  single-agent.md — resource-agent-only + in-memory sessions + one pod: why, cost, path back
   architecture.md — Mermaid architecture diagrams (high-level, agent graph, MCP tools)
   agent_api.md    — beginner-oriented guide to the HTTP API layer
   entra_auth_guide.md — Entra ID implementation guide (client->agent + agent->MCP)
@@ -61,7 +64,25 @@ mcp-server/Dockerfile + agent-client/Dockerfile (branch AKS-DEPLOY)
 
 ## Architecture
 
-The agent is a LangGraph `StateGraph` with 8 nodes:
+THIS BRANCH -- `agnes_agent.py`, a 2-node ReAct loop:
+
+```
+START -> resource_agent <-> resource_tools -> END
+```
+
+- **State**: plain `MessagesState`, kept by an in-memory checkpointer
+- The conditional edge reads the last message: tool calls -> the tool
+  node, anything else -> END
+- No router, no handoff, no `active_agent`: with one specialist there
+  is nothing to route to
+- Only the 8 resource tools are BOUND; the server still serves all 12,
+  and the other 4 are loaded and left invisible to the model
+- Out-of-scope questions (process, policy, how-to) are declined by the
+  prompt's SCOPE section, not routed. See `docs/single-agent.md`
+
+FROZEN in `agnes_agent_graph.py` -- the `StateGraph` with 8 nodes this
+branch came from, and the shape to restore when the other specialists
+return:
 
 ```
 START -> route_entry() -> Router -> knowledgebase_agent / resource_agent / quality_agent
@@ -77,14 +98,14 @@ START -> route_entry() -> Router -> knowledgebase_agent / resource_agent / quali
 - Specialists call `hand_off_to_router()` to defer to another specialist
 - Mixed questions: specialist answers its part, defers the rest
 
-### MCP tools (12 total)
+### MCP tools (12 total, all still served)
 
-| Group | Tools |
-|-------|-------|
-| Knowledgebase (3) | `list_topics`, `search_docs`, `read_page` |
-| Resource (6) | `list_datasets`, `search_dataset`, `filter_dataset`, `filter_dataset_fuzzy`, `count_by_column`, `get_column_values` |
-| Request (2) | `get_request_attributes`, `raise_entitlement_request` |
-| Quality (1) | `get_quality_criteria` |
+| Group | Tools | Bound on this branch |
+|-------|-------|----------------------|
+| Knowledgebase (3) | `list_topics`, `search_docs`, `read_page` | no |
+| Resource (6) | `list_datasets`, `search_dataset`, `filter_dataset`, `filter_dataset_fuzzy`, `count_by_column`, `get_column_values` | yes |
+| Request (2) | `get_request_attributes`, `raise_entitlement_request` | yes |
+| Quality (1) | `get_quality_criteria` | no |
 
 For full diagrams with conditional edges and data flow, see `docs/architecture.md`.
 
@@ -102,14 +123,11 @@ cd mcp-server && uv run mcp-docs-server
 # Agent client -- interactive (in a separate terminal)
 cd agent-client && uv run agent-client
 
-# Incident scanner -- batch mode (in a separate terminal)
-cd agent-client && uv run scan-cli data/Incidents.csv -o scan_results.csv
-
 # HTTP API server (in a separate terminal; requires AGENT_API_TOKEN or AGENT_API_AUTH=none)
 cd agent-client && uv run agent-api
 
-# API tests (fake agent -- no Azure/MCP needed)
-cd agent-client && uv run --with pytest --with httpx pytest tests_api/ -q
+# API + graph tests (fake agent and fake LLM -- no Azure/MCP needed)
+cd agent-client && uv run --with pytest --with httpx --with 'fakeredis[lua]' pytest tests_api/ -q
 ```
 
 Required env vars: `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`.
@@ -144,9 +162,11 @@ session pool (plain Redis, no modules; fail-fast when unreachable;
 
 ## Development
 
-Branch: `claude/mcp-html-docs-server-S9jg9`
+Branch: `ResourceAgentOnly` (based on `stdio`)
 
 ### Recent work
+
+- Resource agent only, in-memory sessions, one pod (branch ResourceAgentOnly, based on stdio; docs/single-agent.md). New LIVE module `utils/agnes_agent.py`: a 2-node ReAct graph (`resource_agent` <-> `resource_tools`) on plain `MessagesState` with an in-memory checkpointer, carrying over the Spinner, trimming/compaction, MCP config, stream-file logging and the interactive loop unchanged. `agnes_agent_graph.py` is left FROZEN and is now imported by nothing -- it is the reference for the router + 3 specialists + handoff shape. Deleted: the router, both other prompts, the routing and handoff tools, the mixed-call tool node and all the edge functions (~445 lines of the live path); `ToolNode` is used directly. Only the 8 resource tools are BOUND (the server still serves all 12) -- binding is what makes it resource-only, not the prompt asking nicely. RESOURCE_PROMPT loses its three handoff passages and gains a SCOPE section: greetings answered directly, and process/policy/how-to questions declined explicitly rather than answered from model prior knowledge (no doc tools AND nowhere to hand off is the one real behavioral risk). No Redis on the infra -> REDIS_URL unset -> the pre-P3.1 in-process path, which fixes replicas at 1: chart guard fails the render on `replicas > 1` without Redis, `strategy: Recreate` replaces RollingUpdate (a surge pod would split sessions), explicit probe `timeoutSeconds` (the 1s default is too tight for an MCP round-trip, and at one replica a readiness failure is a total outage), PDB off and `maxUnavailable` instead of `minAvailable`, max sessions 500 -> 150, Key Vault down to two secrets. Closed the hole in-memory mode opened: an `asyncio.Lock` has no expiry, so a wedged turn held its session's lock forever AND made the session unevictable (the sweeper skips running turns) -- `_Session.locked_at` + `held_too_long()` make a lock held past `AGENT_API_LOCK_TIMEOUT_SECONDS` count as stuck for eviction, and `_turn_lock()` bounds the wait so a second message gets `TurnBusyError` (503, or an in-band SSE error) instead of hanging; the stuck turn itself is still not cancelled -- that needs timeouts on the LLM and MCP calls. Deleted the batch scanner (scanner.py, scanner_cli.py, incident_sources.py, Incidents.csv, the `scan-cli` entry point, its plan doc): it ran incidents through the knowledgebase agent, and a `MessagesState` graph silently ignores its `active_agent` input, so it would have produced plausible wrong output with no error. tests_api 68 -> 92 (new test_agnes_agent.py: graph shape, tool binding, the tool loop, prompt scope, trimming/compaction; plus stuck-turn tests)
 
 - Refactored agent from flat ReAct loop to custom StateGraph with Router, specialists, and handoff
 - Renamed pdf/csv identifiers to knowledgebase/resource in agent code
@@ -259,8 +279,11 @@ Branch: `claude/mcp-html-docs-server-S9jg9`
     breakpoint placement is provider-specific, and it lives entirely inside
     `get_llm()`.
 - Externalize agent session state to Redis (P3.1 in
-  `docs/PerformanceRecommendations.md`) -- NEXT UP, planned before migrating
-  P0/P1.1. Unlocks agent-api replicas > 1 (multi-pod AKS) by moving the three
+  `docs/PerformanceRecommendations.md`) -- IMPLEMENTED but NOT DEPLOYABLE:
+  there is no Redis on the infrastructure, so REDIS_URL stays unset and the
+  deployment runs a single pod (docs/single-agent.md). redis_state.py and its
+  8 tests are kept for when Redis arrives; turning agent.redis.enabled back on
+  is the whole switch. Unlocks agent-api replicas > 1 (multi-pod AKS) by moving the three
   in-process pieces out of AgentService: the LangGraph checkpointer, the
   session registry (Redis per-key EXPIRE replaces the TTL sweeper), and the
   per-session locks (SET NX PX distributed locks with a timeout longer than
@@ -290,9 +313,13 @@ on a seam that already exists.
   change degrades answer quality (unit tests prove plumbing, not
   answers). Build a curated golden set per specialist (question ->
   expected facts/citations), run in CI, exact checks where possible +
-  LLM-as-judge where not, regression-gated. Head start: the scanner
-  CLI already batch-runs questions through the real graph -- an eval
-  harness is that plus assertions.
+  LLM-as-judge where not, regression-gated. The scanner CLI used to be
+  the head start here (it batch-ran questions through the real graph);
+  it was deleted with the knowledgebase agent, so an eval harness now
+  starts from its shape in git history at the ResourceAgentOnly base.
+  With one specialist the golden set is smaller, and the first case to
+  cover is the SCOPE refusal: a process question must be declined, not
+  answered from model prior knowledge.
 - Prompt-injection defenses, especially INDIRECT injection: the agent
   trusts tool results, so a poisoned PDF page or a crafted entitlement
   field is an instruction channel into the LLM (classic RAG poisoning;

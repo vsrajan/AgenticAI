@@ -9,6 +9,7 @@ Run:
 """
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +19,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from ease_clients.agent_api import (
     AgentEvent,
     AgentService,
+    TurnBusyError,
     UnknownSessionError,
     create_app,
 )
@@ -98,8 +100,8 @@ def make_service(events, final_messages=None, tool_count=12, **kwargs):
 
 
 STREAMING_EVENTS = [
-    _node_start_event("router"),
-    _node_start_event("knowledgebase_agent"),
+    _node_start_event("resource_tools"),
+    _node_start_event("resource_agent"),
     _chunk_event("Hello"),
     _chunk_event(" world"),
 ]
@@ -116,7 +118,7 @@ def test_stream_yields_phase_token_answer():
 
     events = asyncio.run(collect())
     assert [e.type for e in events] == ["phase", "phase", "token", "token", "answer"]
-    assert events[0].data == "Routing"
+    assert events[0].data == "Calling tools"
     assert events[1].data == "Generating answer"
     assert events[-1].data == "Hello world"
 
@@ -144,7 +146,7 @@ def test_stream_ignores_unknown_nodes_and_tool_chunks():
 
 def test_stream_falls_back_to_state_when_nothing_streamed():
     final = [SimpleNamespace(content="direct answer")]
-    service = make_service([_node_start_event("router")], final_messages=final)
+    service = make_service([_node_start_event("resource_agent")], final_messages=final)
     sid = service.create_session()
 
     async def collect():
@@ -260,6 +262,96 @@ def test_sweep_skips_in_flight_sessions():
     asyncio.run(run())
 
 
+# -- Stuck turns --
+#
+# Without Redis the turn lock is a plain asyncio.Lock with no expiry,
+# so a turn parked on an await that never returns would hold it for the
+# life of the process: every later message on that session would wait
+# behind it silently, and the sweeper's "never evict a running turn"
+# rule would keep the session (and its history) alive forever. A lock
+# held past the timeout is therefore treated as stuck, not running.
+
+
+class _WedgedLock:
+    """A turn lock held by a turn that never finishes."""
+
+    def locked(self):
+        return True
+
+    async def acquire(self):
+        await asyncio.Event().wait()      # never set
+
+    def release(self):
+        raise AssertionError("_WedgedLock was never acquired")
+
+
+def test_stuck_turn_stops_protecting_a_session_from_the_sweep():
+    service = make_service(STREAMING_EVENTS, session_ttl_seconds=100,
+                           lock_timeout_seconds=30)
+
+    async def run():
+        sid = service.create_session()
+        session = service._sessions[sid]
+        session.last_used -= 200                  # past the TTL
+        await session.lock.acquire()
+        session.locked_at = time.monotonic() - 31  # held past the timeout
+        assert service.sweep_expired_sessions() == 1
+        assert not service.has_session(sid)
+
+    asyncio.run(run())
+
+
+def test_stuck_turn_stops_protecting_a_session_from_the_cap():
+    checkpointer = FakeCheckpointer()
+    service = make_service(STREAMING_EVENTS, checkpointer=checkpointer,
+                           max_sessions=1, lock_timeout_seconds=30)
+
+    async def run():
+        s1 = service.create_session()
+        session = service._sessions[s1]
+        await session.lock.acquire()
+        session.locked_at = time.monotonic() - 31
+        s2 = service.create_session()             # the stuck s1 is evictable
+        assert not service.has_session(s1)
+        assert service.has_session(s2)
+        assert checkpointer.deleted == [s1]
+
+    asyncio.run(run())
+
+
+def test_message_on_a_wedged_session_raises_instead_of_hanging():
+    service = make_service(STREAMING_EVENTS, lock_timeout_seconds=0.01)
+
+    async def run():
+        sid = service.create_session()
+        service._sessions[sid].lock = _WedgedLock()
+        async for _ in service.stream(sid, "hi"):
+            pass
+
+    with pytest.raises(TurnBusyError):
+        asyncio.run(run())
+
+
+def test_wedged_session_returns_503_not_a_hang():
+    service = make_service(STREAMING_EVENTS, lock_timeout_seconds=0.01)
+    sid = service.create_session()
+    service._sessions[sid].lock = _WedgedLock()
+    client = TestClient(create_app(service=service, authenticator=NoAuthAuthenticator()))
+
+    response = client.post(f"/sessions/{sid}/messages", json={"message": "hi"})
+    assert response.status_code == 503
+    assert "Retry shortly" in response.json()["detail"]
+
+
+def test_a_completed_turn_leaves_the_lock_free():
+    service = make_service(STREAMING_EVENTS)
+    sid = service.create_session()
+    asyncio.run(service.ask(sid, "hi"))
+    session = service._sessions[sid]
+    assert not session.lock.locked()
+    assert session.locked_at is None
+
+
 class SlowFakeAgent(FakeAgent):
     """Tracks how many turns run at once, to prove the per-session lock."""
 
@@ -294,7 +386,7 @@ def test_concurrent_turns_on_one_session_are_serialised():
 def test_stream_file_logs_graph_execution(tmp_path):
     stream_file = tmp_path / "stream.txt"
     events = STREAMING_EVENTS + [
-        _node_end_event("knowledgebase_agent", [
+        _node_end_event("resource_agent", [
             AIMessage(content="", tool_calls=[
                 {"name": "search_docs", "args": {"query": "hi"}, "id": "t1"},
             ]),
@@ -311,7 +403,7 @@ def test_stream_file_logs_graph_execution(tmp_path):
     assert f"[HumanMessage]  (node: input, session: {sid})" in text
     assert "hello there" in text
     # the end event is paired with its start, so the entry carries a duration
-    assert f"[AIMessage]  (node: knowledgebase_agent, session: {sid}, took=" in text
+    assert f"[AIMessage]  (node: resource_agent, session: {sid}, took=" in text
     assert "-> tool_call: search_docs(" in text
     assert "final answer" in text
     # per-turn summary with the agent-vs-tools split
@@ -339,7 +431,7 @@ def test_stream_file_disabled_by_default():
 # -- MCP connection config --
 
 def test_mcp_config_attaches_bearer_token(monkeypatch):
-    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+    from ease_clients.utils.agnes_agent import _get_mcp_server_config
 
     monkeypatch.setenv("MCP_TRANSPORT", "sse")
     monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
@@ -349,7 +441,7 @@ def test_mcp_config_attaches_bearer_token(monkeypatch):
 
 
 def test_mcp_config_without_token_sends_no_headers(monkeypatch):
-    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+    from ease_clients.utils.agnes_agent import _get_mcp_server_config
 
     monkeypatch.setenv("MCP_TRANSPORT", "sse")
     monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
@@ -361,7 +453,7 @@ def test_mcp_config_without_token_sends_no_headers(monkeypatch):
 def test_mcp_config_defaults_to_streamable_http(monkeypatch):
     # no MCP_TRANSPORT set -> streamable-http on the /mcp endpoint;
     # the connection dict uses the adapter's underscore spelling
-    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+    from ease_clients.utils.agnes_agent import _get_mcp_server_config
 
     monkeypatch.delenv("MCP_TRANSPORT", raising=False)
     monkeypatch.delenv("MCP_SERVER_URL", raising=False)
@@ -373,7 +465,7 @@ def test_mcp_config_defaults_to_streamable_http(monkeypatch):
 
 
 def test_mcp_config_streamable_http_attaches_bearer_token(monkeypatch):
-    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+    from ease_clients.utils.agnes_agent import _get_mcp_server_config
 
     monkeypatch.setenv("MCP_TRANSPORT", "streamable-http")
     monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
@@ -385,7 +477,7 @@ def test_mcp_config_streamable_http_attaches_bearer_token(monkeypatch):
 
 def test_mcp_config_accepts_underscore_spelling(monkeypatch):
     # MCP_TRANSPORT=streamable_http (underscore) is normalized
-    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+    from ease_clients.utils.agnes_agent import _get_mcp_server_config
 
     monkeypatch.setenv("MCP_TRANSPORT", "streamable_http")
     monkeypatch.delenv("MCP_SERVER_URL", raising=False)
@@ -403,7 +495,7 @@ def test_mcp_config_stdio_passes_environment_to_the_child(monkeypatch):
     # exception, no log line, just the wrong data. Assert the settings
     # actually reach the child, not merely that the key exists.
     from mcp.client.stdio import DEFAULT_INHERITED_ENV_VARS
-    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+    from ease_clients.utils.agnes_agent import _get_mcp_server_config
 
     monkeypatch.setenv("MCP_TRANSPORT", "stdio")
     monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
@@ -428,7 +520,7 @@ def test_mcp_config_stdio_drops_virtual_env(monkeypatch):
     # ours makes uv warn on every spawn that VIRTUAL_ENV does not match
     # the project environment -- noise in the logs you read when a
     # spawn goes wrong.
-    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+    from ease_clients.utils.agnes_agent import _get_mcp_server_config
 
     monkeypatch.setenv("MCP_TRANSPORT", "stdio")
     monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
@@ -444,7 +536,7 @@ def test_mcp_config_stdio_drops_virtual_env(monkeypatch):
 
 def test_mcp_config_http_does_not_pass_an_environment(monkeypatch):
     # env is meaningless over HTTP -- there is no child process to spawn
-    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+    from ease_clients.utils.agnes_agent import _get_mcp_server_config
 
     monkeypatch.setenv("MCP_TRANSPORT", "streamable-http")
     monkeypatch.delenv("MCP_SERVER_NAME", raising=False)
@@ -453,7 +545,7 @@ def test_mcp_config_http_does_not_pass_an_environment(monkeypatch):
 
 
 def test_mcp_config_rejects_unknown_transport(monkeypatch):
-    from ease_clients.utils.agnes_agent_graph import _get_mcp_server_config
+    from ease_clients.utils.agnes_agent import _get_mcp_server_config
 
     monkeypatch.setenv("MCP_TRANSPORT", "carrier-pigeon")
     with pytest.raises(ValueError, match="streamable-http"):

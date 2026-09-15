@@ -1,6 +1,6 @@
 # dev cluster overrides. Placeholders marked <...> are filled during
 # AKS onboarding (docs/deploy.md section 6); everything else falls
-# back to deploy/chart/values.yaml. No secrets here, ever -- the three
+# back to deploy/chart/values.yaml. No secrets here, ever -- the two
 # secret values live in the dev Key Vault.
 
 image:
@@ -22,11 +22,12 @@ mcp:
     container: "<dev-container>"
 
 agent:
-  # 2 on purpose, even in dev: the one-time in-cluster P3.1 check
-  # (kill a pod mid-conversation, session continues on the other --
-  # docs/deploy.md section 8 step 4) needs a second replica. Redis
-  # mode is on, so 2 is legal.
-  replicas: 2
+  # 1, like every other environment: sessions are in-memory, so a
+  # second replica would answer a user from a pod that never saw their
+  # session. The old dev-only 2 existed for the in-cluster P3.1 check
+  # (kill a pod mid-conversation, session continues on the other) --
+  # that check needs Redis and comes back with it.
+  replicas: 1
   # smallest footprint that still fits BOTH halves in one container --
   # the agent plus its MCP child, which extracts PDFs and opens DuckDB
   resources:
@@ -48,6 +49,6 @@ ingress:
   tlsSecretName: ""
 
 pdb:
-  # dev runs 2 agent replicas for the P3.1 check, but a budget adds
-  # nothing on a single-node dev cluster
+  # off everywhere at one replica -- see the note in the chart's
+  # values.yaml: a budget over a single pod blocks node drains
   enabled: false

@@ -27,7 +27,7 @@ logger = logging.getLogger("ease_clients")
 
 def main():
     """Entry point invoked by ``agent-client`` console script."""
-    from ease_clients.utils.agnes_agent_graph import run_agent_loop
+    from ease_clients.utils.agnes_agent import run_agent_loop
 
     logger.info("Starting Access Governance Agent")
 

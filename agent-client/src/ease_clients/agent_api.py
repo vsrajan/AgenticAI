@@ -3,7 +3,7 @@
 Wraps the existing LangGraph agent behind a transport-agnostic
 AgentService, then exposes it over HTTP so any external client (web UI,
 Teams bot, Slack, another agent) can use it. Everything is imported
-from utils/agnes_agent_graph.py -- that module is not modified.
+from utils/agnes_agent.py -- that module is not modified.
 
 Endpoints:
   GET  /health                         -> liveness + tool count (no auth)
@@ -41,7 +41,7 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
-from ease_clients.utils.agnes_agent_graph import (
+from ease_clients.utils.agnes_agent import (
     _NODE_PHASES,
     _get_mcp_server_config,
     _write_stream_entry,
@@ -75,6 +75,16 @@ class UnknownSessionError(Exception):
     """Raised when a session id was never created or has been evicted."""
 
 
+class TurnBusyError(Exception):
+    """Raised when a session's turn lock could not be taken in time.
+
+    One turn at a time per session is deliberate. Waiting forever for
+    it is not: without Redis the lock has no expiry, so a turn stuck on
+    an await would otherwise block every later message on that session
+    with no error and no recovery.
+    """
+
+
 class _Session:
     """Bookkeeping for one live session.
 
@@ -83,12 +93,31 @@ class _Session:
     serialises turns: two concurrent messages on the same session
     would otherwise interleave their writes into one LangGraph thread
     and corrupt the conversation history.
+
+    locked_at records when the current turn took the lock, and is None
+    while the session is idle. An asyncio.Lock has no expiry (the Redis
+    lock it replaces had a PX TTL), so without this a turn that hangs
+    holds the lock forever -- see held_too_long.
     """
-    __slots__ = ("last_used", "lock")
+    __slots__ = ("last_used", "lock", "locked_at")
 
     def __init__(self):
         self.last_used = time.monotonic()
         self.lock = asyncio.Lock()
+        self.locked_at: float | None = None
+
+    def held_too_long(self, limit_seconds: float) -> bool:
+        """Has this session's turn held the lock past the timeout?
+
+        A turn that outlives the limit is stuck on an await that will
+        not return on its own (the LLM and MCP calls carry no timeouts
+        of their own yet). Treating the lock as stale is what stops one
+        wedged turn from pinning a session forever: the session becomes
+        evictable again, and the next message gets an error instead of
+        waiting behind it indefinitely.
+        """
+        started = self.locked_at
+        return started is not None and (time.monotonic() - started) > limit_seconds
 
 
 class AgentService:
@@ -108,7 +137,7 @@ class AgentService:
     def __init__(self, agent, tool_count: int, checkpointer=None,
                  session_ttl_seconds: float = 3600, max_sessions: int = 500,
                  stream_file: str = "", store=None, mcp_stack=None,
-                 mcp_session=None):
+                 mcp_session=None, lock_timeout_seconds: float = 300):
         # holds the open MCP session (and, on stdio, the server
         # subprocess). None when the caller supplied its own tools --
         # the tests do this with a fake agent and never touch MCP.
@@ -119,9 +148,14 @@ class AgentService:
         self._checkpointer = checkpointer
         self._session_ttl = session_ttl_seconds
         self._max_sessions = max_sessions
+        # bounds how long a caller waits for the per-session turn lock,
+        # and how long a held lock counts as a live turn rather than a
+        # stuck one (_Session.held_too_long). The Redis lock uses the
+        # same value as its PX expiry.
+        self._lock_timeout = lock_timeout_seconds
         # store is the Redis session registry (redis_state.py) when
         # REDIS_URL is set; None keeps every in-process code path below
-        # exactly as it was (the CLI, scanner, and tests never see Redis)
+        # exactly as it was (the CLI and the tests never see Redis)
         self._store = store
         self._sessions: dict[str, _Session] = {}
         # stream_file mirrors the CLI's agent_stream.txt: every node's
@@ -201,13 +235,14 @@ class AgentService:
         max_sessions = int(os.environ.get("AGENT_API_MAX_SESSIONS", "500"))
         stream_file = os.environ.get("AGENT_API_STREAM_FILE", "agent_api_stream.txt")
 
+        lock_timeout = float(os.environ.get("AGENT_API_LOCK_TIMEOUT_SECONDS", "300"))
+
         store = None
         redis_url = os.environ.get("REDIS_URL", "")
         if redis_url and checkpointer is None:
             # fails fast when Redis is unreachable -- see build_redis_state
             from ease_clients.redis_state import build_redis_state
 
-            lock_timeout = float(os.environ.get("AGENT_API_LOCK_TIMEOUT_SECONDS", "300"))
             store, checkpointer = await build_redis_state(
                 redis_url, ttl_minutes * 60, max_sessions, lock_timeout,
             )
@@ -220,7 +255,8 @@ class AgentService:
                    stream_file=stream_file,
                    store=store,
                    mcp_stack=mcp_stack,
-                   mcp_session=mcp_session)
+                   mcp_session=mcp_session,
+                   lock_timeout_seconds=lock_timeout)
 
     async def mcp_alive(self) -> bool:
         """Is the MCP server still answering?
@@ -264,12 +300,14 @@ class AgentService:
         IDLE session is evicted first so the cap holds. A session whose
         turn is currently running (lock held) is never evicted -- if
         every session is mid-turn, the cap briefly overshoots instead
-        of deleting history out from under a running turn.
+        of deleting history out from under a running turn. A lock held
+        past the timeout is a stuck turn, not a running one, so it does
+        not protect the session from eviction.
         """
         while len(self._sessions) >= self._max_sessions:
             idle = [
                 sid for sid, session in self._sessions.items()
-                if not session.lock.locked()
+                if not session.lock.locked() or session.held_too_long(self._lock_timeout)
             ]
             if not idle:
                 logger.warning(
@@ -338,13 +376,16 @@ class AgentService:
         Sessions whose turn is currently running (lock held) are never
         swept -- last_used only refreshes when a turn completes, so
         without this check a turn outlasting the TTL would have its
-        history deleted mid-run.
+        history deleted mid-run. A lock held past the timeout is a
+        stuck turn rather than a running one: it stops protecting the
+        session, which is what keeps one wedged turn from pinning a
+        session (and its memory) for the life of the process.
         """
         now = time.monotonic()
         expired = [
             sid for sid, session in self._sessions.items()
             if now - session.last_used > self._session_ttl
-            and not session.lock.locked()
+            and (not session.lock.locked() or session.held_too_long(self._lock_timeout))
         ]
         for sid in expired:
             self._evict(sid, reason="idle TTL")
@@ -362,6 +403,39 @@ class AgentService:
         while True:
             await asyncio.sleep(interval_seconds)
             self.sweep_expired_sessions()
+
+    @asynccontextmanager
+    async def _turn_lock(self, session: "_Session", session_id: str):
+        """Hold the per-session turn lock for one turn, bounded by a wait.
+
+        The in-process counterpart of the Redis SET NX PX lock. Two
+        differences from a bare "async with session.lock" matter:
+
+          - the WAIT is bounded. A turn stuck on an await that never
+            returns would otherwise make every later message on that
+            session hang with it, forever and silently. Now the second
+            caller gets TurnBusyError, which the API turns into a 503.
+          - locked_at is recorded, so eviction can tell a running turn
+            from a stuck one (_Session.held_too_long).
+
+        The stuck turn itself is not cancelled: it stays parked on its
+        await until that returns. Bounding the LLM and MCP calls
+        themselves is the fix for that, and is still open.
+        """
+        try:
+            await asyncio.wait_for(session.lock.acquire(), timeout=self._lock_timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "session %s: turn lock still held after %.0fs; rejecting this message",
+                session_id, self._lock_timeout,
+            )
+            raise TurnBusyError(session_id)
+        session.locked_at = time.monotonic()
+        try:
+            yield
+        finally:
+            session.locked_at = None
+            session.lock.release()
 
     def _config(self, session_id: str) -> dict:
         return {"configurable": {"thread_id": session_id}, "recursion_limit": 50}
@@ -393,7 +467,7 @@ class AgentService:
     async def stream(self, session_id: str, user_input: str) -> AsyncIterator[AgentEvent]:
         """Run one turn and yield AgentEvents as they happen.
 
-        Same astream_events v2 handling as the CLI loop in agnes_agent_graph.py, but
+        Same astream_events v2 handling as the CLI loop in agnes_agent.py, but
         yields events instead of writing to stdout:
           on_chain_start on a known node -> phase event
           on_chat_model_stream content chunk without tool calls -> token event
@@ -406,7 +480,8 @@ class AgentService:
         into agent (LLM) time vs tool time.
 
         Raises UnknownSessionError for ids that were never created or
-        have been evicted.
+        have been evicted, and TurnBusyError when the session's turn
+        lock could not be taken within the lock timeout.
         """
         if self._store is not None:
             # Redis mode: validate + TTL-refresh in Redis, and take the
@@ -417,7 +492,7 @@ class AgentService:
             turn_lock = self._store.lock(session_id)
         else:
             session = self._require_session(session_id)
-            turn_lock = session.lock
+            turn_lock = self._turn_lock(session, session_id)
         config = self._config(session_id)
         answer_parts: list[str] = []
         stream_fh = self._open_stream_file(session_id)
@@ -755,6 +830,11 @@ def create_app(
                 status_code=404,
                 detail="Unknown or expired session. Create a new one with POST /sessions.",
             )
+        except TurnBusyError:
+            raise HTTPException(
+                status_code=503,
+                detail="A turn is still running on this session. Retry shortly.",
+            )
         except Exception:
             # log the full traceback server-side but send the client a
             # generic message -- internals never leak into responses
@@ -819,6 +899,15 @@ def create_app(
                 async for event in app.state.service.stream(session_id, request.message):
                     payload = json.dumps({"data": event.data})
                     yield f"event: {event.type}\ndata: {payload}\n\n"
+            except TurnBusyError:
+                # the 200 header is already out, so this cannot be a 503
+                # like the buffered endpoint returns -- say it in-band
+                # instead, specifically enough for a client to retry
+                logger.warning("session %s: message rejected, turn lock busy", session_id)
+                payload = json.dumps(
+                    {"data": "A turn is still running on this session. Retry shortly."}
+                )
+                yield f"event: error\ndata: {payload}\n\n"
             except Exception:
                 # too late for an HTTP error status -- the 200 header
                 # went out when streaming began. Signal failure in-band

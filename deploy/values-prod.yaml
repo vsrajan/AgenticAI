@@ -1,7 +1,9 @@
-# prod cluster overrides. 3 fixed replicas of the single workload:
-# turns are IO-bound on Azure OpenAI quota, so raise TPM quota before
-# adding replicas beyond 3. There is no separate MCP tier to scale on
-# this branch -- the server is a child process of each agent pod.
+# prod cluster overrides. ONE replica of the single workload, fixed
+# by the in-memory session store rather than by load: a second pod
+# cannot see the first pod's sessions. Scaling out needs Redis first
+# (docs/single-agent.md), and then Azure OpenAI TPM quota is the next
+# ceiling -- turns are IO-bound on it. There is no separate MCP tier
+# to scale either; the server is a child process of the agent pod.
 # Placeholders <...> are filled during AKS onboarding. No secrets ever.
 
 image:
@@ -21,7 +23,7 @@ mcp:
     container: "<prod-container>"
 
 agent:
-  replicas: 3
+  replicas: 1
   azureOpenAI:
     endpoint: "<https://prod-aoai-resource.openai.azure.com/>"
     deployment: "<gpt-4o-deployment-name>"

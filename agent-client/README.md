@@ -1,9 +1,13 @@
 # Agent Client — Access Governance Assistant
 
-LangGraph ReAct agent that helps users find access rights, discover peer
-entitlements, and understand the Access Governance application by consulting
-PDF documentation and CSV data served via an
-[MCP server](../mcp-server/).
+LangGraph ReAct agent that helps users find access rights and discover peer
+entitlements from data served via an [MCP server](../mcp-server/).
+
+On this branch it is the RESOURCE specialist only: one agent, no router, and
+only the 8 resource tools bound out of the 12 the server offers. Documentation
+and data-quality questions are declined rather than answered. Sessions live in
+process memory, so the API runs as a single instance. See
+[docs/single-agent.md](../docs/single-agent.md).
 
 ## Architecture
 
@@ -152,11 +156,10 @@ agent-client/
 │       ├── cli_api.py            # API server entry point
 │       ├── agent_api.py          # AgentService + FastAPI app
 │       ├── auth_api.py           # API bearer-token auth
-│       ├── scanner_cli.py        # batch scanner entry point
+│       ├── redis_state.py        # Redis session state (unused: no Redis here)
 │       └── utils/
 │           ├── llm.py                 # get_llm() → AzureChatOpenAI
-│           ├── agnes_agent_graph.py   # LangGraph agent graph + MCP client
-│           ├── scanner.py             # batch scan engine
-│           └── incident_sources.py    # incident data sources
+│           ├── agnes_agent.py         # LIVE agent: resource only + MCP client
+│           └── agnes_agent_graph.py   # FROZEN: the old multi-agent graph
 └── README.md
 ```

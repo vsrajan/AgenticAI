@@ -4,6 +4,13 @@
 > Open `.excalidraw` files in [excalidraw.com](https://excalidraw.com)
 > or the VS Code Excalidraw extension.
 > For the original Mermaid diagrams, see [architecture.md](architecture.md).
+>
+> **Branch `ResourceAgentOnly`:** every diagram here shows the
+> MULTI-AGENT graph (router + 3 specialists), which is now frozen in
+> `agnes_agent_graph.py` and runs nowhere. What runs is one agent with
+> no router -- architecture.md section 0, and
+> [single-agent.md](single-agent.md). The MCP server, API and AKS
+> diagrams are still accurate.
 
 ---
 
@@ -64,19 +71,12 @@ MCP protocol.
 
 ---
 
-## 4. Incident Scanner -- Batch Flow
+## 4. Incident Scanner -- REMOVED
 
-The scanner CLI (`scan-cli`) is a standalone batch tool that reuses the
-existing agent graph without modification. It reads incidents from a CSV,
-runs each through the knowledgebase agent, and writes a coverage report.
-
-> Source: [04_incident_scanner_flow.excalidraw](04_incident_scanner_flow.excalidraw)
-
-Key points:
-- **No router involved** -- `active_agent="knowledgebase_agent"` bypasses routing
-- **Fresh graph per incident** -- no shared conversation state between incidents
-- **Reuses agnes_agent_graph.py** -- imports `build_graph` and `_get_mcp_server_config` directly
-- **Coverage heuristic** -- parses citations from the agent response to detect gaps
+The `scan-cli` batch tool was deleted with the knowledgebase agent it
+ran on (docs/single-agent.md section 7). The diagram file
+`04_incident_scanner_flow.excalidraw` is kept but no longer describes
+anything that exists.
 
 ---
 

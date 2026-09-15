@@ -1,3 +1,6 @@
+{{- if and (not .Values.agent.redis.enabled) (gt (int .Values.agent.replicas) 1) }}
+{{- fail "agent.replicas > 1 needs agent.redis.enabled: sessions live in the pod's memory, so a second replica cannot serve a session the first one owns (docs/single-agent.md)." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,6 +14,17 @@ spec:
   # two halves therefore scale together -- there is no separate MCP
   # Deployment or HPA to tune (docs/single-container-stdio.md s7-8).
   replicas: {{ .Values.agent.replicas }}
+  {{- if not .Values.agent.redis.enabled }}
+  # Recreate, not the default RollingUpdate: with sessions in the pod's
+  # memory, a surge pod would sit behind the same Service and answer
+  # some requests from a pod that has never seen the caller's session.
+  # The cost is honest downtime for one cold start (parquet staging,
+  # PDF extraction, the DuckDB open) plus the drain below, and every
+  # live conversation is lost -- which is true of any restart in this
+  # mode. The web client re-creates its session on the 404.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/instance: {{ .Release.Name }}
@@ -105,20 +119,31 @@ spec:
           # open, and loading the 12 tools all happen before the app
           # answers. Budget generously and set this from the real
           # measurement (work item 7) rather than from this guess.
+          #
+          # timeoutSeconds is set explicitly on all three because the
+          # default is 1s, and every one of these probes is a protocol
+          # round-trip to the MCP child. The child runs its tools on
+          # its own event loop, so a probe issued while a long tool
+          # call is in flight waits for it. At ONE replica a readiness
+          # failure empties the Service and the whole API 503s, so the
+          # margin matters more here than it would at three.
           startupProbe:
             httpGet:
               path: /health
               port: http
             failureThreshold: 60
             periodSeconds: 5
-          # readiness = /health: pings the MCP child AND Redis. Failing
-          # it removes the pod from rotation but must NOT restart it --
-          # a Redis blip would otherwise restart the fleet (aks.md s5).
+            timeoutSeconds: 5
+          # readiness = /health: pings the MCP child (and Redis, when
+          # enabled). Failing it removes the pod from rotation but must
+          # NOT restart it -- a dependency blip must not restart the
+          # pod (aks.md s5).
           readinessProbe:
             httpGet:
               path: /health
               port: http
             periodSeconds: 10
+            timeoutSeconds: 5
           # liveness = /livez: pings ONLY the in-container MCP child,
           # never an external dependency. A dead child fails every turn
           # while this port stays open, so tcpSocket cannot see it, and
@@ -128,6 +153,7 @@ spec:
               path: /livez
               port: http
             periodSeconds: 20
+            timeoutSeconds: 10
             failureThreshold: 3
           resources:
             {{- toYaml .Values.agent.resources | nindent 12 }}

@@ -1,6 +1,7 @@
 # test cluster overrides. From test upward: exact CORS origin, no
-# stream file, 2 replicas of the one workload. Placeholders <...> are
-# filled during AKS onboarding. No secrets here, ever.
+# stream file. ONE replica of the one workload -- in-memory sessions,
+# see deploy/chart/values.yaml. Placeholders <...> are filled during
+# AKS onboarding. No secrets here, ever.
 
 image:
   registry: "<registry-base>"
@@ -19,7 +20,7 @@ mcp:
     container: "<test-container>"
 
 agent:
-  replicas: 2
+  replicas: 1
   azureOpenAI:
     endpoint: "<https://test-aoai-resource.openai.azure.com/>"
     deployment: "<gpt-4o-deployment-name>"

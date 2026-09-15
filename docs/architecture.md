@@ -1,5 +1,52 @@
 # Access Governance AI — Architecture
 
+> **Branch `ResourceAgentOnly`.** Sections 1-3 below describe the
+> MULTI-AGENT graph, which is frozen in `agnes_agent_graph.py` and
+> imported by nothing. What actually runs is section 0: one agent, no
+> router. The MCP server half of every diagram is unchanged -- it still
+> serves all 12 tools; the live agent binds 8 of them.
+> See [single-agent.md](single-agent.md).
+
+## 0. What runs on this branch
+
+```mermaid
+%%{init: {'theme': 'default', 'themeVariables': {'fontSize': '12px', 'background': '#ffffff'}, 'flowchart': {'useMaxWidth': false}}}%%
+graph LR
+    User["User<br/>(CLI / web client)"]
+    User -->|"prompt"| RA
+
+    subgraph AgentClient["Agent Client -- agnes_agent.py"]
+        direction TB
+        RA["resource_agent<br/><small>RESOURCE_PROMPT + history</small>"]
+        RT["resource_tools<br/><small>ToolNode, 8 tools</small>"]
+        RA -->|"tool_calls"| RT
+        RT -->|"results"| RA
+        RA -->|"no tool_calls"| DONE(["END"])
+    end
+
+    RA <-->|"LLM calls"| LLM["Azure OpenAI"]
+    RT <-->|"stdio (child process)"| MCP["MCP Server<br/><small>12 tools served, 8 bound</small>"]
+    RA -.->|"checkpoint per superstep"| MEM[("InMemorySaver<br/><small>one pod, dies on restart</small>")]
+
+    style RA fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
+    style RT fill:#e0f2f1,stroke:#00696b,stroke-width:2px,color:#000
+    style MCP fill:#e0f2f1,stroke:#00696b,stroke-width:2px,color:#000
+    style LLM fill:#e3f2fd,stroke:#2b579a,stroke-width:2px,color:#000
+    style MEM fill:#fff3e0,stroke:#e65c00,stroke-width:1px,color:#000
+    style DONE fill:#f5f5f5,stroke:#666,stroke-width:1px,color:#000
+```
+
+State is a plain `MessagesState`. The conditional edge out of
+`resource_agent` reads the last message: tool calls go to the tool node,
+anything else ends the turn. There is no `active_agent`, no handoff and
+no routing hop.
+
+Questions the four unbound tools would have answered -- documentation,
+process, data quality -- are declined by the prompt's SCOPE section
+rather than routed anywhere.
+
+---
+
 ## 1. High-Level Overview
 
 The system consists of two main components communicating over the
@@ -231,44 +278,9 @@ graph TD
 
 ---
 
-## 4. Incident Scanner -- Batch Flow
+## 4. Incident Scanner -- REMOVED
 
-The scanner CLI (`scan-cli`) is a standalone batch tool that reuses the
-existing agent graph without modification. It reads incidents from a CSV,
-runs each through the knowledgebase agent, and writes a coverage report.
-
-```mermaid
-%%{init: {'theme': 'default', 'themeVariables': {'fontSize': '12px', 'background': '#ffffff'}, 'flowchart': {'useMaxWidth': false}}}%%
-graph TD
-    CLI["scan-cli<br/><small>scanner_cli.main()</small>"]
-    CSV_IN["Incidents CSV<br/><small>CsvIncidentSource</small>"]
-    SCAN["scanner.run_scan()<br/><small>batch engine</small>"]
-
-    CLI -->|"read"| CSV_IN
-    CSV_IN -->|"list[Incident]"| SCAN
-
-    SCAN -->|"for each incident"| COMPILE["graph.compile()<br/><small>fresh, no checkpointer</small>"]
-    COMPILE -->|"ainvoke<br/>active_agent=knowledgebase_agent"| KB["knowledgebase_agent<br/><small>reused from agnes_agent_graph.py</small>"]
-
-    KB <-->|"search_docs, read_page<br/>list_topics"| MCP["MCP Server<br/><small>knowledgebase tools</small>"]
-    KB <-->|"LLM calls"| LLM["Azure OpenAI"]
-
-    KB -->|"answer"| RESULT["ScanResult<br/><small>has_coverage, matched_topics</small>"]
-    RESULT -->|"collect all"| CSV_OUT["scan_results.csv<br/><small>_write_results_csv()</small>"]
-
-    style CLI fill:#e0e0e0,stroke:#666,stroke-width:2px,color:#000
-    style CSV_IN fill:#f5f5f5,stroke:#666,stroke-width:1px,color:#000
-    style SCAN fill:#d6e4f0,stroke:#2b579a,stroke-width:2px,color:#000
-    style COMPILE fill:#bbdefb,stroke:#2b579a,stroke-width:1px,color:#000
-    style KB fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000
-    style MCP fill:#e0f2f1,stroke:#00696b,stroke-width:2px,color:#000
-    style LLM fill:#e3f2fd,stroke:#2b579a,stroke-width:2px,color:#000
-    style RESULT fill:#fff3e0,stroke:#e65c00,stroke-width:1px,color:#000
-    style CSV_OUT fill:#f5f5f5,stroke:#666,stroke-width:1px,color:#000
-```
-
-Key points:
-- **No router involved** -- `active_agent="knowledgebase_agent"` bypasses routing
-- **Fresh graph per incident** -- no shared conversation state between incidents
-- **Reuses agnes_agent_graph.py** -- imports `build_graph` and `_get_mcp_server_config` directly
-- **Coverage heuristic** -- parses citations from the agent response to detect gaps
+The `scan-cli` batch tool and its diagram were deleted with the
+knowledgebase agent it depended on (docs/single-agent.md section 7).
+Both are in git history at this branch's base if the batch flow is
+needed again.

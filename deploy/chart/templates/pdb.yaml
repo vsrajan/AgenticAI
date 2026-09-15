@@ -1,8 +1,14 @@
 {{- if .Values.pdb.enabled }}
-# keep at least one pod up through voluntary disruptions (node drains,
+# Protect the workload through voluntary disruptions (node drains,
 # cluster upgrades). One budget now, not two: the MCP server is a child
 # process of this pod, so there is no second workload to protect.
-# Pointless with a single replica -- dev disables this.
+#
+# maxUnavailable, NOT minAvailable: at one replica a minAvailable of 1
+# can never be satisfied while a pod is being evicted, so every drain
+# blocks forever. maxUnavailable 1 always permits one eviction and
+# still stops a multi-replica deployment losing everything at once.
+# The default is enabled: false, because at one replica the budget
+# only ever permits what would happen anyway.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -10,7 +16,7 @@ metadata:
   labels:
     {{- include "agnes.labels" . | nindent 4 }}
 spec:
-  minAvailable: 1
+  maxUnavailable: 1
   selector:
     matchLabels:
       app.kubernetes.io/instance: {{ .Release.Name }}

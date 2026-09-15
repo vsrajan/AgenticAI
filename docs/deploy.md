@@ -45,6 +45,15 @@ The three decisions that shape everything here:
    daemonless). All of these produce standard OCI images; AKS cannot
    tell the difference.
 
+**Branch `ResourceAgentOnly`: there is no Redis at all.** The
+infrastructure does not offer it, so `agent.redis.enabled` is false,
+sessions live in the pod's memory, and the chart REFUSES to render more
+than one replica. Everything below about Redis, `redis-url` and multiple
+replicas applies only once that changes -- see
+[single-agent.md](single-agent.md). The rollout strategy is `Recreate`
+in this mode, so a deploy is a short outage and every live conversation
+is lost.
+
 One more decision confirmed since the plan draft: **Redis lives
 OUTSIDE the cluster** (Azure Cache for Redis). The chart therefore
 contains no Redis workload at all -- the agent reaches it through
@@ -318,10 +327,10 @@ deploy/
       networkpolicy.yaml      # only agent pods -> mcp :8000
       hpa-mcp.yaml            # conditional: mcp.hpa.enabled per environment
       pdb.yaml                # conditional: one PDB per tier
-  values-dev.yaml             # 1 mcp / 2 agents, stream file on, CORS *
+  values-dev.yaml             # 1 replica, stream file on, CORS *
   values-test.yaml            # 2/2, stream file off, exact CORS origin
   values-uat.yaml             # prod-shaped: HPA on
-  values-prod.yaml            # agent 3 fixed, mcp HPA 2->6 (aks.md s7)
+  values-prod.yaml            # 1 replica (in-memory sessions), exact CORS
 ```
 
 What the TEMPLATES fix permanently (the aks.md decisions -- not
@@ -382,10 +391,10 @@ topology truth it is fixed in the template.
 |---|---|---|
 | AZURE_OPENAI_API_KEY | Key Vault `azure-openai-api-key` | until workload identity retires it (aks.md s8) |
 | AGENT_API_TOKEN | Key Vault `agent-api-token` | leg-1 auth |
-| REDIS_URL | Key Vault `redis-url` | embeds the Azure Cache access key; `rediss://...:6380` under TLS |
+| REDIS_URL | Key Vault `redis-url` | ABSENT on this branch (agent.redis.enabled false). When on: embeds the Azure Cache access key; `rediss://...:6380` under TLS |
 | AZURE_OPENAI_ENDPOINT / DEPLOYMENT / API_VERSION | values `agent.azureOpenAI.*` | dev/prod use different resources and quotas |
 | ingress hostname | values `ingress.host` | agnes-dev... -> agnes... |
-| replicas, resources | values `agent.*` | ONE replica count now -- both halves scale together (dev 2 agents for the in-cluster P3.1 check) |
+| replicas, resources | values `agent.*` | ONE replica count, pinned to 1 while sessions are in memory -- the chart fails the render otherwise |
 | MCP_PARQUET_SOURCES | values `mcp.parquet.sources` | ABSOLUTE container paths onto the staged /data volume |
 | parquet storage account/container (initContainer) | values `mcp.parquet.*` | per-environment data |
 | AGENT_API_CORS_ORIGINS | values `agent.corsOrigins` | permissive in dev, exact origin from test up |
@@ -484,15 +493,18 @@ concrete):
    the parquet ingest finished (check `Loaded parquet ... rows` and
    `Data store ready: 2 datasets` in `kubectl logs`; a fast-start pod
    showing 0 datasets means the initContainer staged nothing).
-2. `GET /health` through the ingress -- 200; in Redis mode the body
-   carries `"session_store": "redis"`.
+2. `GET /health` through the ingress -- 200, body carries `"mcp": "ok"`
+   and the tool count; in Redis mode it also carries
+   `"session_store": "redis"`. `GET /livez` -- 200.
 3. One authenticated MCP round-trip via the agent (a resource question
    through the API) -- proves ingress -> agent -> MCP -> DuckDB ->
    Azure OpenAI end to end.
-4. Dev cluster only, once: the P3.1 rig semantics in-cluster -- kill
-   an agent pod mid-conversation, session continues on the other pod;
-   two simultaneous messages to one session serialize. (This is why
-   values-dev.yaml runs TWO agent replicas.)
+4. Dev cluster only, once, and ONLY when Redis is enabled: the P3.1
+   rig semantics in-cluster -- kill an agent pod mid-conversation,
+   session continues on the other pod; two simultaneous messages to
+   one session serialize. Not runnable in the in-memory single-pod
+   mode this branch deploys: killing the pod ends the session, which
+   is the documented behaviour rather than a failure.
 5. Watch the two log signals that were built for exactly this:
    per-tool `took=ms` on MCP, per-turn agent/tool split on the agent.
 

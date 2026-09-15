@@ -1,1 +1,1 @@
-"""Shared internals: llm config, the agent graph, scanner engine, incident sources."""
+"""Shared internals: llm config and the agent graph."""

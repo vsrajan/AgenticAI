@@ -15,7 +15,6 @@ dependencies = [
 
 [project.scripts]
 agent-client = "ease_clients.cli:main"
-scan-cli = "ease_clients.scanner_cli:main"
 agent-api = "ease_clients.cli_api:main"
 
 [build-system]
