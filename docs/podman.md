@@ -425,17 +425,134 @@ a single container -- both are correct in their own context.)
 
 ### 3.4 Redis
 
-Leave Redis running as a host process, exactly as you already have it:
+Either a host process or a container works here. The container is now
+the closer model.
+
+This section used to say "do not containerize it", on the premise that
+AKS would reach an Azure Cache instance **outside** the cluster. That
+premise no longer holds: there is no central Redis to lease, so the
+deployment stands up its own from an image in the internal registry.
+Either way it stays an external dependency reached over TCP, which is
+what section 8's readiness test turns on.
+
+As a host process:
 
 ```bash
 redis-server --port 6379 --daemonize yes
 redis-cli -p 6379 ping        # -> PONG
 ```
 
-Do not containerize it. In AKS, Redis is **outside** the cluster
-(Azure Cache), so a host process on the container host is the more
-faithful model -- it is an external dependency reached over TCP, which
-is precisely what section 8's readiness test depends on.
+As a container, with persistence off on purpose:
+
+```bash
+podman run -d --name redis-test -p 6379:6379 \
+  <internal-registry>/redis \
+  redis-server --save "" --appendonly no \
+               --maxmemory 256mb --maxmemory-policy noeviction
+```
+
+Both flags are deliberate, and both are the kind of default worth
+setting explicitly so an image update cannot flip them:
+
+- `--save "" --appendonly no`. Sessions are TTL'd and deliberately
+  ephemeral (`docs/P3.1.md` lists durable audit as a non-goal). Worse
+  than useless, persistence is a liability: these checkpoints hold
+  conversation history with entitlement data and user identities, and
+  an RDB file quietly accumulating that is exactly the retention /
+  PII / DLP decision CLAUDE.md says must be made before any code.
+- `--maxmemory-policy noeviction`, not `allkeys-lru`. Under LRU, Redis
+  drops a checkpoint mid-conversation and the agent looks like it lost
+  its memory. `noeviction` fails the write loudly instead -- the same
+  call made in `denorm_bugfix`: fail loud over a wrong answer that
+  looks right. The session registry has its own LRU cap and TTLs, so
+  the ceiling should not be reached in the first place.
+
+### 3.4.1 Verify the image satisfies redis_state.py
+
+A Redis that answers PING is not necessarily one this codebase can
+use. `redis_state.py` takes its turn lock through redis-py's `Lock`,
+whose release and extend paths are Lua `EVAL` scripts, so **scripting
+is a hard requirement** -- and some hardened internal builds disable
+it. That failure passes every PING / SET / GET check you would think
+to run, then breaks the turn lock only. It also rules out the
+SQLite-backed Redis-alikes (Redka and friends) entirely.
+
+Save this as `agent-client/check_redis.py`:
+
+```python
+"""Does this Redis satisfy what redis_state.py needs?
+
+Run against a candidate server BEFORE wiring REDIS_URL into anything:
+
+    cd agent-client && uv run python check_redis.py
+
+The lock line is the one that matters -- redis-py's Lock is Lua-backed,
+so it fails on a server with scripting disabled while every simpler
+check still passes.
+"""
+
+import redis
+
+r = redis.Redis(host="127.0.0.1", port=6379)
+print("ping   :", r.ping())
+print("eval   :", r.eval("return 1", 0))
+print("setnx  :", r.set("lock:probe", "1", nx=True, px=5000))
+print("ttl    :", r.ttl("lock:probe"))
+with r.lock("test:lock", timeout=5):
+    print("lock   : acquired and released OK")
+print("version:", r.info("server")["redis_version"])
+```
+
+`redis>=5` is already a dependency (`agent-client/pyproject.toml:13`),
+so it runs with no extra install. Healthy output:
+
+```
+ping   : True
+eval   : 1
+setnx  : True
+ttl    : 5
+lock   : acquired and released OK
+version: 7.0.15
+```
+
+`setnx` plus `ttl` cover the acquire half of the lock (`SET NX PX`,
+no Lua); `eval` and `lock` cover the half that needs scripting.
+
+**Four traps, all hit live on 2026-09-15.** Every one of them made a
+healthy Redis look broken:
+
+1. **Run it from a file, never as `redis-cli` one-liners.** A layer
+   that re-parses the command line -- an `ssh` hop, or a wrapper using
+   `$@` where it meant `"$@"` -- silently strips one level of quoting,
+   and the one-liners then lie about the server. Test for it with a
+   command that takes exactly one argument:
+
+   ```bash
+   podman exec redis-test redis-cli ECHO "hello world"
+   ```
+
+   `hello world` means quotes survive. `ERR wrong number of arguments`
+   means they do not, and no `redis-cli` result you get is trustworthy
+   until that is fixed. A file has no shell quoting at all, which is
+   why the check above is a script.
+
+2. **redis-cli's exit code is not a success signal.** Observed `exit=0`
+   on a command whose reply was `ERR value is not an integer or out of
+   range`. Read the output, not `$?`.
+
+3. **An empty reply is a nil, not a failure.** With quotes stripped,
+   `EVAL "return 1" 0` arrives as script `return`, numkeys `1`, key
+   `0` -- valid Lua returning nil, which prints as nothing in raw
+   (non-TTY) mode and exits 0. That silence read as "scripting is
+   missing"; scripting was fine. `COMMAND INFO EVAL` settles the
+   question and needs no quoted arguments.
+
+4. **Keys not surviving `podman restart` is correct, not a bug.** It is
+   what `--save ""` is for. Sessions are meant to be recoverable, not
+   durable: when Redis restarts they vanish, the agent returns 404 for
+   the stale id, and `webclient_api.html` creates a new one -- a path
+   that already exists and is tested. Do not "fix" it by turning
+   persistence on; see the retention note above.
 
 ### 3.5 A working directory for nginx
 
