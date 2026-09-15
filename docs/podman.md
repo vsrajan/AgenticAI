@@ -46,7 +46,7 @@ Kubernetes concepts these commands are rehearsing).
 | The agent can spawn the MCP server as a child | `podman top` shows it |
 | Configuration reaches the child | `Data store ready: 2 datasets` |
 | One subprocess serves many tool calls | the child count stays at 1 across turns |
-| Readiness and liveness differ meaningfully | stop Redis -> `/health` 503, `/livez` 200 |
+| Readiness and liveness differ meaningfully | `podman stop redis` -> `/health` 503, `/livez` 200 |
 | A dead child is invisible to a port check | kill it -> the port still listens, `/livez` 503 |
 | Sessions survive instance switching | two containers behind nginx, one conversation |
 | SSE survives a proxy | tokens trickle through nginx, not one lump |
@@ -69,8 +69,9 @@ command -v podman && podman --version
 ```
 
 Expected: `podman version 5.6.0` or similar. If it is missing, install
-it -- and note the same modular-metadata trap you hit with nginx and
-redis, on a RHEL box wearing CentOS 8 repos:
+it -- and note the same modular-metadata trap you hit with nginx on a
+RHEL box wearing CentOS 8 repos (Redis needs no host install at all
+now; it runs as a container, section 3.4):
 
 ```bash
 sudo dnf install -y podman --setopt=centos-8-appstream.module_hotfixes=true
@@ -425,30 +426,23 @@ a single container -- both are correct in their own context.)
 
 ### 3.4 Redis
 
-Either a host process or a container works here. The container is now
-the closer model.
+Run Redis as a container, with persistence off on purpose.
 
 This section used to say "do not containerize it", on the premise that
 AKS would reach an Azure Cache instance **outside** the cluster. That
-premise no longer holds: there is no central Redis to lease, so the
-deployment stands up its own from an image in the internal registry.
-Either way it stays an external dependency reached over TCP, which is
-what section 8's readiness test turns on.
-
-As a host process:
-
-```bash
-redis-server --port 6379 --daemonize yes
-redis-cli -p 6379 ping        # -> PONG
-```
-
-As a container, with persistence off on purpose:
+premise no longer holds -- there is no central Redis to lease, so the
+deployment stands up its own from an image in the internal registry,
+and a container here is the faithful stand-in. Either way it stays an
+external dependency reached over TCP, which is what section 8's
+readiness test turns on.
 
 ```bash
-podman run -d --name redis-test -p 6379:6379 \
-  <internal-registry>/redis \
+podman run -d --name redis -p 6379:6379 \
+  <internal-registry>/redis:8.8.0-alpine3.23 \
   redis-server --save "" --appendonly no \
                --maxmemory 256mb --maxmemory-policy noeviction
+
+podman exec redis redis-cli ping        # -> PONG
 ```
 
 Both flags are deliberate, and both are the kind of default worth
@@ -466,6 +460,35 @@ setting explicitly so an image update cannot flip them:
   call made in `denorm_bugfix`: fail loud over a wrong answer that
   looks right. The session registry has its own LRU cap and TTLs, so
   the ceiling should not be reached in the first place.
+
+Three operational points follow from Redis being a container:
+
+- **Start it before any agent container.** `REDIS_URL` set but
+  unreachable is a fail-fast startup (`docs/P3.1.md`), so an agent
+  launched first exits immediately rather than degrading. Section 7
+  sequences the rig accordingly.
+- **`REDIS_URL` does not change.** `-p 6379:6379` publishes the port in
+  the host's network namespace, and the agent containers run
+  `--network=host` (section 6.2), so `127.0.0.1:6379` reaches Redis
+  exactly as it did when Redis was a host process. It is also the
+  faithful shape: in AKS, Redis is a separate pod with its own network
+  namespace, reached over a Service. If rootless port publishing gives
+  you trouble, put `--network=host` on the Redis container instead --
+  it binds 6379 directly and removes the forwarding. Drop `-p` if you
+  do; podman ignores it with a warning.
+- **`redis-cli` now lives inside the container.** Every command in this
+  guide that used `redis-cli -p 6379 ...` becomes
+  `podman exec redis redis-cli ...`, unless you also have redis
+  installed on the host. This is the one change that is easy to miss:
+  containerizing Redis moves the client, not just the server.
+
+A host process still works if you prefer it, and nothing downstream
+notices:
+
+```bash
+redis-server --port 6379 --daemonize yes
+redis-cli -p 6379 ping        # -> PONG
+```
 
 ### 3.4.1 Verify the image satisfies redis_state.py
 
@@ -528,7 +551,7 @@ healthy Redis look broken:
    command that takes exactly one argument:
 
    ```bash
-   podman exec redis-test redis-cli ECHO "hello world"
+   podman exec redis redis-cli ECHO "hello world"
    ```
 
    `hello world` means quotes survive. `ERR wrong number of arguments`
@@ -709,7 +732,8 @@ AGENT_API_LOCK_TIMEOUT_SECONDS=300
 KEEP_LAST_N_MSGS=20
 MAX_TOOL_CONTENT_LEN=80000
 
-# -- session state: Redis on the host, reachable via --network=host --
+# -- session state: the Redis container's published port, reached
+# through --network=host. Same value a host-process Redis would use.
 REDIS_URL=redis://127.0.0.1:6379/0
 
 # -- MCP server settings, read by the CHILD process --
@@ -746,9 +770,13 @@ podman run --rm -it --network=host --name agnes-probe \
 Why each flag:
 
 - `--network=host` -- the container shares the host's network, so
-  `127.0.0.1:6379` reaches your Redis and `localhost:8001` reaches the
-  agent, exactly like the process rig. Only the agent listens; the MCP
-  child has no port at all on this path.
+  `127.0.0.1:6379` reaches the Redis container's published port and
+  `localhost:8001` reaches the agent, exactly like the process rig.
+  Only the agent listens; the MCP child has no port at all on this
+  path. Note the asymmetry: the agent containers share the host
+  namespace, the Redis container has its own and publishes into it.
+  That is deliberate -- it is the AKS shape, where Redis is a separate
+  pod behind a Service.
 - `-v "$AGNES_DATA":/data:z` -- the staged parquet, shared-labelled for
   SELinux (section 3.3).
 - `-v agnes-duckdb-probe:/duckdb` -- a named volume for the DuckDB
@@ -825,6 +853,15 @@ duplication is real and is recorded as a cost in
 single-container-stdio.md section 8. Here you get to see it.
 
 ### 7.1 Two containers
+
+Redis first (section 3.4), and confirm it before starting anything
+that depends on it -- `REDIS_URL` set but unreachable is a fail-fast
+startup, so an agent launched against a dead Redis exits rather than
+running degraded, and the logs make that look like an image problem:
+
+```bash
+podman exec redis redis-cli ping        # -> PONG, or start it first
+```
 
 ```bash
 podman run -d --network=host --name agnes-a \
@@ -972,14 +1009,26 @@ This is the check that justifies having two endpoints, and it takes
 thirty seconds:
 
 ```bash
-redis-cli -p 6379 shutdown nosave      # or: pkill redis-server
+podman stop -t 0 redis
 
 curl -s -o /dev/null -w '%{http_code}\n' localhost:8001/health   # -> 503
 curl -s -o /dev/null -w '%{http_code}\n' localhost:8001/livez    # -> 200
 
-redis-server --port 6379 --daemonize yes
+podman start redis
 curl -s -o /dev/null -w '%{http_code}\n' localhost:8001/health   # -> 200
 ```
+
+`-t 0` skips podman's ten-second SIGTERM grace: this is meant to look
+like an outage, not a tidy shutdown, and waiting makes the test feel
+broken. `podman start` brings the same container back with its run
+flags intact -- re-running `podman run` would fail on the duplicate
+name.
+
+Two things worth noticing while it is down. The agent containers do
+**not** restart, which is the whole point. And when Redis comes back it
+comes back EMPTY -- there is no persistence (section 3.4), so any
+session from 8.2 is gone and a follow-up on it returns 404. Create a
+fresh session before continuing.
 
 In the cluster that difference means: a Redis blip takes pods OUT OF
 ROTATION but does not restart them. If liveness also checked Redis, one
@@ -1135,7 +1184,11 @@ podman logs agnes-a | grep -E 'took=' | tail -20
 | `IOException: Could not set lock on file` | two containers, one DuckDB file | one named volume per container at `/duckdb` |
 | `ModuleNotFoundError: No module named 'mcp_docs_server'` | stale build, or the package tree is wrong in the repo | confirm `src/mcp_docs_server/__init__.py` exists, then rebuild (the image has no editable-install pointer to go stale, so this is a source-layout problem) |
 | `address already in use` on 8001/8002/8000 | the earlier process-based rig is still running | `ss -ltnp \| grep -E '800[0-9]'` and stop the old processes |
-| `/health` 503, `/livez` 200 | Redis is down -- working as designed | start Redis; this is section 8.3, not a bug |
+| `/health` 503, `/livez` 200 | Redis is down -- working as designed | `podman start redis`; this is section 8.3, not a bug |
+| An agent container exits seconds after start, log names Redis | `REDIS_URL` is set and Redis is unreachable -- fail-fast by design, not an image fault | start Redis first and re-run; section 7.1 |
+| `address already in use` binding 6379 | a host `redis-server` already holds the port | `pkill redis-server`, or drop `-p` and give the Redis container `--network=host` (section 3.4) |
+| `redis-cli: command not found` on the host | the client moved into the container along with the server | `podman exec redis redis-cli ...` (section 3.4) |
+| Sessions vanished after a Redis restart | no persistence, by design | expected; re-create the session. Do NOT enable persistence -- section 3.4 |
 | `/livez` 503 | the MCP child died | `podman restart agnes-a`; in AKS the kubelet does this for you |
 | Tokens arrive as one lump | proxy buffering | `proxy_buffering off;` in `lb.conf` |
 | `cannot set limit ... cgroup` | cgroups v1 rootless (RHEL 8 default) | drop `--memory`/`--cpus`, measure with `podman stats` |
@@ -1156,6 +1209,7 @@ the first thing to suspect.
 
 ```bash
 podman rm -f agnes-a agnes-b agnes-probe agnes-limited 2>/dev/null
+podman rm -f redis 2>/dev/null          # the session store, section 3.4
 podman volume rm -f agnes-duckdb-a agnes-duckdb-b agnes-duckdb-probe agnes-duckdb-limited 2>/dev/null
 
 # nginx: ctrl-c the foreground process, or
@@ -1178,6 +1232,8 @@ IS: save/load over HTTP, with tags and auth.
 
 **When everything in section 8 passes**, the remaining unknowns are all
 Azure-side: Key Vault and the CSI driver, workload identity, the
-parquet-staging initContainer, real ingress and TLS, and Azure Cache
-for Redis. Those are section 3 of the deployment walkthrough in
+parquet-staging initContainer, and real ingress and TLS. Redis is no
+longer among them -- there is no Azure Cache to lease, so it ships as
+its own in-cluster Deployment and section 3.4 is already the rehearsal
+for it. The rest are section 3 of the deployment walkthrough in
 [deploy.md](deploy.md); the application itself is proven.
