@@ -13,7 +13,7 @@ reversible; section 6 is the way back.
 4. [The graph](#4-the-graph)
 5. [What this costs](#5-what-this-costs)
 6. [The path back](#6-the-path-back)
-7. [What was deleted](#7-what-was-deleted)
+7. [Every file changed](#7-every-file-changed)
 
 ## 1. What changed
 
@@ -194,19 +194,69 @@ git history at this branch's base.
 Nothing about the MCP server, its tools, the transports or the
 container layout has to change in either direction.
 
-## 7. What was deleted
+## 7. Every file changed
+
+One commit, `017bed2` on `ResourceAgentOnly`: 28 files, +1854 / -990.
+
+### Added (3)
+
+| Path | Lines | What |
+|---|---|---|
+| `agent-client/src/ease_clients/utils/agnes_agent.py` | +855 | the LIVE agent: prompt, 2-node graph, trimming/compaction, MCP config, stream logging, Spinner, interactive loop |
+| `agent-client/tests_api/test_agnes_agent.py` | +290 | 19 tests: graph shape, tool binding, the tool loop, prompt scope, `_trim_messages` / `_compact_content` |
+| `docs/single-agent.md` | +212 | this document |
+
+### Deleted (5 + one entry point)
 
 | Path | Lines | Why |
 |---|---|---|
-| `src/ease_clients/utils/scanner.py` | 224 | knowledgebase-only batch engine |
-| `src/ease_clients/scanner_cli.py` | 105 | its CLI |
-| `src/ease_clients/utils/incident_sources.py` | 215 | its input adapters |
-| `data/Incidents.csv` | -- | its sample data |
-| `docs/plan-incident-resolution.md` | -- | its plan doc |
-| `scan-cli` entry point | 1 | pyproject |
+| `agent-client/src/ease_clients/utils/scanner.py` | -224 | knowledgebase-only batch engine |
+| `agent-client/src/ease_clients/utils/incident_sources.py` | -215 | its input adapters |
+| `agent-client/src/ease_clients/scanner_cli.py` | -105 | its CLI |
+| `agent-client/data/Incidents.csv` | -13 | its sample data |
+| `docs/plan-incident-resolution.md` | -242 | its plan doc |
+| `scan-cli` in `pyproject.toml` | -1 | its entry point |
 
 The scanner could not simply be left behind: it invoked the graph with
 `active_agent="knowledgebase_agent"`, and a `MessagesState` graph
 silently ignores an unknown state key. It would have run every incident
 through the resource agent under the resource prompt and produced
 plausible, wrong output with no error.
+
+### Modified -- code (5)
+
+| Path | Delta | What changed |
+|---|---|---|
+| `agent-client/src/ease_clients/agent_api.py` | 117 | import switched to `agnes_agent`; `TurnBusyError`; `_Session.locked_at` + `held_too_long()`; `_turn_lock()`; stuck-lock rule in both eviction paths; `lock_timeout_seconds` plumbed from env; 503 / in-band SSE error at the two message endpoints |
+| `agent-client/tests_api/test_agent_api.py` | 122 | 9 `_get_mcp_server_config` imports re-pointed; 5 fake node names -> `resource_agent` / `resource_tools`; 5 new stuck-turn tests |
+| `agent-client/src/ease_clients/cli.py` | 2 | imports `run_agent_loop` from `agnes_agent` |
+| `agent-client/src/ease_clients/utils/__init__.py` | 2 | docstring no longer names the scanner |
+| `agent-client/pyproject.toml` | 1 | `scan-cli` entry point removed |
+
+`agnes_agent_graph.py` is **not** in this list. It was left byte-for-byte
+as it was and is now imported by nothing.
+
+### Modified -- deployment (8)
+
+| Path | Delta | What changed |
+|---|---|---|
+| `deploy/chart/values.yaml` | 75 | `replicas: 1`, `redis.enabled: false`, `pdb.enabled: false`, max sessions 500 -> 150, Key Vault two secrets, lock-timeout meaning in memory mode |
+| `deploy/chart/templates/agent-deployment.yaml` | 32 | the `replicas > 1` without Redis guard, `strategy: Recreate`, `timeoutSeconds` on all three probes |
+| `deploy/values-dev.yaml` | 17 | 2 -> 1 replica (the P3.1 kill-a-pod check needs Redis) |
+| `deploy/values-prod.yaml` | 12 | 3 -> 1 replica |
+| `deploy/values-test.yaml` | 7 | 2 -> 1 replica |
+| `deploy/values-uat.yaml` | 2 | 2 -> 1 replica |
+| `deploy/chart/templates/pdb.yaml` | 12 | `minAvailable: 1` -> `maxUnavailable: 1` |
+| `deploy/chart/templates/configmap.yaml` | 5 | why `REDIS_URL` is absent |
+
+### Modified -- docs and config (7)
+
+| Path | Delta | What changed |
+|---|---|---|
+| `docs/architecture.md` | 92 | new section 0 (the 2-node Mermaid diagram), banner over sections 1-3, scanner section retired |
+| `CLAUDE.md` | 83 | repo structure, architecture, run commands, recent work, two stale to-do entries |
+| `docs/deploy.md` | 32 | no-Redis banner, replica counts, Key Vault, the validation steps that need Redis |
+| `docs/architecture_excalidraw.md` | 24 | banner over the multi-agent diagrams, scanner section retired |
+| `docs/agent_api.md` | 21 | module name, scanner references |
+| `agent-client/README.md` | 19 | what this branch is, file tree |
+| `agent-client/.env.example` | 11 | leave `REDIS_URL` unset, what the lock timeout means in memory mode |
