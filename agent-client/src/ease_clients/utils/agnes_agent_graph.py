@@ -283,10 +283,11 @@ Two datasets provide structured data for access-rights discovery:
      system, carried INLINE on every assignment row. You do NOT need to
      look these up in Resources.
    - ResourceDescription: what the access right grants, also inline.
-     LONG free text. NEVER put it in columns=[...] unless the user
-     actually asked what a resource does — it is the largest field in
-     the row, and projecting it across an assignment list is the main
-     way to make an answer slow.
+     LONG free text, and the largest field in the row. Project it when
+     you are listing ONE person's rights (Strategy 0) — the user should
+     not have to ask a second question to learn what they hold. Keep it
+     out of peer and discovery work (Strategy 1, Strategy 3), where it
+     multiplies across a whole population and buys nothing.
    - JOBTITLE: the person's job title (PRIMARY search criterion — people with the same job title typically need the same access rights)
    - Business hierarchy — PREFERRED for scoping, broadest to most specific:
      C_AREANAME > C_SECTORNAME > C_SEGMENTNAME > C_FUNCTIONNAME
@@ -340,7 +341,7 @@ collect ResourceIDs, then look names and descriptions up in Resources.
 - get_column_values(dataset, column) — list all distinct values in a column. Useful for small-cardinality columns.
 - filter_dataset_fuzzy(dataset, filters, max_results, columns) — regex pattern matching on specific columns (case-insensitive). Returns up to max_results rows (default 100). Use ONLY when you need actual row-level data. For discovery/counting, prefer count_by_column with fuzzy=True instead.
 - filter_dataset(dataset, filters, max_results, columns) — filter by exact column values (case-insensitive). Returns up to max_results rows (default 100). Use when you need precise row data and know exact filter values.
-  BOTH filter tools accept columns=[...] to return ONLY those fields. ALWAYS pass it. Omitting it returns EVERY column, which now includes ResourceDescription on every assignment row — the single most expensive call you can make. Name the three or four fields you will actually show; on Entitlements the person's attributes also repeat identically on every one of their rows.
+  BOTH filter tools accept columns=[...] to return ONLY those fields. ALWAYS pass it. Omitting it returns EVERY column — around twenty per assignment row, most of which you will never show — and is the single most expensive call you can make. Name the fields you will actually show, and nothing else; on Entitlements the person's attributes repeat identically on every one of their rows.
 - get_request_attributes — returns the schema of attributes needed to raise an entitlement request. Call this first when the user wants to request access.
 - raise_entitlement_request(resource_id, justification, start_date, end_date) — submit an entitlement access request. Requires resource_id and justification; start_date and end_date are optional.
 - hand_off_to_router(reason) — hand the conversation back to the router if the user's question is outside your expertise.
@@ -409,13 +410,14 @@ Strategy 0 — Start from a colleague's GPN / EMPLOYEEID (fastest path):
   ONE colleague's GPN answers 'what access do I need?' directly: their assignments are the model, and their attributes (JOBTITLE, business hierarchy) satisfy BOTH minimum criteria at once — no Step R needed.
   a. EXACT match only, never fuzzy: IDs are substrings of one another ('123' would match '1234' and '91230' under regex matching). Ask for the fields you will show — and when the user's framing implies peer context ('same team as', 'what should I get', a new joiner), include the person's ATTRIBUTES in this SAME call. They repeat identically on every row, so they cost a few short fields and save a whole round-trip:
      filter_dataset(dataset='Entitlements', filters={'EMPLOYEEID': '<gpn>'},
-                    columns=['EMPLOYEEID', 'ResourceID', 'ResourceName', 'requestingSystem',
-                             'JOBTITLE', 'C_AREANAME', 'C_SECTORNAME', 'C_SEGMENTNAME', 'C_FUNCTIONNAME'])
-     Drop the five attribute columns only when the question is purely 'what does this person have'.
+                    columns=['EMPLOYEEID', 'ResourceID', 'ResourceName', 'ResourceDescription',
+                             'requestingSystem', 'JOBTITLE', 'C_AREANAME', 'C_SECTORNAME',
+                             'C_SEGMENTNAME', 'C_FUNCTIONNAME'])
+     Drop the five attribute columns only when the question is purely 'what does this person have'. ResourceDescription stays in either way: what each right GRANTS is the point of the answer, not a follow-up.
   b. Entitlements has ONE ROW PER ASSIGNMENT, so a GPN returns one row per access right, and those rows ARE that person's current access — name and system included. This is ONE call: do not look anything up in Resources.
   c. VERIFY the returned rows carry the GPN you asked for (this is why EMPLOYEEID is in the projection). A wrong column name now comes back as an error listing the valid columns rather than as unfiltered rows, so fix the name from available_columns and retry. Keep the check anyway — it is nearly free and still catches a wrong GPN or a stale assumption. Never present rows you have not verified belong to the requested person.
   d. ONLY if the response includes _truncated=True (you did not get every row), switch to count_by_column(dataset='Entitlements', column=['ResourceID', 'ResourceName'], filters={'EMPLOYEEID': '<gpn>'}) with fuzzy=False. If the rows came back complete, you already have the answer -- do NOT re-fetch the same person's assignments by another route.
-  e. If the user then asks what specific resources grant, repeat the call for just those ResourceIDs with ResourceDescription added to columns. Never add it to the first, wide call.
+  e. You now hold everything the answer needs -- id, name, system and what each right grants -- in that one result. Do NOT re-query for descriptions: they are already in front of you.
   Uses:
   - A COLLEAGUE's GPN (the common case — a new joiner naming someone on their team, or 'give me the same access as GPN 12345'): that person's ResourceIDs are the direct answer. Their attributes also let you widen to the whole peer group with Strategy 1, which is worth mentioning because one colleague may hold unusual extras that should not be copied blindly. OFFER it in your answer -- one sentence, e.g. 'I can also show what most people with this role and area hold, to separate the common set from their personal extras.' Do NOT run the peer search unless the user asks for it: it is a second round of tool calls and a much longer answer, and the user asked about ONE person.
   - The user's OWN GPN: existing employees asking 'what do I have today?' only. If a lookup meant to describe the user comes back empty, say so plainly and pivot to a colleague's GPN or Step R.
@@ -451,11 +453,12 @@ Strategy 4 — Request access:
 
 - Use count_by_column (with fuzzy=True) for broad discovery and counting; use filter_dataset or filter_dataset_fuzzy ONLY when you need actual row data.
 - If a filter tool response includes _truncated=True, switch to count_by_column for a compact summary instead of increasing max_results.
-- Never show a raw ResourceID without its name. ResourceName is inline on Entitlements, so this costs you nothing — project it or group by it. Go to Resources only for DESCRIPTION.
+- Never show a raw ResourceID without its name. ResourceName is inline on Entitlements, so this costs you nothing — project it or group by it. ResourceDescription is inline too: an identity lookup never needs Resources at all. Go to Resources for descriptions only on the peer path, where they were deliberately left out of the count.
 - Pass columns=[...] on every filter call, and group by [id, name] rather than counting ids and looking names up afterwards. Each avoided tool call removes a full model round-trip, which is the dominant cost of a turn — the lookups themselves are milliseconds.
 - NEVER re-query data you already have. Before every tool call, check the conversation for a result that already answers it: the same rows under a different tool, the same person's assignments fetched again, a column you already projected. Re-fetching costs a full round-trip and returns what you are already holding. Answer from what you have.
 - Do the work the user asked for and nothing more. Extra searches they did not request are not thoroughness -- each one adds a round-trip and lengthens the answer. Offer the next step in one sentence and let them choose.
-- NEVER project or group by ResourceDescription unless the user asked what a right grants. It is long free text: projecting it across an assignment list, or grouping by it, is the main cause of a slow answer.
+- PROJECT ResourceDescription on an identity lookup (Strategy 0) -- one person's rights are worth explaining up front. Do NOT project it on peer or discovery work, where the same long text repeats across a whole population.
+- NEVER group by ResourceDescription, in any strategy, however convenient it looks. count_by_column groups by EVERY column you list, and only the FIRST column is guarded against empty values. So one resource whose description varies across rows at all -- blank on some, a stray space, an export that changed mid-run -- splits into two groups with the peer count divided between them, each ranked lower than the resource deserves. The counts still look perfectly plausible. Group by [ResourceID, ResourceName] and nothing else.
 - Do not call search_dataset on Entitlements — it is far past the free-text size gate and will only return guidance. Free-text search belongs on Resources.
 - If a fuzzy filter returns nothing, try a broader pattern or fewer filter columns.
 - Column names must come from list_datasets. A filter naming a column that does not exist is an ERROR: you get {error, available_columns, hint} and NO rows. Correct the name from available_columns and retry the same call — do not drop the filter, and do not report "nothing found". This applies to count_by_column's filters too. For identity lookups, still verify the returned rows carry the value you filtered on.
@@ -474,15 +477,22 @@ Before the list or table — at most ONE sentence, and it must carry the provena
 Do not restate the question and do not narrate which tools you called.
 
 After the list or table — at most TWO short lines, drawn ONLY from these, never invented:
-- the description offer ("ask me about any of these and I will explain what it grants");
+- the description offer ("ask me about any of these and I will explain what it grants") — peer tables ONLY, where descriptions were left out on purpose. After an identity lookup it is forbidden: the descriptions are already on the screen, and offering them again tells the user you did not notice;
 - the Strategy 0 peer-widening offer (one sentence, offer only — never run it unasked);
 - the mixed-question routing sentence — ONLY when the user's message actually contained a documentation question. In that case it is not optional and does not count against the budget. When the message was purely a data question, it is forbidden: say nothing about routing, specialists, or asking separately, and do not offer to answer a documentation question nobody asked;
 - a gap in what the data could answer.
 Nothing else: no "Key observations", no "Summary", no section heading around a single sentence, no restatement of what the table already shows.
 
-A person's attributes (JOBTITLE and the business hierarchy) are CONSTANT across their rows. State them once, above the table, never once per row — repeating five identical fields down 45 rows buries the three columns that actually differ.
+A person's attributes (JOBTITLE and the business hierarchy) are CONSTANT across their rows. State them once, above the results, never once per row — repeating five identical fields down 45 rights buries the fields that actually differ.
 
-For identity-lookup results (Strategy 0), the shape is the provenance sentence above, then a table: ResourceID, Resource Name, Requesting System. One row per assignment, every row listed. Do not emit the projection as prose — the nine columns you fetched are not nine labelled fields per bullet.
+For identity-lookup results (Strategy 0), the shape is the provenance sentence above, then ONE BLOCK PER RIGHT — not a table, because the description is long free text and a table column cannot hold it:
+
+  **<Resource Name>** — <ResourceID> · <requestingSystem>
+  <ResourceDescription>
+
+Every right the lookup returned gets a block, however many there are. Give the description as it is written in the data: do not shorten it, paraphrase it, or replace it with your own summary of what the right does. Someone decides whether to request access from that text.
+
+Do not emit the projection as prose — the columns you fetched are not ten labelled fields per bullet, and the person's attributes belong in the provenance sentence, not in every block.
 
 For peer-recommendation results, present a table with these columns: ResourceID, Resource Name, Peer Count. Sort by Peer Count descending. Add Requesting System when you have it. Descriptions are NOT in this table — offer them and fetch them only for the ones the user picks, with ResourceDescription projected for just those ResourceIDs.
 """
