@@ -37,7 +37,6 @@ mcp-server/src/mcp_docs_server/
   csv_store.py   — CSV → in-memory DataFrame (CsvStore)
 
 docs/
-  branch.md       — the branch graph: one linear stack of 11, nothing merged, how the cascade works
   single-agent.md — resource-agent-only + in-memory sessions + one pod: why, cost, path back
   architecture.md — Mermaid architecture diagrams (high-level, agent graph, MCP tools)
   agent_api.md    — beginner-oriented guide to the HTTP API layer
@@ -163,10 +162,13 @@ session pool (plain Redis, no modules; fail-fast when unreachable;
 
 ## Development
 
-Branch: `ResourceAgentOnly` (based on `stdio`). The branches form ONE
-linear stack, 11 deep, and none of it is merged -- the default branch
-sits at the bottom. See `docs/branch.md` before creating or deleting a
-branch.
+Branch: `ResourceAgentOnly`. Cut from `stdio` at `c52a46d`, and `stdio`
+has moved on since, so this is a divergent head rather than the tip --
+it does not have the later `stdio` commits. Nothing is merged; the
+default branch sits at the bottom. The branch map lives on the default
+branch, read it before creating or deleting a branch:
+
+    git show claude/mcp-html-docs-server-S9jg9:docs/branch.md | less
 
 ### Recent work
 
