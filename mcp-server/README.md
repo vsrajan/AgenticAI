@@ -13,7 +13,7 @@ retrievable for AI agents. Built with
 │  ┌────────────────┐                  │
 │  │   server.py    │  MCP tools       │
 │  │  (FastMCP app) │  exposed over    │
-│  └──┬─────────┬───┘  stdio / SSE    │
+│  └──┬─────────┬───┘  stdio / HTTP   │
 │     │         │                      │
 │  ┌──▼──────┐ ┌▼───────────┐         │
 │  │pdf_     │ │csv_store.py│         │
@@ -37,7 +37,8 @@ retrievable for AI agents. Built with
 1. **Startup** — The server scans `docs/` for PDF files and CSV files. PDFs are
    text-extracted using PyMuPDF and indexed with BM25. CSVs are loaded with
    dynamic column discovery and each gets its own BM25 index.
-2. **Agent queries** — An agent connects over MCP (stdio or SSE transport) and
+2. **Agent queries** — An agent connects over MCP (stdio locally, or
+   streamable-http across machines; sse is the legacy HTTP option) and
    calls tools to browse, search, and read documentation or query structured data.
 3. **Response flow** — The agent uses PDF tools to find and read documentation,
    and CSV tools to search, filter, and explore structured datasets like access
@@ -105,12 +106,37 @@ cp .env.example .env
 |---|---|---|
 | `MCP_SERVER_NAME` | Server name (identifier for clients) | `access-governance-docs` |
 | `MCP_DOCS_DIR` | Path to docs directory (PDFs and CSVs) | `docs/` (relative to project) |
-| `MCP_TRANSPORT` | `stdio`, `sse`, or `streamable-http` | `stdio` |
-| `MCP_HOST` | Bind address (SSE/HTTP only) | `127.0.0.1` |
-| `MCP_PORT` | Bind port (SSE/HTTP only) | `8000` |
+| `MCP_TRANSPORT` | `stdio`, `streamable-http` (recommended HTTP), or `sse` (legacy HTTP) | `stdio` |
+| `MCP_HOST` | Bind address (HTTP transports only) | `127.0.0.1` |
+| `MCP_PORT` | Bind port (HTTP transports only) | `8000` |
+| `MCP_STATELESS_HTTP` | Stateless streamable-http: any replica can answer any request (needed behind a load balancer) | `true` |
 | `MCP_LOG_LEVEL` | Logging level | `INFO` |
 | `MCP_AUTH` | `static` (bearer tokens, fail-closed) or `none` (open; local dev only) | `static` |
 | `MCP_AUTH_TOKENS` | Comma-separated `name:token` pairs, one per agent deployment | unset (required in static mode) |
+
+## Data layer
+
+CSV datasets are served from an embedded **DuckDB** database rather
+than in-process Python structures, so filters and counts stay in the
+low milliseconds at millions of rows (measured: 25 ms for a filtered
+group-by over 5M rows) and memory stays bounded (columnar storage on
+disk; ~100 MB resident for a 5M-row dataset).
+
+- The database persists to `MCP_DB_PATH` (default:
+  `<docs dir>/.mcp_data.duckdb`). Warm starts skip ingestion entirely;
+  CSVs are re-ingested only when they change (fingerprint check).
+  Deleting the file is always safe -- it is rebuilt from source.
+- A background sweeper re-checks the source every
+  `MCP_DATA_REFRESH_MINUTES` (default 15; 0 disables). Reloads are
+  atomic: queries running during a reload see the old data until the
+  commit. `list_datasets` reports `synced_at`.
+- Full-text search (`search_dataset`) is size-gated: datasets larger
+  than `MCP_SEARCH_MAX_ROWS` (default 50000) get no BM25 index and the
+  tool returns guidance to use the filter/count tools instead.
+- Ingestion is pluggable (`data_sources.py`): `CsvDataSource` today; a
+  documented `DatabaseSource` stub reserves the production path where
+  rows come from Azure SQL / Postgres via batch sync -- see
+  `docs/P0.md` section 11 for the runbook.
 
 ## Authentication
 
@@ -183,7 +209,10 @@ configuration is needed — just drop the file in and restart the server.
 # stdio transport (default — for local agent connections)
 uv run mcp-docs-server
 
-# SSE transport (for remote agent connections)
+# streamable-http transport (for remote agent connections; serves /mcp)
+MCP_TRANSPORT=streamable-http uv run mcp-docs-server
+
+# sse transport (legacy HTTP; serves /sse — kept for rollback)
 MCP_TRANSPORT=sse uv run mcp-docs-server
 ```
 

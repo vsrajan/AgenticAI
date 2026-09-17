@@ -787,6 +787,58 @@ on Azure, prefer a managed identity (`msal` supports it via
   header lands on the request and that acquisition failure raises.
 - Static mode remains the integration-test path (fast, no tenant).
 
+### 4.7 Multi-agent consumers: the trigger for building leg 2
+
+A stated goal of the MCP server is that agents beyond Agnes consume
+its tools. Most of what that needs already exists: per-agent tokens
+with independent revocation, caller identity in every audit line, a
+stateless transport any MCP client can speak, and dynamic tool
+discovery (a new agent needs a URL, a credential, and an MCP client
+library -- none of Agnes's code). The NETWORK side of enablement --
+NetworkPolicy allowlisting inside the cluster, an internal
+LoadBalancer or ingress route plus mandatory TLS for consumers
+outside it -- is covered in [aks.md](aks.md) section 12.
+
+What does NOT exist yet is per-agent AUTHORIZATION, and that is the
+gap that makes leg 2 worth building the moment a second consumer
+appears:
+
+**Today authentication is all-or-nothing.** Any agent presenting a
+valid token gets all 12 tools -- including `raise_entitlement_request`,
+a WRITE. For Agnes alone that is fine. For an HR reporting bot it is
+not: it should search docs and read data, and be PHYSICALLY unable to
+raise entitlement requests.
+
+**The proper fix is Choice 2 above** (app roles -> tool groups):
+each consuming agent's registration is assigned only the roles it
+needs (`Tools.Knowledgebase`, `Tools.Resource`, `Tools.Quality`,
+`Tools.Request`), the verifier copies the token's `roles` claim into
+`AccessToken.scopes`, and a small per-tool-group check enforces it.
+Authorization then lives in Entra where security teams manage it --
+granting a new agent access is an app-role assignment, not a config
+deploy.
+
+**Interim static variant, if a second consumer arrives before leg 2
+is built:** extend the static token config with tool groups, e.g.
+
+```
+MCP_AUTH_TOKENS=agnes:tok1:all,hr-bot:tok2:knowledgebase+resource
+```
+
+parse the third field in `parse_agent_tokens`, stash it in the same
+`AccessToken.scopes` field the Entra verifier will use, and add the
+same per-tool-group check. Deliberately shaped so the enforcement
+code is written ONCE and only the token SOURCE changes when Entra
+lands. A modest, contained change (auth.py + a decorator-level check
+in server.py) -- but if leg 2 is weeks away, skip the interim and
+build it properly.
+
+**Also on the checklist for a second consumer** (from aks.md s12):
+capacity/noisy-neighbor review (the per-call `caller=X took=ms` logs
+give per-agent usage), tool schemas becoming an API contract
+(additive changes only), and a data-access review -- a new consumer
+of entitlement data is a governance conversation, not just a token.
+
 ---
 
 ## 5. Rollout plan and checklist

@@ -1,7 +1,19 @@
-"""PDF document indexer with BM25 search support."""
+"""PDF document indexer with page-level BM25 search.
+
+Indexing and retrieval work at PAGE granularity (P1.1):
+
+- the BM25 corpus holds one entry per non-empty PDF page, so search
+  hits point at the specific page that matched, and ranking precision
+  grows with the corpus instead of degrading (pages compete with
+  pages, not 60-page handbooks against 2-page FAQs)
+- read() accepts an optional page selection ("3" or "2-5") and returns
+  only those pages -- tool results shrink by roughly document-size /
+  pages-needed, which is what cuts prompt tokens per knowledgebase turn
+- called without a selection, read() returns the whole document, so
+  existing callers keep working unchanged
+"""
 
 import logging
-import os
 import re
 from pathlib import Path
 
@@ -16,41 +28,37 @@ def _tokenize(text: str) -> list[str]:
     return re.findall(r"\w+", text.lower())
 
 
-def _extract_text(pdf_path: str) -> tuple[str, int]:
-    """Extract all text from a PDF file using PyMuPDF.
+def _extract_pages(pdf_path: str) -> list[str]:
+    """Extract text per page using PyMuPDF.
 
-    Each page is prefixed with a ``[Page N]`` marker so that downstream
-    consumers (e.g. LLM agents) can cite the specific PDF page.
-
-    Returns:
-        A tuple of (full_text, total_page_count).
+    Index i holds page i+1's text. Blank pages are kept as "" so page
+    NUMBERING is preserved -- page 3 stays page 3 even when page 2 is
+    blank -- they just do not enter the search index.
     """
     doc = pymupdf.open(pdf_path)
-    pages: list[str] = []
-    for page in doc:
-        text = page.get_text("text")
-        if text.strip():
-            # page.number is 0-based; display as 1-based
-            pages.append(f"[Page {page.number + 1}]\n{text.strip()}")
-    total_pages = len(doc)
+    pages = [page.get_text("text").strip() for page in doc]
     doc.close()
-    return "\n\n".join(pages), total_pages
+    return pages
 
 
 class DocIndex:
-    """Indexes PDF documents in a directory and provides search/retrieval."""
+    """Indexes PDF documents in a directory; page-level search/retrieval."""
 
     def __init__(self, docs_dir: str) -> None:
         self.docs_dir = Path(docs_dir)
-        self._documents: dict[str, str] = {}  # path -> extracted text
-        self._page_counts: dict[str, int] = {}  # path -> total PDF pages
+        self._pages: dict[str, list[str]] = {}  # path -> per-page text
         self._topic_tree: dict[str, list[str]] = {}  # topic -> [filenames]
         self._bm25: BM25Okapi | None = None
-        self._doc_keys: list[str] = []  # ordered keys matching BM25 corpus
+        self._index_keys: list[tuple[str, int]] = []  # (path, 1-based page)
         self._build_index()
 
+    # kept for compatibility with the startup log in server.py
+    @property
+    def _documents(self) -> dict[str, list[str]]:
+        return self._pages
+
     def _build_index(self) -> None:
-        """Scan the docs directory, extract text, and build the BM25 index."""
+        """Scan the docs directory, extract pages, build the BM25 index."""
         if not self.docs_dir.exists():
             logger.warning("Docs directory does not exist: %s", self.docs_dir)
             return
@@ -60,34 +68,36 @@ class DocIndex:
         for pdf_path in sorted(self.docs_dir.rglob("*.pdf")):
             rel_path = str(pdf_path.relative_to(self.docs_dir))
             try:
-                text, total_pages = _extract_text(str(pdf_path))
+                pages = _extract_pages(str(pdf_path))
             except Exception:
                 logger.exception("Failed to read %s, skipping", rel_path)
                 continue
-            if not text:
+            if not any(pages):
                 logger.warning("No text extracted from %s, skipping", rel_path)
                 continue
 
-            self._documents[rel_path] = text
-            self._page_counts[rel_path] = total_pages
-            logger.debug("Indexed %s (%d pages)", rel_path, total_pages)
+            self._pages[rel_path] = pages
+            logger.debug("Indexed %s (%d pages)", rel_path, len(pages))
 
-            # Build topic tree from directory structure.
-            # Files in subdirectories are grouped by directory name.
-            # Files at the root level go under "general".
+            # topic tree from directory structure; root files -> "general"
             parts = Path(rel_path).parts
             topic = parts[0] if len(parts) > 1 else "general"
             self._topic_tree.setdefault(topic, []).append(rel_path)
 
-        # Build BM25 index
-        self._doc_keys = list(self._documents.keys())
-        if self._doc_keys:
-            corpus = [_tokenize(self._documents[k]) for k in self._doc_keys]
+        # one BM25 entry per non-empty page
+        corpus: list[list[str]] = []
+        keys: list[tuple[str, int]] = []
+        for path, pages in self._pages.items():
+            for page_no, text in enumerate(pages, start=1):
+                if text:
+                    keys.append((path, page_no))
+                    corpus.append(_tokenize(text))
+        self._index_keys = keys
+        if corpus:
             self._bm25 = BM25Okapi(corpus)
             logger.info(
-                "BM25 index built: %d documents, %d topics",
-                len(self._doc_keys),
-                len(self._topic_tree),
+                "BM25 index built: %d documents, %d pages, %d topics",
+                len(self._pages), len(corpus), len(self._topic_tree),
             )
         else:
             logger.warning("No documents found to index")
@@ -100,12 +110,18 @@ class DocIndex:
             "topics": {
                 topic: sorted(pages) for topic, pages in sorted(self._topic_tree.items())
             },
-            "total_documents": len(self._documents),
+            "total_documents": len(self._pages),
         }
 
     def search(self, query: str, max_results: int = 5) -> list[dict]:
-        """Search documents using BM25 ranking. Returns snippets with paths."""
-        if not self._bm25 or not self._doc_keys:
+        """Page-level BM25 search.
+
+        Each result names the specific PAGE that matched, with a
+        snippet taken from that page -- pass page_path and the page
+        number to read(). Multiple pages of one document can appear as
+        separate results.
+        """
+        if not self._bm25 or not self._index_keys:
             return [{"message": "No documents indexed."}]
 
         tokens = _tokenize(query)
@@ -113,74 +129,103 @@ class DocIndex:
             return [{"message": "Empty query."}]
 
         scores = self._bm25.get_scores(tokens)
-
-        # Pair scores with doc keys and sort descending
-        scored = sorted(zip(scores, self._doc_keys), reverse=True)
+        ranked = sorted(zip(scores, self._index_keys), reverse=True)
 
         results = []
-        for score, key in scored[:max_results]:
+        for score, (path, page_no) in ranked[:max_results]:
             if score <= 0:
                 break
-            text = self._documents[key]
-            snippet = _make_snippet(text, tokens)
+            page_text = self._pages[path][page_no - 1]
             results.append({
-                "page_path": key,
-                "total_pages": self._page_counts[key],
+                "page_path": path,
+                "page": page_no,
+                "total_pages": len(self._pages[path]),
                 "score": round(float(score), 3),
-                "snippet": snippet,
+                "snippet": _make_snippet(page_text, tokens),
             })
 
         if not results:
             return [{"message": "No matching documents found.", "query": query}]
         return results
 
-    def read(self, page_path: str) -> dict:
-        """Read the full text content of a document by its path."""
-        if page_path in self._documents:
+    def _resolve_path(self, page_path: str) -> str | None:
+        """Exact match, then fuzzy (suffix / stem) like before."""
+        if page_path in self._pages:
+            return page_path
+        for key in self._pages:
+            if key.endswith(page_path) or Path(key).stem == Path(page_path).stem:
+                return key
+        return None
+
+    def read(self, page_path: str, pages: str = "") -> dict:
+        """Read a document -- whole, or just a page selection.
+
+        pages selects what to return: "3" for one page, "2-5" for a
+        range, empty for the full document (backward compatible).
+        Content keeps the [Page N] markers either way, so citations
+        work identically.
+        """
+        path = self._resolve_path(page_path)
+        if path is None:
             return {
-                "page_path": page_path,
-                "total_pages": self._page_counts[page_path],
-                "content": self._documents[page_path],
+                "error": f"Page not found: {page_path}",
+                "available_pages": list(self._pages.keys()),
             }
 
-        # Try fuzzy match — user might omit directory or extension
-        for key in self._documents:
-            if key.endswith(page_path) or Path(key).stem == Path(page_path).stem:
-                return {
-                    "page_path": key,
-                    "total_pages": self._page_counts[key],
-                    "content": self._documents[key],
-                }
+        doc_pages = self._pages[path]
+        total = len(doc_pages)
 
-        available = list(self._documents.keys())
+        if not pages.strip():
+            start, end = 1, total
+            returned = "all"
+        else:
+            match = re.fullmatch(r"\s*(\d+)\s*(?:-\s*(\d+)\s*)?", pages)
+            if not match:
+                return {
+                    "error": (f"Invalid pages selection {pages!r}: use a single "
+                              f"page like '3' or a range like '2-5'."),
+                    "total_pages": total,
+                }
+            start = int(match.group(1))
+            end = int(match.group(2) or start)
+            if start < 1 or end > total or start > end:
+                return {
+                    "error": (f"Pages {pages!r} out of range: {path} has "
+                              f"pages 1-{total}."),
+                    "total_pages": total,
+                }
+            returned = f"{start}-{end}" if end != start else str(start)
+
+        content = "\n\n".join(
+            f"[Page {page_no}]\n{doc_pages[page_no - 1]}"
+            for page_no in range(start, end + 1)
+            if doc_pages[page_no - 1]
+        )
         return {
-            "error": f"Page not found: {page_path}",
-            "available_pages": available,
+            "page_path": path,
+            "total_pages": total,
+            "pages_returned": returned,
+            "content": content,
         }
 
 
 def _make_snippet(text: str, query_tokens: list[str], max_length: int = 300) -> str:
-    """Extract a relevant snippet from the document around matching terms."""
+    """Extract a relevant snippet from the text around matching terms."""
     text_lower = text.lower()
     best_pos = 0
     best_density = 0
 
-    # Slide a window and find the region with the most query term hits
     window = max_length
-    for i in range(0, len(text_lower) - window, window // 4):
-        chunk = text_lower[i : i + window]
+    for i in range(0, max(1, len(text_lower) - window), max(1, window // 4)):
+        chunk = text_lower[i: i + window]
         density = sum(1 for t in query_tokens if t in chunk)
         if density > best_density:
             best_density = density
             best_pos = i
 
-    start = max(0, best_pos)
-    snippet = text[start : start + max_length].strip()
-
-    # Clean up snippet boundaries
-    if start > 0:
+    snippet = text[best_pos: best_pos + max_length].strip()
+    if best_pos > 0:
         snippet = "..." + snippet
-    if start + max_length < len(text):
+    if best_pos + max_length < len(text):
         snippet = snippet + "..."
-
     return snippet

@@ -10,15 +10,16 @@ PDF documentation and CSV data served via an
 ```
                           agent-client                    mcp-server
                      ┌─────────────────────┐        ┌──────────────────┐
-User  ──▶  CLI  ──▶  │  LangGraph ReAct    │──SSE──▶│  MCP server      │
-                     │  agent              │  or    │  (PDFs + CSVs)   │
-                     │      │              │ stdio  │                  │
-                     │  AzureOpenAI LLM    │        │  host:port       │
-                     └─────────────────────┘        └──────────────────┘
+User  ──▶  CLI  ──▶  │  LangGraph ReAct    │──HTTP──▶│ MCP server      │
+                     │  agent              │  or     │ (PDFs + CSVs)   │
+                     │      │              │ stdio   │                 │
+                     │  AzureOpenAI LLM    │         │ host:port       │
+                     └─────────────────────┘         └─────────────────┘
 ```
 
-The agent connects to an **already-running** MCP server over **SSE** (default)
-or **stdio**, loads all available tools, and uses them in a ReAct loop to answer
+The agent connects to an **already-running** MCP server over
+**streamable-http** (default; sse remains as the legacy HTTP option) or
+**stdio**, loads all available tools, and uses them in a ReAct loop to answer
 questions with cited sources and structured data.
 
 The client is completely decoupled from the server — it does **not** start or
@@ -86,8 +87,8 @@ Key variables:
 | `AZURE_OPENAI_API_VERSION` | API version | `2024-12-01-preview` |
 | `AGENT_LOG_LEVEL` | Logging level | `INFO` |
 | `MCP_SERVER_NAME` | Server name (must match the MCP server) | `access-governance-docs` |
-| `MCP_TRANSPORT` | `sse` or `stdio` | `sse` |
-| `MCP_SERVER_URL` | Server URL (SSE only) | `http://127.0.0.1:8000/sse` |
+| `MCP_TRANSPORT` | `streamable-http`, `sse` (legacy), or `stdio` | `streamable-http` |
+| `MCP_SERVER_URL` | Server URL (HTTP transports) | `http://127.0.0.1:8000/mcp` |
 | `MCP_SERVER_COMMAND` | Command to pipe (stdio only) | — |
 | `MCP_SERVER_ARGS` | Command args (stdio only) | — |
 
@@ -99,7 +100,7 @@ Set `AGENT_LOG_LEVEL=WARNING` to suppress verbose INFO logs on the client.
 
 ```bash
 cd ../mcp-server
-MCP_TRANSPORT=sse uv run mcp-docs-server
+MCP_TRANSPORT=streamable-http uv run mcp-docs-server
 ```
 
 **2. Start the agent client**:
