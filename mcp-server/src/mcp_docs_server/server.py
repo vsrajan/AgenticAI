@@ -22,10 +22,12 @@ Run with:
     uv run mcp-docs-server
 """
 
+import functools
 import json
 import logging
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -63,15 +65,28 @@ DOCS_DIR = os.environ.get(
     str(Path(__file__).resolve().parents[2] / "docs"),
 )
 
-# Transport configuration
-MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio")
+# Transport configuration. streamable-http is the recommended HTTP
+# transport (one /mcp endpoint, works behind load balancers); sse is
+# the legacy HTTP transport, kept for rollback; stdio is the local
+# child-process default. Hyphen and underscore spellings both accepted.
+MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio").lower().replace("_", "-")
 MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.environ.get("MCP_PORT", "8000"))
 MCP_SERVER_NAME = os.environ.get("MCP_SERVER_NAME", "access-governance-docs")
 
+# Stateless streamable-http: every request is self-contained, so any
+# server replica can answer it -- required for running more than one
+# copy behind a load balancer (e.g. Kubernetes). Costs one extra
+# initialize round-trip per tool call; ignored by sse and stdio.
+MCP_STATELESS_HTTP = os.environ.get("MCP_STATELESS_HTTP", "true").lower() in ("1", "true", "yes")
+
 logger.info("Docs directory: %s", DOCS_DIR)
 logger.info("Server name: %s", MCP_SERVER_NAME)
-logger.info("Transport: %s (host=%s, port=%d)", MCP_TRANSPORT, MCP_HOST, MCP_PORT)
+logger.info(
+    "Transport: %s (host=%s, port=%d, stateless=%s)",
+    MCP_TRANSPORT, MCP_HOST, MCP_PORT,
+    MCP_STATELESS_HTTP if MCP_TRANSPORT == "streamable-http" else "n/a",
+)
 
 # -- Authentication --
 # HTTP transports require a bearer token per agent (see auth.py).
@@ -102,6 +117,28 @@ def _caller() -> str:
     return access_token.client_id if access_token else "anonymous"
 
 
+def _timed(fn):
+    """Log every tool call's duration with the calling agent.
+
+    Applied under @mcp.tool() on every tool. functools.wraps keeps the
+    original name/docstring, and inspect.signature follows __wrapped__,
+    so FastMCP still derives the tool schema from the real function.
+    These log lines are the per-tool half of the P0 instrumentation --
+    the agent side logs per-node and per-turn durations.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            logger.info(
+                "%s caller=%s took=%.1fms",
+                fn.__name__, _caller(), (time.perf_counter() - start) * 1000,
+            )
+    return wrapper
+
+
 mcp = FastMCP(
     MCP_SERVER_NAME,
     host=MCP_HOST,
@@ -109,6 +146,7 @@ mcp = FastMCP(
     log_level=LOG_LEVEL,
     token_verifier=_token_verifier,
     auth=_auth_settings,
+    stateless_http=MCP_STATELESS_HTTP,
     instructions=(
         "This server provides documentation and data for an enterprise Access "
         "Governance application.\n\n"
@@ -133,10 +171,11 @@ index = DocIndex(DOCS_DIR)
 logger.info("PDF index ready: %d documents", len(index._documents))
 
 csv_store = CsvStore(DOCS_DIR)
-logger.info("CSV store ready: %d datasets", len(csv_store._datasets))
+logger.info("Data store ready: %d datasets", len(csv_store.dataset_names))
 
 
 @mcp.tool()
+@_timed
 def list_topics() -> dict:
     """List all available documentation topics and their pages.
 
@@ -148,6 +187,7 @@ def list_topics() -> dict:
 
 
 @mcp.tool()
+@_timed
 def search_docs(query: str, max_results: int = 5) -> list[dict]:
     """Search the documentation for a query.
 
@@ -168,6 +208,7 @@ def search_docs(query: str, max_results: int = 5) -> list[dict]:
 
 
 @mcp.tool()
+@_timed
 def read_page(page_path: str) -> dict:
     """Read the full text content of a documentation page.
 
@@ -191,6 +232,7 @@ def read_page(page_path: str) -> dict:
 
 
 @mcp.tool()
+@_timed
 def list_datasets() -> dict:
     """List all available CSV datasets, their columns, and row counts.
 
@@ -202,6 +244,7 @@ def list_datasets() -> dict:
 
 
 @mcp.tool()
+@_timed
 def search_dataset(dataset: str, query: str, max_results: int = 10) -> list[dict]:
     """Full-text search across all columns of a CSV dataset.
 
@@ -219,6 +262,7 @@ def search_dataset(dataset: str, query: str, max_results: int = 10) -> list[dict
 
 
 @mcp.tool()
+@_timed
 def filter_dataset(dataset: str, filters: dict[str, str], max_results: int = 100) -> list[dict]:
     """Filter rows in a CSV dataset by exact column values (case-insensitive).
 
@@ -241,6 +285,7 @@ def filter_dataset(dataset: str, filters: dict[str, str], max_results: int = 100
 
 
 @mcp.tool()
+@_timed
 def filter_dataset_fuzzy(dataset: str, filters: dict[str, str], max_results: int = 100) -> list[dict]:
     """Filter rows in a CSV dataset using regex pattern matching (case-insensitive).
 
@@ -269,6 +314,7 @@ def filter_dataset_fuzzy(dataset: str, filters: dict[str, str], max_results: int
 
 
 @mcp.tool()
+@_timed
 def count_by_column(
     dataset: str, column: str, filters: dict[str, str] | None = None,
     fuzzy: bool = False,
@@ -304,6 +350,7 @@ def count_by_column(
 
 
 @mcp.tool()
+@_timed
 def get_column_values(dataset: str, column: str) -> list[str] | dict:
     """List all distinct values in a column of a CSV dataset.
 
@@ -334,6 +381,7 @@ def _load_request_config() -> dict:
 
 
 @mcp.tool()
+@_timed
 def get_request_attributes() -> dict:
     """Get the attributes required to raise an entitlement request.
 
@@ -346,6 +394,7 @@ def get_request_attributes() -> dict:
 
 
 @mcp.tool()
+@_timed
 def raise_entitlement_request(
     resource_id: str,
     justification: str,
@@ -402,6 +451,7 @@ def _load_quality_criteria() -> dict:
 
 
 @mcp.tool()
+@_timed
 def get_quality_criteria() -> dict:
     """Get the data quality criteria checklist for resource evaluation.
 

@@ -283,6 +283,11 @@ class AgentService:
           on_chain_end -> node output appended to the stream file (when enabled)
           end of run -> one answer event with the full text
 
+        Also measures durations (the agent-side half of the P0
+        instrumentation): each node's elapsed time is written into its
+        stream-file entry, and a per-turn summary line splits the turn
+        into agent (LLM) time vs tool time.
+
         Raises UnknownSessionError for ids that were never created or
         have been evicted.
         """
@@ -290,6 +295,13 @@ class AgentService:
         config = self._config(session_id)
         answer_parts: list[str] = []
         stream_fh = self._open_stream_file(session_id)
+
+        # per-node timing: a node's own start/end events carry the node
+        # name in event["name"] (child runnables inherit the metadata
+        # but not the name, so this filter times the node itself)
+        turn_start = time.perf_counter()
+        node_started: dict[str, float] = {}
+        node_totals: dict[str, float] = {}
 
         try:
             # one turn at a time per session: a second message on the same
@@ -312,6 +324,8 @@ class AgentService:
 
                     if kind == "on_chain_start":
                         node = event.get("metadata", {}).get("langgraph_node", "")
+                        if node and event.get("name") == node and node not in node_started:
+                            node_started[node] = time.perf_counter()
                         phase = _NODE_PHASES.get(node)
                         if phase:
                             yield AgentEvent("phase", phase)
@@ -324,16 +338,37 @@ class AgentService:
                             yield AgentEvent("token", chunk.content)
 
                     # log each completed node's output for tail -f, exactly
-                    # like the CLI loop does
-                    if kind == "on_chain_end" and stream_fh:
+                    # like the CLI loop does -- now with the node's duration
+                    if kind == "on_chain_end":
                         node = event.get("metadata", {}).get("langgraph_node", "")
-                        if node:
+                        took = None
+                        if node and event.get("name") == node and node in node_started:
+                            took = time.perf_counter() - node_started.pop(node)
+                            node_totals[node] = node_totals.get(node, 0.0) + took
+                        if stream_fh and node:
+                            tag = f"{node}, session: {session_id}"
+                            if took is not None:
+                                tag += f", took={took:.2f}s"
                             output = event.get("data", {}).get("output", {})
                             msgs = output.get("messages", []) if isinstance(output, dict) else []
                             for msg in msgs:
-                                _write_stream_entry(
-                                    stream_fh, msg, f"{node}, session: {session_id}"
-                                )
+                                _write_stream_entry(stream_fh, msg, tag)
+
+                # turn summary: agent (LLM) nodes vs tool nodes -- the
+                # split that tells you where a slow turn actually went
+                total = time.perf_counter() - turn_start
+                tool_time = sum(v for k, v in node_totals.items() if k.endswith("_tools"))
+                agent_time = sum(v for k, v in node_totals.items() if not k.endswith("_tools"))
+                logger.info(
+                    "session %s turn done in %.1fs (agent nodes %.1fs, tool nodes %.1fs)",
+                    session_id, total, agent_time, tool_time,
+                )
+                if stream_fh:
+                    stream_fh.write(
+                        f"--- turn done in {total:.1f}s "
+                        f"(agent nodes {agent_time:.1f}s, tool nodes {tool_time:.1f}s) ---\n\n"
+                    )
+                    stream_fh.flush()
 
                 # a long turn should not count against the idle TTL
                 session.last_used = time.monotonic()
