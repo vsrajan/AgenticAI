@@ -43,6 +43,7 @@ docs/
   deploy.md       — deployment guide: podman local builds (registry-free), Helm chart, GitLab CI kaniko, dev->test->uat->prod
   podman.md       — step-by-step local container smoke test (branch stdio): engine check, rootless UID/SELinux traps, build, image inspection, Redis + 2 containers + nginx rig, verification checklist, probe/resource measurements
   single-container-stdio.md — why the agent and MCP server share ONE container (stdio has no auth layer); the cost, and the path back
+  resource-requirements.md — what the Resource specialist is for, stated against today's capability; which parts a conventional GPN/OU lookup application could not do, and which parts it would do better
 
 deploy/ (branch AKS-DEPLOY)
   chart/          — ONE Helm chart for both services (deployments incl. parquet initContainer, services, ingress, networkpolicy, HPA, PDBs, SecretProviderClass, configmaps)
